@@ -1,0 +1,20 @@
+{
+  "id": "sample-harbor-dusk",
+  "name": "Harbor dusk",
+  "description": "Sample shot list. Render all with Mock — camera motion only, ffmpeg Ken Burns, no API key and no GPU. Export stitches completed clips into one mp4.",
+  "image": "harbor-dusk.png",
+  "shots": [
+    {
+      "id": "sample-harbor-dusk-shot-1",
+      "prompt": "Slow push toward the lanterns as the tide slides under the pier.",
+      "presetId": "slow-zoom-in",
+      "durationSec": 4
+    },
+    {
+      "id": "sample-harbor-dusk-shot-2",
+      "prompt": "The camera drifts right along the water as the sky cools.",
+      "presetId": "pan-right",
+      "durationSec": 4
+    }
+  ]
+}

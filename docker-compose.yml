@@ -1,0 +1,11 @@
+services:
+  star-dust:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
+    restart: unless-stopped
