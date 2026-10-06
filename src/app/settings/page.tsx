@@ -10,8 +10,11 @@ const EMPTY_ENV: StudioEnv = {
   hasFalKey: false,
   hasReplicateToken: false,
   hostedCredits: false,
+  stripeCredits: false,
+  paypalCredits: false,
   creditBalance: null,
   creditPacks: [],
+  paypalPacks: [],
   packUnlocked: false,
   packWorkflows: [],
 };
@@ -44,6 +47,12 @@ export default function SettingsPage() {
       setCreditNote(
         "Stripe accepted the payment. The balance updates when the webhook confirms it. Opening this page does not add credits."
       );
+    } else if (flag === "paypal") {
+      setCreditNote(
+        "PayPal captured the payment. The balance on this page includes that pack. Opening this page again does not add credits."
+      );
+    } else if (flag === "paypal-error") {
+      setCreditNote("PayPal did not capture the payment. No credits were added.");
     } else if (flag === "cancel") {
       setCreditNote("Checkout was cancelled. No credits were added.");
     }
@@ -91,15 +100,19 @@ export default function SettingsPage() {
     setSettings(await res.json());
   }
 
-  async function buy(packId: string) {
-    setBuying(packId);
+  async function buy(provider: "stripe" | "paypal", packId: string) {
+    const key = `${provider}:${packId}`;
+    setBuying(key);
     setMessage(null);
     try {
-      const res = await fetch("/api/credits/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ packId }),
-      });
+      const res = await fetch(
+        provider === "paypal" ? "/api/credits/paypal/checkout" : "/api/credits/checkout",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ packId }),
+        }
+      );
       const data = await res.json();
       if (!res.ok || typeof data.url !== "string") {
         throw new Error(data.error || "Could not start checkout.");
@@ -191,7 +204,8 @@ export default function SettingsPage() {
         <section className="panel space-y-4 p-6">
           <h2 className="text-sm font-semibold text-violet-200">Hosted credits</h2>
           <p className="text-xs leading-relaxed text-[var(--muted)]">
-            One-time Stripe packs for this installation. Not a subscription. Mock,
+            One-time credit packs for this installation. Not a subscription. Stripe
+            and PayPal add to the same balance when each is configured. Mock,
             preview cut, and stitch do not spend credits. A paid fal or Replicate
             Render all does, and it is blocked when the balance is too low.
           </p>
@@ -201,19 +215,34 @@ export default function SettingsPage() {
           </p>
           {creditNote && <p className="text-xs text-amber-100">{creditNote}</p>}
           <div className="flex flex-wrap gap-2">
-            {settings.env.creditPacks.map((pack) => (
-              <button
-                key={pack.id}
-                type="button"
-                className="btn-primary"
-                disabled={buying !== null}
-                onClick={() => void buy(pack.id)}
-              >
-                {buying === pack.id
-                  ? "Opening checkout…"
-                  : `Buy ${pack.label} (${pack.credits} credits)`}
-              </button>
-            ))}
+            {settings.env.stripeCredits &&
+              settings.env.creditPacks.map((pack) => (
+                <button
+                  key={`stripe-${pack.id}`}
+                  type="button"
+                  className="btn-primary"
+                  disabled={buying !== null}
+                  onClick={() => void buy("stripe", pack.id)}
+                >
+                  {buying === `stripe:${pack.id}`
+                    ? "Opening checkout…"
+                    : `Buy ${pack.label} (${pack.credits} credits)`}
+                </button>
+              ))}
+            {settings.env.paypalCredits &&
+              settings.env.paypalPacks.map((pack) => (
+                <button
+                  key={`paypal-${pack.id}`}
+                  type="button"
+                  className="btn-primary"
+                  disabled={buying !== null}
+                  onClick={() => void buy("paypal", pack.id)}
+                >
+                  {buying === `paypal:${pack.id}`
+                    ? "Opening PayPal…"
+                    : `Buy ${pack.label} with PayPal (${pack.credits} credits, ${pack.amount} ${pack.currency})`}
+                </button>
+              ))}
             <button type="button" className="btn-ghost" onClick={() => void refreshBalance()}>
               Refresh balance
             </button>
@@ -401,7 +430,7 @@ export default function SettingsPage() {
           environment and is not sent anywhere.
           {settings.env.hostedCredits
             ? " Hosted credit packs are on for this process."
-            : " Hosted credit packs stay hidden until Stripe is configured."}
+            : " Hosted credit packs stay hidden until Stripe or PayPal is configured."}
         </p>
         <p className="text-sm text-white">
           {settings.env.packUnlocked ? "Pack unlocked." : "Pack locked. Core providers still run."}

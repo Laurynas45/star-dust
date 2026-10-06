@@ -1,4 +1,4 @@
-import { hostedCreditsEnabled, packById, packByPriceId, grantPackCredits } from "./credits";
+import { stripeCreditsEnabled, packById, packByPriceId, grantPackCredits } from "./credits";
 
 export type CheckoutRequest = {
   mode: "payment";
@@ -37,7 +37,7 @@ export async function createCreditCheckout(opts: {
   packId: string;
   origin: string;
 }): Promise<CheckoutResult> {
-  if (!hostedCreditsEnabled()) throw new HostedCreditsOffError();
+  if (!stripeCreditsEnabled()) throw new HostedCreditsOffError();
   const pack = packById(opts.packId);
   if (!pack) throw new Error("Unknown credit pack.");
   const origin = safeOrigin(opts.origin);

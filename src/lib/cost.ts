@@ -90,7 +90,7 @@ export function buildEstimate(opts: {
   };
 }
 
-/** Attaches the hosted credit meter. Omitted entirely when Stripe packs are unset. */
+/** Attaches the hosted credit meter. Omitted entirely when Stripe and PayPal are unset. */
 export function withCredits(
   estimate: CostEstimate,
   provider: ProviderId,
