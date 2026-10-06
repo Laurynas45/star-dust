@@ -4,11 +4,15 @@ import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
 import {
   AppSettings,
+  ComfyWorkflowId,
   DEFAULT_SETTINGS,
+  EMPTY_RATES,
   Job,
+  JobKind,
   JobStatus,
   Project,
   ProviderId,
+  RateTable,
   SAMPLE_PROJECT_ID,
   Shot,
   presetById,
@@ -66,6 +70,7 @@ function openDatabase(): DB {
       duration_sec REAL NOT NULL,
       start_image_path TEXT,
       end_image_path TEXT,
+      selected_job_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -76,6 +81,7 @@ function openDatabase(): DB {
       prompt TEXT NOT NULL,
       preset_id TEXT NOT NULL,
       provider TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'take',
       status TEXT NOT NULL,
       image_path TEXT NOT NULL,
       end_image_path TEXT,
@@ -96,26 +102,57 @@ function openDatabase(): DB {
       provider TEXT NOT NULL,
       comfyui_base_url TEXT NOT NULL,
       fal_model TEXT NOT NULL,
-      replicate_model TEXT NOT NULL
+      replicate_model TEXT NOT NULL,
+      rates_json TEXT NOT NULL DEFAULT '{}',
+      budget_cap REAL,
+      comfyui_workflow TEXT NOT NULL DEFAULT 'svd'
     );
     CREATE INDEX IF NOT EXISTS idx_shots_project ON shots(project_id, position);
     CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_jobs_shot ON jobs(shot_id);
   `);
+  migrate(db);
   const settings = db.prepare("SELECT id FROM settings WHERE id = 1").get();
   if (!settings) {
     db.prepare(
-      `INSERT INTO settings (id, provider, comfyui_base_url, fal_model, replicate_model)
-       VALUES (1, ?, ?, ?, ?)`
+      `INSERT INTO settings (
+        id, provider, comfyui_base_url, fal_model, replicate_model,
+        rates_json, budget_cap, comfyui_workflow
+      ) VALUES (1, ?, ?, ?, ?, ?, NULL, ?)`
     ).run(
       DEFAULT_SETTINGS.provider,
       DEFAULT_SETTINGS.comfyuiBaseUrl,
       DEFAULT_SETTINGS.falModel,
-      DEFAULT_SETTINGS.replicateModel
+      DEFAULT_SETTINGS.replicateModel,
+      "{}",
+      DEFAULT_SETTINGS.comfyuiWorkflow
     );
   }
   seedSample(db);
   return db;
+}
+
+function hasColumn(db: DB, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  return rows.some((row) => row.name === column);
+}
+
+function migrate(db: DB) {
+  if (!hasColumn(db, "shots", "selected_job_id")) {
+    db.exec("ALTER TABLE shots ADD COLUMN selected_job_id TEXT");
+  }
+  if (!hasColumn(db, "jobs", "kind")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'take'");
+  }
+  if (!hasColumn(db, "settings", "rates_json")) {
+    db.exec("ALTER TABLE settings ADD COLUMN rates_json TEXT NOT NULL DEFAULT '{}'");
+  }
+  if (!hasColumn(db, "settings", "budget_cap")) {
+    db.exec("ALTER TABLE settings ADD COLUMN budget_cap REAL");
+  }
+  if (!hasColumn(db, "settings", "comfyui_workflow")) {
+    db.exec("ALTER TABLE settings ADD COLUMN comfyui_workflow TEXT NOT NULL DEFAULT 'svd'");
+  }
 }
 
 function seedSample(db: DB) {
@@ -209,6 +246,7 @@ function mapShot(row: Record<string, unknown>): Shot {
     durationSec: Number(row.duration_sec),
     startImagePath: str(row.start_image_path),
     endImagePath: str(row.end_image_path),
+    selectedJobId: str(row.selected_job_id),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -222,6 +260,7 @@ function mapJob(row: Record<string, unknown>): Job {
     prompt: String(row.prompt),
     presetId: String(row.preset_id),
     provider: String(row.provider) as ProviderId,
+    kind: row.kind === "preview" ? "preview" : "take",
     status: String(row.status) as JobStatus,
     imagePath: String(row.image_path),
     endImagePath: str(row.end_image_path),
@@ -253,7 +292,7 @@ export function listProjects(): Project[] {
     .prepare(
       `SELECT p.*,
         (SELECT COUNT(*) FROM shots s WHERE s.project_id = p.id) AS shot_count,
-        (SELECT COUNT(*) FROM jobs j WHERE j.project_id = p.id AND j.status = 'completed') AS completed_count,
+        (SELECT COUNT(*) FROM jobs j WHERE j.project_id = p.id AND j.status = 'completed' AND COALESCE(j.kind, 'take') != 'preview') AS completed_count,
         (SELECT start_image_path FROM shots s WHERE s.project_id = p.id ORDER BY position ASC LIMIT 1) AS cover_path
        FROM projects p
        ORDER BY updated_at DESC`
@@ -267,7 +306,7 @@ export function getProject(id: string): Project | undefined {
     .prepare(
       `SELECT p.*,
         (SELECT COUNT(*) FROM shots s WHERE s.project_id = p.id) AS shot_count,
-        (SELECT COUNT(*) FROM jobs j WHERE j.project_id = p.id AND j.status = 'completed') AS completed_count,
+        (SELECT COUNT(*) FROM jobs j WHERE j.project_id = p.id AND j.status = 'completed' AND COALESCE(j.kind, 'take') != 'preview') AS completed_count,
         (SELECT start_image_path FROM shots s WHERE s.project_id = p.id ORDER BY position ASC LIMIT 1) AS cover_path
        FROM projects p WHERE p.id = ?`
     )
@@ -513,6 +552,7 @@ export function createJob(input: {
   prompt: string;
   presetId: string;
   provider: ProviderId;
+  kind?: JobKind;
   status?: JobStatus;
   imagePath: string;
   endImagePath?: string;
@@ -533,6 +573,7 @@ export function createJob(input: {
     prompt: input.prompt,
     presetId: input.presetId,
     provider: input.provider,
+    kind: input.kind ?? "take",
     status: input.status ?? "queued",
     imagePath: input.imagePath,
     endImagePath: input.endImagePath,
@@ -549,11 +590,11 @@ export function createJob(input: {
   getDb()
     .prepare(
       `INSERT INTO jobs (
-        id, project_id, shot_id, prompt, preset_id, provider, status, image_path,
+        id, project_id, shot_id, prompt, preset_id, provider, kind, status, image_path,
         end_image_path, character_sheet_path, character_note, provider_note,
         output_path, error, progress, model_name, duration_sec, remote_id,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?)`
     )
     .run(
       job.id,
@@ -562,6 +603,7 @@ export function createJob(input: {
       job.prompt,
       job.presetId,
       job.provider,
+      job.kind,
       job.status,
       job.imagePath,
       job.endImagePath ?? null,
@@ -620,6 +662,32 @@ export function updateJob(id: string, patch: Partial<Job>): Job | undefined {
   return getJob(id);
 }
 
+function cleanRateMap(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object") return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const model = key.trim();
+    const rate = typeof raw === "number" ? raw : Number(raw);
+    if (!model || !Number.isFinite(rate) || rate < 0) continue;
+    out[model] = rate;
+  }
+  return out;
+}
+
+function parseRates(raw: unknown): RateTable {
+  if (typeof raw !== "string" || !raw.trim()) return { fal: {}, replicate: {} };
+  try {
+    const parsed = JSON.parse(raw) as { fal?: unknown; replicate?: unknown };
+    return { fal: cleanRateMap(parsed.fal), replicate: cleanRateMap(parsed.replicate) };
+  } catch {
+    return { fal: {}, replicate: {} };
+  }
+}
+
+function parseWorkflow(value: unknown): ComfyWorkflowId {
+  return value === "wan" ? "wan" : "svd";
+}
+
 export function getSettings(): AppSettings {
   const row = getDb().prepare("SELECT * FROM settings WHERE id = 1").get() as
     | {
@@ -627,14 +695,21 @@ export function getSettings(): AppSettings {
         comfyui_base_url: string;
         fal_model: string;
         replicate_model: string;
+        rates_json?: string;
+        budget_cap?: number | null;
+        comfyui_workflow?: string;
       }
     | undefined;
-  if (!row) return { ...DEFAULT_SETTINGS };
+  if (!row) return { ...DEFAULT_SETTINGS, rates: { ...EMPTY_RATES, fal: {}, replicate: {} } };
+  const cap = row.budget_cap;
   return {
     provider: row.provider,
     comfyuiBaseUrl: row.comfyui_base_url,
     falModel: row.fal_model,
     replicateModel: row.replicate_model,
+    comfyuiWorkflow: parseWorkflow(row.comfyui_workflow),
+    rates: parseRates(row.rates_json),
+    budgetCap: cap == null || !Number.isFinite(Number(cap)) ? null : Number(cap),
   };
 }
 
@@ -645,15 +720,42 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
     comfyuiBaseUrl: patch.comfyuiBaseUrl ?? current.comfyuiBaseUrl,
     falModel: patch.falModel ?? current.falModel,
     replicateModel: patch.replicateModel ?? current.replicateModel,
+    comfyuiWorkflow: patch.comfyuiWorkflow ?? current.comfyuiWorkflow,
+    rates: patch.rates ?? current.rates,
+    budgetCap: patch.budgetCap === undefined ? current.budgetCap : patch.budgetCap,
   };
   getDb()
     .prepare(
       `UPDATE settings
-       SET provider = ?, comfyui_base_url = ?, fal_model = ?, replicate_model = ?
+       SET provider = ?, comfyui_base_url = ?, fal_model = ?, replicate_model = ?,
+           rates_json = ?, budget_cap = ?, comfyui_workflow = ?
        WHERE id = 1`
     )
-    .run(next.provider, next.comfyuiBaseUrl, next.falModel, next.replicateModel);
+    .run(
+      next.provider,
+      next.comfyuiBaseUrl,
+      next.falModel,
+      next.replicateModel,
+      JSON.stringify(next.rates),
+      next.budgetCap,
+      next.comfyuiWorkflow
+    );
   return next;
+}
+
+export function selectTake(shotId: string, jobId: string): Shot | undefined {
+  const shot = getShot(shotId);
+  const job = getJob(jobId);
+  if (!shot || !job) return undefined;
+  if (job.shotId !== shot.id || job.projectId !== shot.projectId) return undefined;
+  if (job.kind === "preview") return undefined;
+  if (job.status !== "completed" || !job.outputPath) return undefined;
+  const now = new Date().toISOString();
+  getDb()
+    .prepare("UPDATE shots SET selected_job_id = ?, updated_at = ? WHERE id = ?")
+    .run(jobId, now, shotId);
+  touchProject(shot.projectId);
+  return getShot(shotId);
 }
 
 export function saveUpload(projectId: string, filename: string, buffer: Buffer): string {
@@ -696,6 +798,6 @@ export function absoluteOutputPath(projectId: string, filename: string): {
 
 export function completedJobsForGallery(projectId: string): Job[] {
   return listJobs(projectId).filter(
-    (job) => job.status === "completed" && job.outputPath
+    (job) => job.kind !== "preview" && job.status === "completed" && job.outputPath
   );
 }

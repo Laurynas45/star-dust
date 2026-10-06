@@ -18,5 +18,5 @@ export async function POST(
   const result = retryFromJob(job, { acknowledgeModel });
   if (!result.ok) return NextResponse.json(result, { status: result.status });
   for (const next of result.jobs) enqueueJob(next.id);
-  return NextResponse.json({ jobs: result.jobs }, { status: 201 });
+  return NextResponse.json({ jobs: result.jobs, skipped: result.skipped }, { status: 201 });
 }

@@ -1,7 +1,12 @@
 import fs from "fs";
 import path from "path";
 import { runFfmpeg } from "../ffmpeg";
-import { COMFY_CHECKPOINT } from "../provider-info";
+import {
+  COMFY_CHECKPOINT,
+  WAN_DIFFUSION,
+  WAN_TEXT_ENCODER,
+  WAN_VAE,
+} from "../provider-info";
 import {
   absoluteOutputPath,
   getJob,
@@ -9,8 +14,16 @@ import {
   resolveDataPath,
   updateJob,
 } from "../storage";
+import { ComfyWorkflowId } from "../types";
+import { WAN_FPS, WAN_MAX_HEIGHT, WAN_MAX_WIDTH, imagePixelSize, wanFrameCount, wanFrameSize } from "../wan";
 
-type Workflow = Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
+type WorkflowNode = {
+  class_type?: string;
+  inputs?: Record<string, unknown>;
+  _meta?: { title?: string };
+};
+
+type Workflow = Record<string, WorkflowNode>;
 
 type ComfyFile = { filename?: string; subfolder?: string; type?: string };
 
@@ -46,6 +59,20 @@ export function loadWorkflow(): Workflow {
   return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
 }
 
+export function loadWanWorkflow(): Workflow {
+  const file = path.join(process.cwd(), "workflows", "comfyui-wan22-ti2v-5b.api.json");
+  return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
+}
+
+export function comfyWorkflowForJob(
+  job: { modelName?: string },
+  settings: { comfyuiWorkflow: ComfyWorkflowId }
+): ComfyWorkflowId {
+  if (job.modelName?.includes("Wan 2.2")) return "wan";
+  if (job.modelName?.includes("SVD")) return "svd";
+  return settings.comfyuiWorkflow === "wan" ? "wan" : "svd";
+}
+
 export function patchWorkflow(
   workflow: Workflow,
   opts: { imageName: string; seed: number; frames: number; fps: number }
@@ -60,6 +87,39 @@ export function patchWorkflow(
     if (node.class_type === "SVD_img2vid_Conditioning") {
       node.inputs.video_frames = opts.frames;
       node.inputs.fps = opts.fps;
+    }
+    if (node.class_type === "KSampler") node.inputs.seed = opts.seed;
+    if (node.class_type === "SaveAnimatedWEBP") node.inputs.fps = opts.fps;
+  }
+  return next;
+}
+
+export function patchWanWorkflow(
+  workflow: Workflow,
+  opts: {
+    imageName: string;
+    prompt: string;
+    seed: number;
+    frames: number;
+    width: number;
+    height: number;
+    fps: number;
+  }
+): Workflow {
+  const next = structuredClone(workflow);
+  for (const node of Object.values(next)) {
+    if (!node.inputs) continue;
+    if (node.class_type === "LoadImage") node.inputs.image = opts.imageName;
+    if (node.class_type === "UNETLoader") node.inputs.unet_name = WAN_DIFFUSION;
+    if (node.class_type === "CLIPLoader") node.inputs.clip_name = WAN_TEXT_ENCODER;
+    if (node.class_type === "VAELoader") node.inputs.vae_name = WAN_VAE;
+    if (node.class_type === "CLIPTextEncode" && node._meta?.title === "Positive prompt") {
+      node.inputs.text = opts.prompt;
+    }
+    if (node.class_type === "Wan22ImageToVideoLatent") {
+      node.inputs.width = opts.width;
+      node.inputs.height = opts.height;
+      node.inputs.length = opts.frames;
     }
     if (node.class_type === "KSampler") node.inputs.seed = opts.seed;
     if (node.class_type === "SaveAnimatedWEBP") node.inputs.fps = opts.fps;
@@ -92,7 +152,7 @@ function historyError(entry: { status?: { status_str?: string; messages?: unknow
 }
 
 /**
- * Queues the shipped SVD image-to-video workflow, polls /history, downloads the file.
+ * Queues the selected shipped workflow (SVD or Wan 2.2 TI2V-5B), polls /history, downloads the file.
  * Not a node editor. If the server is down, the job fails with the URL and status.
  */
 export async function runComfyuiGenerate(jobId: string): Promise<void> {
@@ -146,14 +206,32 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   if (!imageName) fail(jobId, `ComfyUI at ${uploadUrl} returned HTTP 200 without a filename.`);
 
   const duration = job.durationSec && job.durationSec > 0 ? job.durationSec : 4;
-  const fps = 6;
-  const frames = Math.max(14, Math.min(25, Math.round(duration * fps)));
-  const workflow = patchWorkflow(loadWorkflow(), {
-    imageName,
-    seed: Math.floor(Math.random() * 1_000_000_000),
-    frames,
-    fps,
-  });
+  const workflowId = comfyWorkflowForJob(job, settings);
+  let workflow: Workflow;
+  if (workflowId === "wan") {
+    const pixels = imagePixelSize(bytes);
+    const size = pixels
+      ? wanFrameSize(pixels.width, pixels.height)
+      : { width: WAN_MAX_WIDTH, height: WAN_MAX_HEIGHT };
+    workflow = patchWanWorkflow(loadWanWorkflow(), {
+      imageName,
+      prompt: job.prompt,
+      seed: Math.floor(Math.random() * 1_000_000_000),
+      frames: wanFrameCount(duration),
+      width: size.width,
+      height: size.height,
+      fps: WAN_FPS,
+    });
+  } else {
+    const fps = 6;
+    const frames = Math.max(14, Math.min(25, Math.round(duration * fps)));
+    workflow = patchWorkflow(loadWorkflow(), {
+      imageName,
+      seed: Math.floor(Math.random() * 1_000_000_000),
+      frames,
+      fps,
+    });
+  }
 
   const promptUrl = `${base}/prompt`;
   let promptRes: Response;

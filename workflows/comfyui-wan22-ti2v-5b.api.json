@@ -1,0 +1,105 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "wan2.2_ti2v_5B_fp16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Diffusion Model" }
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "Load CLIP" }
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "wan2.2_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": { "title": "Load VAE" }
+  },
+  "4": {
+    "inputs": {
+      "shift": 8,
+      "model": ["1", 0]
+    },
+    "class_type": "ModelSamplingSD3",
+    "_meta": { "title": "ModelSamplingSD3" }
+  },
+  "5": {
+    "inputs": {
+      "text": "",
+      "clip": ["2", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Positive prompt" }
+  },
+  "6": {
+    "inputs": {
+      "text": "blurry, static, overexposed, low quality, text, watermark",
+      "clip": ["2", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Negative prompt" }
+  },
+  "7": {
+    "inputs": {
+      "image": "star-dust-start.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Load Image" }
+  },
+  "8": {
+    "inputs": {
+      "width": 832,
+      "height": 480,
+      "length": 49,
+      "batch_size": 1,
+      "vae": ["3", 0],
+      "start_image": ["7", 0]
+    },
+    "class_type": "Wan22ImageToVideoLatent",
+    "_meta": { "title": "Wan 2.2 Image to Video Latent" }
+  },
+  "9": {
+    "inputs": {
+      "seed": 0,
+      "steps": 20,
+      "cfg": 5,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["4", 0],
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "latent_image": ["8", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "KSampler" }
+  },
+  "10": {
+    "inputs": {
+      "samples": ["9", 0],
+      "vae": ["3", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "11": {
+    "inputs": {
+      "filename_prefix": "star-dust-wan",
+      "fps": 16,
+      "lossless": false,
+      "quality": 85,
+      "method": "default",
+      "images": ["10", 0]
+    },
+    "class_type": "SaveAnimatedWEBP",
+    "_meta": { "title": "SaveAnimatedWEBP" }
+  }
+}

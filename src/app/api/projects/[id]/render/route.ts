@@ -19,5 +19,8 @@ export async function POST(
   const result = renderAll(params.id, { acknowledgeModel });
   if (!result.ok) return NextResponse.json(result, { status: result.status });
   for (const job of result.jobs) enqueueJob(job.id);
-  return NextResponse.json({ jobs: result.jobs }, { status: 201 });
+  return NextResponse.json(
+    { jobs: result.jobs, skipped: result.skipped, cost: result.cost ?? null },
+    { status: result.jobs.length > 0 ? 201 : 200 }
+  );
 }
