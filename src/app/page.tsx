@@ -73,15 +73,16 @@ export default function StudioHome() {
           </h1>
           <p className="mt-4 max-w-xl text-sm leading-relaxed text-[var(--muted)]">
             Star Dust is a local image-to-video studio. Mock renders camera
-            motion with ffmpeg and no GPU. When you want a cloud model, you
-            bring the key. The unit of work is one clip from a still. Stitch
-            joins those clips — it does not call another model.
+            motion with ffmpeg and no GPU. Preview cut plays the whole list that
+            way for $0, and it does not replace a take. When you want a cloud
+            model, you bring the key. The unit of work is one clip from a still.
+            Stitch joins those clips — it does not call another model.
           </p>
         </div>
         <ol className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
           {[
             ["01", "Shot list", "Start still, optional end still, prompt, duration, preset."],
-            ["02", "Render all", "Shots run in order on the provider you picked."],
+            ["02", "Render all", "Shots run in order. A matching completed take is skipped."],
             ["03", "Export stitch", "ffmpeg writes one mp4 from the completed clips."],
           ].map(([index, title, copy]) => (
             <li key={index} className="panel flex gap-3 p-3">

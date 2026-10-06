@@ -1,6 +1,6 @@
 import { spawnSync } from "child_process";
 import fs from "fs";
-import { resolveDataPath, getJob, getProject, listShots } from "../src/lib/storage";
+import { resolveDataPath, getJob, getProject, listJobs, listShots } from "../src/lib/storage";
 import { renderShot } from "../src/lib/render";
 import { enqueueJob, waitForQueue } from "../src/lib/providers";
 import { SAMPLE_PROJECT_ID } from "../src/lib/types";
@@ -13,10 +13,25 @@ async function main() {
 
   const result = renderShot(shot.id);
   if (!result.ok) throw new Error(result.error);
-  for (const job of result.jobs) enqueueJob(job.id);
-  await waitForQueue();
+  let jobId = result.jobs[0]?.id;
+  if (jobId) {
+    enqueueJob(jobId);
+    await waitForQueue();
+  } else {
+    const existing = listJobs(project.id)
+      .filter(
+        (job) =>
+          job.shotId === shot.id &&
+          job.kind !== "preview" &&
+          job.status === "completed" &&
+          job.outputPath
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    if (!existing) throw new Error(result.skipped[0]?.reason || "Demo did not render an mp4");
+    jobId = existing.id;
+  }
 
-  const job = getJob(result.jobs[0].id);
+  const job = getJob(jobId);
   if (!job || job.status !== "completed" || !job.outputPath) {
     throw new Error(`Demo job ${job?.status ?? "missing"}: ${job?.error ?? "no mp4"}`);
   }

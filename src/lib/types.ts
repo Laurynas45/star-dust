@@ -1,5 +1,9 @@
 export type ProviderId = "mock" | "fal" | "replicate" | "comfyui";
 
+export type JobKind = "take" | "preview";
+
+export type ComfyWorkflowId = "svd" | "wan";
+
 export type JobStatus =
   | "queued"
   | "running"
@@ -29,6 +33,8 @@ export interface Shot {
   durationSec: number;
   startImagePath?: string;
   endImagePath?: string;
+  /** Take the stitch uses. When unset, the stitch uses the newest completed take. */
+  selectedJobId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,6 +54,8 @@ export interface Job {
   prompt: string;
   presetId: string;
   provider: ProviderId;
+  /** Preview clips are Mock-only and never count as the shot's take. */
+  kind: JobKind;
   status: JobStatus;
   imagePath: string;
   endImagePath?: string;
@@ -64,11 +72,31 @@ export interface Job {
   remoteId?: string;
 }
 
+export interface RateTable {
+  fal: Record<string, number>;
+  replicate: Record<string, number>;
+}
+
+/** User-entered arithmetic. Never a vendor quote. */
+export interface CostEstimate {
+  paid: boolean;
+  seconds: number;
+  ratePerSecond: number | null;
+  total: number | null;
+  unknown: boolean;
+  budgetCap: number | null;
+  overBudget: boolean;
+  label: string;
+}
+
 export interface AppSettings {
   provider: ProviderId;
   comfyuiBaseUrl: string;
   falModel: string;
   replicateModel: string;
+  comfyuiWorkflow: ComfyWorkflowId;
+  rates: RateTable;
+  budgetCap: number | null;
 }
 
 export const MOTION_PRESETS: MotionPreset[] = [
@@ -102,11 +130,16 @@ export const MOTION_PRESETS: MotionPreset[] = [
   },
 ];
 
+export const EMPTY_RATES: RateTable = { fal: {}, replicate: {} };
+
 export const DEFAULT_SETTINGS: AppSettings = {
   provider: "mock",
   comfyuiBaseUrl: "http://127.0.0.1:8188",
   falModel: "fal-ai/minimax/video-01/image-to-video",
   replicateModel: "stability-ai/stable-video-diffusion",
+  comfyuiWorkflow: "svd",
+  rates: { fal: {}, replicate: {} },
+  budgetCap: null,
 };
 
 export const SAMPLE_PROJECT_ID = "sample-harbor-dusk";

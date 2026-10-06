@@ -1,16 +1,41 @@
-import { AppSettings, ProviderId } from "./types";
+import { AppSettings, ComfyWorkflowId, ProviderId } from "./types";
 
-/** Checkpoint name inside the shipped ComfyUI API workflow. */
+/** Checkpoint name inside the shipped SVD ComfyUI API workflow. */
 export const COMFY_CHECKPOINT = "svd_xt_1_1.safetensors";
 
 export const COMFY_MODEL_NAME = `ComfyUI SVD image-to-video (${COMFY_CHECKPOINT})`;
 
-export const CHARACTER_SHEET_HONESTY =
-  "A pinned sheet is sent only when the provider call has a reference-image input. Mock (ffmpeg Ken Burns), the shipped ComfyUI workflow, and the default fal and Replicate image-to-video calls do not. The face will not match the sheet.";
+/** Files the Wan 2.2 TI2V-5B graph expects on the ComfyUI server. */
+export const WAN_DIFFUSION = "wan2.2_ti2v_5B_fp16.safetensors";
+export const WAN_TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors";
+export const WAN_VAE = "wan2.2_vae.safetensors";
 
-/** Shown before a fal or Replicate job is created. No price is included. */
+export const WAN_MODEL_NAME = "ComfyUI Wan 2.2 TI2V-5B";
+
+export const COMFY_WORKFLOWS: Record<
+  ComfyWorkflowId,
+  { title: string; file: string; detail: string }
+> = {
+  svd: {
+    title: "Stable Video Diffusion",
+    file: "workflows/comfyui-svd-i2v.api.json",
+    detail:
+      "Does not read the text prompt. One start image. Duration becomes an SVD frame count.",
+  },
+  wan: {
+    title: "Wan 2.2 TI2V-5B",
+    file: "workflows/comfyui-wan22-ti2v-5b.api.json",
+    detail:
+      "Reads the prompt. Star Dust injects the start image, prompt, frame count, and size. Targets about 8 GB VRAM with ComfyUI offloading.",
+  },
+};
+
+export const CHARACTER_SHEET_HONESTY =
+  "A pinned sheet is sent only when the provider call has a reference-image input. Mock (ffmpeg Ken Burns), the shipped ComfyUI workflows, and the default fal and Replicate image-to-video calls do not. The face will not match the sheet.";
+
+/** Shown before a fal or Replicate job is created. No vendor price is included. */
 export const CLOUD_RISK_NOTE =
-  "A key is required. Some vendors bill failed generations, and unused credits can expire. Star Dust is not showing a price because this provider did not return one.";
+  "A key is required. Some vendors bill failed generations, and unused credits can expire. Star Dust does not fetch a vendor price. A total appears only when you set a per-second rate, and that total is your own estimate.";
 
 export const CAPABILITY: Record<
   ProviderId,
@@ -31,7 +56,7 @@ export const CAPABILITY: Record<
   comfyui: {
     title: "ComfyUI",
     label:
-      "Needs a reachable ComfyUI server and the shipped image-to-video workflow. Not a node editor.",
+      "Needs a reachable ComfyUI server. Ships an SVD graph and a Wan 2.2 TI2V-5B graph. Not a node editor.",
   },
 };
 
@@ -48,7 +73,7 @@ export function modelNameFor(provider: ProviderId, settings: AppSettings): strin
     case "replicate":
       return settings.replicateModel.trim() || "stability-ai/stable-video-diffusion";
     case "comfyui":
-      return COMFY_MODEL_NAME;
+      return settings.comfyuiWorkflow === "wan" ? WAN_MODEL_NAME : COMFY_MODEL_NAME;
     default:
       return provider;
   }
@@ -86,6 +111,17 @@ export function describeProviderUse(opts: {
     if (opts.hasCharacterSheet) {
       characterNote =
         "Character sheet was not applied. Mock only transforms the start still with ffmpeg, so the face will not match the sheet.";
+    }
+  } else if (opts.provider === "comfyui" && opts.settings.comfyuiWorkflow === "wan") {
+    parts.push(
+      `${modelName} posts workflows/comfyui-wan22-ti2v-5b.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the prompt, a frame count from the shot duration, and the output size (the still fitted inside 832×480).`
+    );
+    if (opts.hasEndImage) {
+      parts.push("The end image was not sent. This Wan workflow has a single start image.");
+    }
+    if (opts.hasCharacterSheet) {
+      characterNote =
+        "Character sheet was not sent. This Wan workflow has no reference-image input, so the face will not match the sheet.";
     }
   } else if (opts.provider === "comfyui") {
     parts.push(

@@ -13,6 +13,7 @@ import {
 } from "@/lib/provider-info";
 import {
   AppSettings,
+  CostEstimate,
   Job,
   MAX_SHOT_SECONDS,
   MIN_SHOT_SECONDS,
@@ -32,11 +33,20 @@ type Detail = { project: Project; shots: Shot[]; jobs: Job[] };
 type StitchResponse = {
   outputPath: string;
   includedShotIds: string[];
+  includedJobIds?: string[];
   skipped: { shotId: string; position: number; reason: string }[];
+  kind?: "takes" | "preview";
+};
+
+type SkippedShot = {
+  shotId: string;
+  position: number;
+  reason: string;
+  jobId?: string;
 };
 
 type Pending =
-  | { kind: "shot"; shotId: string }
+  | { kind: "shot"; shotId: string; force?: boolean }
   | { kind: "all" }
   | { kind: "retry"; jobId: string; provider: ProviderId };
 
@@ -47,10 +57,15 @@ export default function ProjectStudioPage() {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [ackCost, setAckCost] = useState<CostEstimate | null>(null);
+  const [cost, setCost] = useState<CostEstimate | null>(null);
   const [busy, setBusy] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [stitch, setStitch] = useState<StitchResponse | null>(null);
+  const [previewCut, setPreviewCut] = useState<StitchResponse | null>(null);
 
   const [prompt, setPrompt] = useState("");
   const [presetId, setPresetId] = useState(MOTION_PRESETS[0].id);
@@ -62,9 +77,10 @@ export default function ProjectStudioPage() {
 
   const load = useCallback(async () => {
     try {
-      const [projectRes, settingsRes] = await Promise.all([
+      const [projectRes, settingsRes, costRes] = await Promise.all([
         fetch(`/api/projects/${projectId}`),
         fetch("/api/settings"),
+        fetch(`/api/projects/${projectId}/cost`),
       ]);
       if (!projectRes.ok) {
         setDetail(null);
@@ -73,6 +89,7 @@ export default function ProjectStudioPage() {
       }
       setDetail(await projectRes.json());
       if (settingsRes.ok) setSettings(await settingsRes.json());
+      if (costRes.ok) setCost(await costRes.json());
       setError(null);
     } catch {
       setError("Could not load this project");
@@ -108,20 +125,41 @@ export default function ProjectStudioPage() {
   const provider: ProviderId = settings?.provider ?? "mock";
   const modelName = settings ? modelNameFor(provider, settings) : CAPABILITY.mock.title;
   const paid = isPaidProvider(provider);
-  const completed = useMemo(
-    () => jobs.filter((job) => job.status === "completed" && job.outputPath),
+  const takeClips = useMemo(
+    () => jobs.filter((job) => job.kind !== "preview" && job.status === "completed" && job.outputPath),
     [jobs]
   );
 
-  function latestJob(shotId: string): Job | undefined {
-    return jobs.find((job) => job.shotId === shotId);
+  function latestTake(shotId: string): Job | undefined {
+    return jobs.find((job) => job.shotId === shotId && job.kind !== "preview");
+  }
+
+  function takesFor(shotId: string): Job[] {
+    return jobs
+      .filter(
+        (job) =>
+          job.shotId === shotId &&
+          job.kind !== "preview" &&
+          job.status === "completed" &&
+          job.outputPath
+      )
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  function stitchChoice(shot: Shot, takes: Job[]): string | undefined {
+    if (shot.selectedJobId && takes.some((take) => take.id === shot.selectedJobId)) {
+      return shot.selectedJobId;
+    }
+    return takes[takes.length - 1]?.id;
   }
 
   async function run(action: Pending, acknowledgeModel?: string) {
     setBusy(true);
     setError(null);
-    const body: Record<string, string> = {};
+    setNotice(null);
+    const body: Record<string, unknown> = {};
     if (acknowledgeModel) body.acknowledgeModel = acknowledgeModel;
+    if (action.kind === "shot" && action.force) body.force = true;
     const url =
       action.kind === "all"
         ? `/api/projects/${projectId}/render`
@@ -136,16 +174,29 @@ export default function ProjectStudioPage() {
       });
       const data = await res.json();
       if (!res.ok) {
+        if (data.cost) setAckCost(data.cost as CostEstimate);
         if (data.needsModelAck && data.modelName) {
           setPending(action);
-          setError(null);
+          setError(data.overBudget ? data.error : null);
+          return;
+        }
+        if (data.overBudget) {
+          setPending(action);
+          setError(data.error || "Over your budget cap");
           return;
         }
         throw new Error(data.error || "Could not queue the render");
       }
       setPending(null);
+      setAckCost(null);
+      const skipped = (data.skipped ?? []) as SkippedShot[];
+      if ((data.jobs ?? []).length === 0 && skipped.length > 0) {
+        setNotice(skipped.map((item) => `Shot ${item.position}: ${item.reason}`).join(" "));
+      }
       await load();
-      document.getElementById("jobs")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      if ((data.jobs ?? []).length > 0) {
+        document.getElementById("jobs")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not queue the render");
     } finally {
@@ -189,6 +240,66 @@ export default function ProjectStudioPage() {
     } finally {
       setSavingShot(false);
     }
+  }
+
+  async function onPreview() {
+    setPreviewing(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/preview`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not start the preview cut");
+      const ids = ((data.jobs ?? []) as Job[]).map((job) => job.id);
+      const deadline = Date.now() + 180000;
+      let finished: Job[] = [];
+      while (Date.now() < deadline) {
+        const projectRes = await fetch(`/api/projects/${projectId}`);
+        if (projectRes.ok) {
+          const next = (await projectRes.json()) as Detail;
+          setDetail(next);
+          finished = next.jobs.filter((job) => ids.includes(job.id));
+          const settled = finished.every(
+            (job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled"
+          );
+          if (finished.length === ids.length && settled) break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      const ready = finished.filter((job) => job.status === "completed").map((job) => job.id);
+      if (ready.length === 0) {
+        throw new Error("Preview cut did not finish. Check the job list.");
+      }
+      const stitchRes = await fetch(`/api/projects/${projectId}/preview/stitch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobIds: ready }),
+      });
+      const stitchData = await stitchRes.json();
+      if (!stitchRes.ok) throw new Error(stitchData.error || "Preview stitch failed");
+      setPreviewCut(stitchData);
+      document.getElementById("preview-cut")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start the preview cut");
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function onSelectTake(shotId: string, jobId: string) {
+    setError(null);
+    const res = await fetch(`/api/projects/${projectId}/shots/${shotId}/take`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setError(data.error || "Could not choose that take");
+      return;
+    }
+    await load();
   }
 
   async function onExport() {
@@ -289,12 +400,12 @@ export default function ProjectStudioPage() {
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
             {shots.length === 0
               ? "Add a shot, then run the list."
-              : `${shots.length} shot${shots.length === 1 ? "" : "s"} queued one after another.`}
+              : "Skips a shot that already has a matching completed take, and any shot already queued or running."}
           </p>
           <button
             type="button"
             className="btn-primary mt-3 w-full"
-            disabled={busy || shots.length === 0}
+            disabled={busy || shots.length === 0 || Boolean(paid && cost?.overBudget)}
             onClick={() => ask({ kind: "all" })}
           >
             {busy ? "Working…" : "Render all"}
@@ -304,12 +415,12 @@ export default function ProjectStudioPage() {
           <p className="font-mono text-[11px] text-violet-300">03 · Export stitch</p>
           <h2 className="mt-1 text-lg font-medium text-white">One mp4, same editor</h2>
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
-            ffmpeg joins completed shots in order. The stitch is not a new model.
+            ffmpeg joins the take you chose for each shot. The stitch is not a new model.
           </p>
           <button
             type="button"
             className="btn-ghost mt-3 w-full"
-            disabled={exporting || completed.length === 0}
+            disabled={exporting || takeClips.length === 0}
             onClick={() => void onExport()}
           >
             {exporting ? "Stitching…" : "Export stitch"}
@@ -317,19 +428,49 @@ export default function ProjectStudioPage() {
         </article>
       </section>
 
+      <section className="panel flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="font-mono text-[11px] text-emerald-300">Preview cut · free</p>
+          <h2 className="mt-1 text-lg font-medium text-white">Watch the whole edit for $0</h2>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
+            Renders every shot with Mock and stitches them. Camera motion on stills, not AI
+            motion. Preview clips do not replace or count as the shot&apos;s takes.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn-ghost shrink-0"
+          disabled={previewing || busy || shots.length === 0}
+          onClick={() => void onPreview()}
+        >
+          {previewing ? "Previewing…" : "Preview cut"}
+        </button>
+      </section>
+
       {paid && (
-        <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-50">
+        <div
+          className={`rounded-xl border px-4 py-3 text-sm ${
+            cost?.overBudget
+              ? "border-rose-400/40 bg-rose-500/10 text-rose-50"
+              : "border-amber-400/30 bg-amber-400/10 text-amber-50"
+          }`}
+        >
           <p>
             Next cloud run uses <span className="font-semibold">{modelName}</span>.
           </p>
-          <p className="mt-1 text-xs text-amber-100/80">{CLOUD_RISK_NOTE}</p>
+          <p className="mt-1 text-xs leading-relaxed text-current/80">
+            {cost?.label ?? "Cost unknown. No per-second rate is set for this model."}
+          </p>
+          <p className="mt-1 text-xs text-current/70">{CLOUD_RISK_NOTE}</p>
         </div>
       )}
       {provider === "comfyui" && (
         <div className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm text-sky-50">
-          ComfyUI runs <span className="font-semibold">{modelName}</span>. The
-          server must be reachable. Star Dust queues the shipped workflow, polls
-          history, and downloads the video. This is not a node editor.
+          ComfyUI runs <span className="font-semibold">{modelName}</span>.{" "}
+          {settings?.comfyuiWorkflow === "wan"
+            ? "This graph reads the prompt and sends the start image, frame count, and size."
+            : "This SVD graph does not read the text prompt."}{" "}
+          The server must be reachable. This is not a node editor.
         </div>
       )}
       {provider === "mock" && (
@@ -342,6 +483,11 @@ export default function ProjectStudioPage() {
       {error && (
         <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-[var(--muted)]">
+          {notice}
         </div>
       )}
 
@@ -419,7 +565,7 @@ export default function ProjectStudioPage() {
               />
               <p className="mt-1 text-[11px] text-[var(--muted)]">
                 Mock can crossfade toward it. Cloud calls and the shipped ComfyUI
-                workflow say so when they leave it unused.
+                workflows say so when they leave it unused.
               </p>
             </div>
           </div>
@@ -487,7 +633,10 @@ export default function ProjectStudioPage() {
         ) : (
           <ol className="space-y-3">
             {shots.map((shot, index) => {
-              const job = latestJob(shot.id);
+              const job = latestTake(shot.id);
+              const takes = takesFor(shot.id);
+              const chosen = stitchChoice(shot, takes);
+              const takeBusy = job?.status === "queued" || job?.status === "running";
               const preset = presetById(shot.presetId);
               return (
                 <li key={shot.id} className="panel grid gap-4 p-4 sm:grid-cols-[140px_1fr]">
@@ -517,15 +666,47 @@ export default function ProjectStudioPage() {
                       {job && <StatusBadge status={job.status} />}
                     </div>
                     <p className="mt-2 text-sm text-white">{shot.prompt}</p>
+                    {takes.length > 0 && (
+                      <fieldset className="mt-3 space-y-1">
+                        <legend className="text-[11px] uppercase tracking-wide text-[var(--muted)]">
+                          Takes kept on disk. Stitch uses the one you pick.
+                        </legend>
+                        {takes.map((take, takeIndex) => (
+                          <label key={take.id} className="flex items-center gap-2 text-xs text-[var(--muted)]">
+                            <input
+                              type="radio"
+                              name={`take-${shot.id}`}
+                              checked={chosen === take.id}
+                              onChange={() => void onSelectTake(shot.id, take.id)}
+                            />
+                            <span className="text-white">
+                              Take {takeIndex + 1}
+                              {chosen === take.id ? " · in the stitch" : ""}
+                            </span>
+                            <span className="truncate">{take.modelName || take.provider}</span>
+                          </label>
+                        ))}
+                      </fieldset>
+                    )}
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
                         className="btn-primary !px-3 !py-1.5"
-                        disabled={busy}
+                        disabled={busy || takeBusy}
                         onClick={() => ask({ kind: "shot", shotId: shot.id })}
                       >
                         Render
                       </button>
+                      {takes.length > 0 && (
+                        <button
+                          type="button"
+                          className="btn-ghost !px-3 !py-1.5"
+                          disabled={busy || takeBusy}
+                          onClick={() => ask({ kind: "shot", shotId: shot.id, force: true })}
+                        >
+                          Re-render
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn-ghost !px-3 !py-1.5"
@@ -592,7 +773,7 @@ export default function ProjectStudioPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <StatusBadge status={job.status} />
                     <span className="text-[11px] uppercase tracking-wide text-[var(--muted)]">
-                      {CAPABILITY[job.provider].title}
+                      {job.kind === "preview" ? "Preview" : "Take"} · {CAPABILITY[job.provider].title}
                     </span>
                     {typeof job.progress === "number" &&
                       (job.status === "running" || job.status === "queued") && (
@@ -655,11 +836,39 @@ export default function ProjectStudioPage() {
         </div>
       </section>
 
+      <section id="preview-cut" className="space-y-3">
+        <h2 className="text-lg font-semibold text-white">Preview cut</h2>
+        {previewCut ? (
+          <article className="panel overflow-hidden">
+            <video
+              className="aspect-video w-full bg-black"
+              src={`/api/media/${previewCut.outputPath}`}
+              controls
+              playsInline
+            />
+            <div className="space-y-2 p-4">
+              <p className="text-sm text-white">
+                Camera motion on stills, not AI motion. {previewCut.includedShotIds.length} shot
+                {previewCut.includedShotIds.length === 1 ? "" : "s"}. This is not a take.
+              </p>
+              <a className="btn-ghost inline-flex" href={`/api/media/${previewCut.outputPath}`} download>
+                Download preview mp4
+              </a>
+            </div>
+          </article>
+        ) : (
+          <div className="panel p-6 text-sm text-[var(--muted)]">
+            Preview cut plays the whole list with Mock for $0. It does not replace the takes
+            Export stitch uses.
+          </div>
+        )}
+      </section>
+
       <section id="stitch" className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <h2 className="text-lg font-semibold text-white">Gallery</h2>
           <a
-            className={`btn-ghost text-xs ${completed.length === 0 ? "pointer-events-none opacity-40" : ""}`}
+            className={`btn-ghost text-xs ${takeClips.length === 0 ? "pointer-events-none opacity-40" : ""}`}
             href={`/api/projects/${projectId}/gallery`}
           >
             Download all zip
@@ -680,8 +889,7 @@ export default function ProjectStudioPage() {
               </p>
               {stitch.skipped.length > 0 && (
                 <p className="text-xs text-[var(--muted)]">
-                  Skipped shot {stitch.skipped.map((item) => item.position).join(", ")} — no
-                  completed clip.
+                  {stitch.skipped.map((item) => `Shot ${item.position}: ${item.reason}`).join(" · ")}
                 </p>
               )}
               <a className="btn-primary inline-flex" href={`/api/media/${stitch.outputPath}`} download>
@@ -690,13 +898,13 @@ export default function ProjectStudioPage() {
             </div>
           </article>
         )}
-        {completed.length === 0 ? (
+        {takeClips.length === 0 ? (
           <div className="panel p-8 text-center text-sm text-[var(--muted)]">
-            Completed mp4s show up here. Download one, or download the zip.
+            Completed takes show up here. Preview clips stay out of this gallery.
           </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2">
-            {completed.map((job) => (
+            {takeClips.map((job) => (
               <article key={job.id} className="panel overflow-hidden">
                 <video
                   className="aspect-video w-full bg-black"
@@ -734,14 +942,28 @@ export default function ProjectStudioPage() {
               {confirmModel}
             </h2>
             <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{CLOUD_RISK_NOTE}</p>
+            {pending.kind === "all" && (
+              <p className="mt-3 text-sm leading-relaxed text-white">
+                {(ackCost ?? cost)?.label ??
+                  "Cost unknown. No per-second rate is set for this model. This is not a vendor quote."}
+              </p>
+            )}
             <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <button type="button" className="btn-ghost" onClick={() => setPending(null)} disabled={busy}>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => {
+                  setPending(null);
+                  setAckCost(null);
+                }}
+                disabled={busy}
+              >
                 Back
               </button>
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy}
+                disabled={busy || Boolean(pending.kind === "all" && (ackCost ?? cost)?.overBudget)}
                 onClick={() => void run(pending, confirmModel)}
               >
                 {busy ? "Queuing…" : "Run this model"}
