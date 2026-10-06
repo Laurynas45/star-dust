@@ -77,7 +77,7 @@ export interface RateTable {
   replicate: Record<string, number>;
 }
 
-/** Hosted credit meter. Present only when Stripe packs are configured. */
+/** Hosted credit meter. Present only when Stripe or PayPal packs are configured. */
 export interface CreditEstimate {
   hosted: true;
   required: number;
@@ -97,7 +97,7 @@ export interface CostEstimate {
   budgetCap: number | null;
   overBudget: boolean;
   label: string;
-  /** Omitted when Stripe is unset, so the free studio stays on the Phase 1 shape. */
+  /** Omitted when Stripe and PayPal are unset, so the free studio stays on the Phase 1 shape. */
   credits?: CreditEstimate;
 }
 
@@ -105,6 +105,15 @@ export interface PublicCreditPack {
   id: string;
   label: string;
   credits: number;
+}
+
+/** Price shown on the PayPal button. Client id and secret stay off this object. */
+export interface PublicPayPalPack {
+  id: string;
+  label: string;
+  credits: number;
+  amount: string;
+  currency: string;
 }
 
 export interface PackWorkflowInfo {
@@ -117,8 +126,11 @@ export interface StudioEnv {
   hasFalKey: boolean;
   hasReplicateToken: boolean;
   hostedCredits: boolean;
+  stripeCredits: boolean;
+  paypalCredits: boolean;
   creditBalance: number | null;
   creditPacks: PublicCreditPack[];
+  paypalPacks: PublicPayPalPack[];
   packUnlocked: boolean;
   packWorkflows: PackWorkflowInfo[];
 }

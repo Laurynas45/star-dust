@@ -11,7 +11,7 @@ delete process.env.REPLICATE_API_TOKEN;
 delete process.env.STAR_DUST_LICENSE_KEY;
 delete process.env.STAR_DUST_CREDITS_PER_SECOND;
 for (const key of Object.keys(process.env)) {
-  if (key.startsWith("STRIPE_")) delete process.env[key];
+  if (key.startsWith("STRIPE_") || key.startsWith("PAYPAL_")) delete process.env[key];
 }
 
 function assert(cond: unknown, message: string) {
@@ -546,10 +546,14 @@ async function main() {
 
   const credits = await import("../src/lib/credits");
   const billing = await import("../src/lib/stripe-billing");
+  const paypal = await import("../src/lib/paypal-billing");
   const pack = await import("../src/lib/pack");
   const { NextRequest } = await import("next/server");
   const checkoutRoute = await import("../src/app/api/credits/checkout/route");
   const webhookRoute = await import("../src/app/api/credits/webhook/route");
+  const paypalCheckoutRoute = await import("../src/app/api/credits/paypal/checkout/route");
+  const paypalReturnRoute = await import("../src/app/api/credits/paypal/return/route");
+  const paypalWebhookRoute = await import("../src/app/api/credits/paypal/webhook/route");
   const settingsRoute = await import("../src/app/api/settings/route");
   const packRoute = await import("../src/app/api/pack/route");
   const workerRoute = await import("../src/app/api/projects/[id]/pack-worker/route");
@@ -569,6 +573,8 @@ async function main() {
     budgetCap: null,
   });
   assert(credits.hostedCreditsEnabled() === false, "stripe unset is not hosted mode");
+  assert(credits.paypalCreditsEnabled() === false, "paypal unset is not a checkout");
+  assert(paypal.paypalApiBase() === "https://api-m.sandbox.paypal.com", "paypal mode defaults to sandbox");
   const phase1 = render.renderAll(phase.id);
   assert(!phase1.ok && phase1.needsModelAck, "stripe unset still asks for the model");
   assert(!phase1.insufficientCredits, "stripe unset does not block on credits");
@@ -585,6 +591,22 @@ async function main() {
     new NextRequest("http://127.0.0.1:3000/api/credits/webhook", { method: "POST", body: "{}" })
   );
   assert(offHook.status === 404, "webhook is hidden when Stripe is unset");
+  const offPayPal = await paypalCheckoutRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/credits/paypal/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packId: "default" }),
+    })
+  );
+  assert(offPayPal.status === 404, "paypal checkout is hidden when PayPal is unset");
+  const offPayPalHook = await paypalWebhookRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/credits/paypal/webhook", { method: "POST", body: "{}" })
+  );
+  assert(offPayPalHook.status === 404, "paypal webhook is hidden when PayPal is unset");
+  const phaseSettings = await (await settingsRoute.GET()).json();
+  assert(phaseSettings.env.paypalCredits === false, "phase 1 settings hide PayPal");
+  assert(phaseSettings.env.stripeCredits === false, "phase 1 settings hide Stripe");
+  assert(phaseSettings.env.paypalPacks.length === 0, "phase 1 settings have no PayPal packs");
   const lockedPack = await packRoute.GET();
   const lockedBody = await lockedPack.json();
   assert(lockedPack.status === 200 && lockedBody.unlocked === false, "license unset keeps the pack locked");
@@ -606,6 +628,9 @@ async function main() {
   const settingsOn = await (await settingsRoute.GET()).json();
   const settingsText = JSON.stringify(settingsOn);
   assert(settingsOn.env.hostedCredits === true, "settings report hosted credits");
+  assert(settingsOn.env.stripeCredits === true, "settings report Stripe checkout");
+  assert(settingsOn.env.paypalCredits === false, "Stripe alone does not show PayPal");
+  assert(settingsOn.env.paypalPacks.length === 0, "Stripe alone has no PayPal packs");
   assert(settingsOn.env.creditBalance === 0, "settings report the balance");
   assert(settingsOn.env.packUnlocked === false, "settings do not unlock the pack");
   assert(!settingsText.includes("sk_test_placeholder"), "settings omit the Stripe secret");
@@ -738,6 +763,212 @@ async function main() {
   });
   const retried = render.retryFromJob(failed, { acknowledgeModel: "fal-ai/test-model" });
   assert(!retried.ok && retried.insufficientCredits, "retry cannot bypass an empty balance");
+
+  const savedStripe = {
+    secret: process.env.STRIPE_SECRET_KEY,
+    webhook: process.env.STRIPE_WEBHOOK_SECRET,
+    price: process.env.STRIPE_PRICE_CREDITS,
+    studioPrice: process.env.STRIPE_PRICE_CREDITS_STUDIO,
+  };
+  delete process.env.STRIPE_SECRET_KEY;
+  delete process.env.STRIPE_WEBHOOK_SECRET;
+  delete process.env.STRIPE_PRICE_CREDITS;
+  delete process.env.STRIPE_PRICE_CREDITS_STUDIO;
+  process.env.PAYPAL_CLIENT_ID = "paypal_test_client";
+  process.env.PAYPAL_CLIENT_SECRET = "paypal_test_secret";
+  process.env.PAYPAL_MODE = "sandbox";
+  process.env.PAYPAL_PACK_AMOUNT = "10.00";
+  process.env.PAYPAL_CREDITS_AMOUNT = "4";
+  process.env.PAYPAL_PACK_AMOUNT_STUDIO = "25";
+  assert(credits.stripeCreditsEnabled() === false, "paypal-only leaves Stripe checkout off");
+  assert(credits.paypalCreditsEnabled(), "client id, secret, and an amount turn PayPal on");
+  assert(credits.hostedCreditsEnabled(), "paypal alone turns hosted credits on");
+  assert(paypal.paypalApiBase() === "https://api-m.sandbox.paypal.com", "sandbox mode stays off the live API");
+  const paypalPacks = credits.listPayPalPacks();
+  assert(paypalPacks.length === 2, "default pack and named pack");
+  assert(paypalPacks.find((item) => item.id === "default")?.credits === 4, "paypal default pack size");
+  assert(
+    paypalPacks.find((item) => item.id === "studio")?.credits === 10,
+    "named paypal pack uses the Stripe credit size when PAYPAL_CREDITS_STUDIO is unset"
+  );
+  assert(!JSON.stringify(credits.publicPayPalPacks()).includes("paypal_test_secret"), "public packs omit the secret");
+  const stripeOff = await checkoutRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/credits/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packId: "default" }),
+    })
+  );
+  assert(stripeOff.status === 404, "Stripe checkout stays hidden when only PayPal is set");
+  const paypalHookOff = await paypalWebhookRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/credits/paypal/webhook", { method: "POST", body: "{}" })
+  );
+  assert(paypalHookOff.status === 404, "paypal webhook stays hidden without PAYPAL_WEBHOOK_ID");
+
+  const paypalProject = storage.createProject("PayPal only");
+  storage.createShot({
+    projectId: paypalProject.id,
+    prompt: "A quiet harbor.",
+    presetId: "slow-zoom-in",
+    durationSec: 4,
+    startImagePath: shot.startImagePath,
+  });
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": 0.25 }, replicate: {} },
+    budgetCap: null,
+  });
+  const blockedPayPal = render.renderAll(paypalProject.id, { acknowledgeModel: "fal-ai/test-model" });
+  assert(!blockedPayPal.ok && blockedPayPal.insufficientCredits, "paypal-only low balance blocks fal render all");
+  assert(credits.getCreditBalance() === 0, "blocked paypal-mode render spent nothing");
+  storage.saveSettings({ provider: "replicate", replicateModel: "stability-ai/stable-video-diffusion" });
+  const blockedReplicate = render.renderAll(paypalProject.id, {
+    acknowledgeModel: "stability-ai/stable-video-diffusion",
+  });
+  assert(
+    !blockedReplicate.ok && blockedReplicate.insufficientCredits,
+    "paypal-only low balance blocks replicate render all"
+  );
+  storage.saveSettings({ provider: "fal", falModel: "fal-ai/test-model" });
+
+  function completedCapture(orderId: string) {
+    return {
+      orderId,
+      status: "COMPLETED",
+      packId: "default",
+      amount: "10.00",
+      currency: "USD",
+    };
+  }
+  const paypalFetch = globalThis.fetch;
+  let paypalNetwork = 0;
+  globalThis.fetch = (async () => {
+    paypalNetwork += 1;
+    throw new Error("network disabled");
+  }) as typeof fetch;
+  try {
+    paypal.setPayPalClientForTests({
+      async createOrder(draft) {
+        assert(draft.intent === "CAPTURE", "paypal order is a one-time capture");
+        const body = paypal.buildPayPalOrderBody(draft);
+        const text = JSON.stringify(body).toLowerCase();
+        assert(body.intent === "CAPTURE", "paypal payload intent is CAPTURE");
+        assert(!text.includes("subscription") && !text.includes("plan_id"), "paypal payload is not a subscription");
+        assert(draft.amount === "10.00" && draft.credits === 4, "paypal checkout uses the configured pack");
+        assert(draft.returnUrl.endsWith("/api/credits/paypal/return"), "capture returns to the server");
+        return { id: "PAYPALORDER1", url: "https://www.sandbox.paypal.com/checkoutnow?token=PAYPALORDER1" };
+      },
+      async captureOrder(orderId) {
+        return completedCapture(orderId);
+      },
+    });
+    paypal.setPayPalWebhookVerifierForTests(async (raw, headers) => {
+      if (headers.get("paypal-transmission-sig") !== "signed-test") return null;
+      return JSON.parse(raw) as Record<string, unknown>;
+    });
+    const started = await paypalCheckoutRoute.POST(
+      new NextRequest("http://127.0.0.1:3000/api/credits/paypal/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packId: "default" }),
+      })
+    );
+    const startedBody = await started.json();
+    assert(started.status === 200 && startedBody.url.includes("sandbox.paypal.com"), "paypal checkout returns the approval url");
+    assert(paypalNetwork === 0, "paypal checkout test did not call PayPal");
+
+    const returned = await paypalReturnRoute.GET(
+      new NextRequest("http://127.0.0.1:3000/api/credits/paypal/return?token=PAYPALORDER1")
+    );
+    assert(returned.status === 307 || returned.status === 302, "return route redirects after capture");
+    assert(
+      returned.headers.get("location")?.endsWith("/settings?credits=paypal"),
+      "return route lands on the paypal balance note"
+    );
+    assert(credits.getCreditBalance() === 4, "mocked paypal capture grants the shared credit balance");
+    const replay = await paypal.capturePayPalOrder("PAYPALORDER1");
+    assert(replay.duplicate === true && replay.granted === 0, "paypal capture replay does not double-credit");
+    assert(credits.getCreditBalance() === 4, "balance stays at one paypal grant");
+
+    process.env.PAYPAL_WEBHOOK_ID = "WH-TEST";
+    function captureEvent(orderId: string, amount = "10.00", eventType = "PAYMENT.CAPTURE.COMPLETED") {
+      return JSON.stringify({
+        event_type: eventType,
+        resource: {
+          id: `CAP-${orderId}`,
+          status: "COMPLETED",
+          custom_id: "default",
+          amount: { currency_code: "USD", value: amount },
+          supplementary_data: { related_ids: { order_id: orderId } },
+        },
+      });
+    }
+    async function postPayPalWebhook(payload: string, signature = "signed-test") {
+      return paypalWebhookRoute.POST(
+        new NextRequest("http://127.0.0.1:3000/api/credits/paypal/webhook", {
+          method: "POST",
+          headers: { "paypal-transmission-sig": signature, "content-type": "application/json" },
+          body: payload,
+        })
+      );
+    }
+    const replayHook = await postPayPalWebhook(captureEvent("PAYPALORDER1"));
+    const replayHookBody = await replayHook.json();
+    assert(
+      replayHook.status === 200 && replayHookBody.duplicate === true && replayHookBody.granted === 0,
+      "paypal webhook replay does not double-credit"
+    );
+    const second = await postPayPalWebhook(captureEvent("PAYPALORDER2"));
+    const secondBody = await second.json();
+    assert(second.status === 200 && secondBody.granted === 4 && secondBody.balance === 8, "a second order grants once");
+    const secondCapture = await paypal.capturePayPalOrder("PAYPALORDER2");
+    assert(secondCapture.duplicate === true && credits.getCreditBalance() === 8, "capture after webhook does not double-credit");
+    const mismatch = await postPayPalWebhook(captureEvent("PAYPALORDER3", "1.00"));
+    const mismatchBody = await mismatch.json();
+    assert(mismatch.status === 200 && mismatchBody.ignored === true, "amount mismatch is not credited");
+    const subscription = await postPayPalWebhook(captureEvent("PAYPALORDER4", "10.00", "BILLING.SUBSCRIPTION.ACTIVATED"));
+    const subscriptionBody = await subscription.json();
+    assert(subscription.status === 200 && subscriptionBody.ignored === true, "paypal subscriptions are not credited");
+    const badSig = await postPayPalWebhook(captureEvent("PAYPALORDER5"), "nope");
+    assert(badSig.status === 400, "bad paypal signature is rejected");
+    assert(credits.getCreditBalance() === 8, "rejected paypal events left the balance alone");
+    assert(paypalNetwork === 0, "paypal webhook grant does not call the network");
+
+    const paypalSettings = await (await settingsRoute.GET()).json();
+    const paypalSettingsText = JSON.stringify(paypalSettings);
+    assert(paypalSettings.env.paypalCredits === true, "settings show PayPal when it is configured");
+    assert(paypalSettings.env.stripeCredits === false, "settings hide Stripe when it is unset");
+    assert(paypalSettings.env.paypalPacks.length === 2, "settings list PayPal packs");
+    assert(paypalSettings.env.creditPacks.length === 0, "settings list no Stripe packs");
+    assert(!paypalSettingsText.includes("paypal_test_secret"), "settings omit the PayPal secret");
+    assert(!paypalSettingsText.includes("paypal_test_client"), "settings omit the PayPal client id");
+
+    process.env.PAYPAL_MODE = "live";
+    assert(paypal.paypalApiBase() === "https://api-m.paypal.com", "live mode selects the live API host");
+    process.env.PAYPAL_MODE = "sandbox";
+    process.env.STRIPE_SECRET_KEY = savedStripe.secret;
+    process.env.STRIPE_WEBHOOK_SECRET = savedStripe.webhook;
+    process.env.STRIPE_PRICE_CREDITS = savedStripe.price;
+    process.env.STRIPE_PRICE_CREDITS_STUDIO = savedStripe.studioPrice;
+    assert(credits.stripeCreditsEnabled() && credits.paypalCreditsEnabled(), "stripe and paypal can both be on");
+    const both = await (await settingsRoute.GET()).json();
+    assert(both.env.stripeCredits === true && both.env.creditPacks.length === 2, "both-on settings keep Stripe packs");
+    assert(both.env.paypalCredits === true && both.env.paypalPacks.length === 2, "both-on settings keep PayPal packs");
+    assert(both.env.creditBalance === 8, "both providers share one balance");
+    const spentBack = credits.deductCredits(8, "restore test balance");
+    assert(spentBack.ok && credits.getCreditBalance() === 0, "test balance returns to zero");
+  } finally {
+    globalThis.fetch = paypalFetch;
+    paypal.setPayPalClientForTests(null);
+    paypal.setPayPalWebhookVerifierForTests(null);
+    process.env.PAYPAL_MODE = "sandbox";
+    delete process.env.PAYPAL_WEBHOOK_ID;
+    if (savedStripe.secret) process.env.STRIPE_SECRET_KEY = savedStripe.secret;
+    if (savedStripe.webhook) process.env.STRIPE_WEBHOOK_SECRET = savedStripe.webhook;
+    if (savedStripe.price) process.env.STRIPE_PRICE_CREDITS = savedStripe.price;
+    if (savedStripe.studioPrice) process.env.STRIPE_PRICE_CREDITS_STUDIO = savedStripe.studioPrice;
+  }
 
   storage.saveSettings({ provider: "mock" });
   const offline = storage.createProject("Air gap");

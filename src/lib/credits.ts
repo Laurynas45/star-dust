@@ -1,13 +1,16 @@
 import { v4 as uuidv4 } from "uuid";
 import { isPaidProvider } from "./provider-info";
 import { getDb } from "./storage";
-import { CreditEstimate, ProviderId, PublicCreditPack } from "./types";
+import { CreditEstimate, ProviderId, PublicCreditPack, PublicPayPalPack } from "./types";
 
 export interface CreditPack extends PublicCreditPack {
   priceId: string;
 }
 
+export type PayPalPack = PublicPayPalPack;
+
 const NAMED_PRICE = /^STRIPE_PRICE_CREDITS_([A-Z0-9]+)$/;
+const NAMED_PAYPAL_AMOUNT = /^PAYPAL_PACK_AMOUNT_([A-Z0-9]+)$/;
 
 function positiveInt(value: string | undefined): number | undefined {
   if (value == null || value.trim() === "") return undefined;
@@ -65,9 +68,91 @@ export function packByPriceId(
   return listPacks(env).find((pack) => pack.priceId === priceId);
 }
 
-/** Hosted mode is on only when a secret key and at least one pack are set. */
-export function hostedCreditsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+export function paypalCurrency(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.PAYPAL_CURRENCY?.trim().toUpperCase() ?? "";
+  return /^[A-Z]{3}$/.test(raw) ? raw : "USD";
+}
+
+/** Positive money with at most two decimal places, formatted for PayPal. */
+export function paypalMoney(value: string | undefined): string | undefined {
+  if (value == null) return undefined;
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return parsed.toFixed(2);
+}
+
+/**
+ * One-time PayPal packs. Credit counts follow PAYPAL_CREDITS_*, then the
+ * Stripe pack with the same name, then 100 for the default pack only.
+ */
+export function listPayPalPacks(env: NodeJS.ProcessEnv = process.env): PayPalPack[] {
+  const currency = paypalCurrency(env);
+  const packs: PayPalPack[] = [];
+  const single = paypalMoney(env.PAYPAL_PACK_AMOUNT);
+  if (single) {
+    packs.push({
+      id: "default",
+      label: "Credit pack",
+      credits:
+        positiveInt(env.PAYPAL_CREDITS_AMOUNT) ?? positiveInt(env.STRIPE_CREDITS_AMOUNT) ?? 100,
+      amount: single,
+      currency,
+    });
+  }
+  for (const key of Object.keys(env)) {
+    const match = NAMED_PAYPAL_AMOUNT.exec(key);
+    if (!match) continue;
+    const amount = paypalMoney(env[key]);
+    if (!amount) continue;
+    const credits =
+      positiveInt(env[`PAYPAL_CREDITS_${match[1]}`]) ?? positiveInt(env[`STRIPE_CREDITS_${match[1]}`]);
+    if (!credits) continue;
+    packs.push({
+      id: match[1].toLowerCase(),
+      label: `${titleFromSuffix(match[1])} pack`,
+      credits,
+      amount,
+      currency,
+    });
+  }
+  return packs;
+}
+
+export function publicPayPalPacks(env: NodeJS.ProcessEnv = process.env): PublicPayPalPack[] {
+  return listPayPalPacks(env).map(({ id, label, credits, amount, currency }) => ({
+    id,
+    label,
+    credits,
+    amount,
+    currency,
+  }));
+}
+
+export function paypalPackById(
+  id: string,
+  env: NodeJS.ProcessEnv = process.env
+): PayPalPack | undefined {
+  return listPayPalPacks(env).find((pack) => pack.id === id);
+}
+
+/** Stripe Checkout is on only when a secret key and at least one price are set. */
+export function stripeCreditsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.STRIPE_SECRET_KEY?.trim()) && listPacks(env).length > 0;
+}
+
+/** PayPal Orders is on only when API credentials and at least one amount are set. */
+export function paypalCreditsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    Boolean(env.PAYPAL_CLIENT_ID?.trim() && env.PAYPAL_CLIENT_SECRET?.trim()) &&
+    listPayPalPacks(env).length > 0
+  );
+}
+
+/** Hosted mode is on when either one-time checkout is configured. */
+export function hostedCreditsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return stripeCreditsEnabled(env) || paypalCreditsEnabled(env);
 }
 
 export function creditsPerSecond(env: NodeJS.ProcessEnv = process.env): number {
@@ -109,9 +194,39 @@ export function grantPackCredits(
     const balance = db
       .transaction(() => {
         db.prepare(
-          `INSERT INTO credit_ledger (id, delta, reason, stripe_session_id, detail, created_at)
-           VALUES (?, ?, 'purchase', ?, ?, ?)`
+          `INSERT INTO credit_ledger (id, delta, reason, stripe_session_id, paypal_order_id, detail, created_at)
+           VALUES (?, ?, 'purchase', ?, NULL, ?, ?)`
         ).run(uuidv4(), pack.credits, sessionId, pack.id, now);
+        return getCreditBalance();
+      })
+      .immediate();
+    return { ok: true, granted: pack.credits, balance, duplicate: false };
+  } catch (err) {
+    if (isUniqueConstraint(err)) {
+      return { ok: true, granted: 0, balance: getCreditBalance(), duplicate: true };
+    }
+    throw err;
+  }
+}
+
+/** Same ledger as Stripe. A PayPal order id can be granted only once. */
+export function grantPayPalCredits(
+  orderId: string,
+  pack: PayPalPack
+):
+  | { ok: true; granted: number; balance: number; duplicate: boolean }
+  | { ok: false; error: string } {
+  const id = orderId.trim();
+  if (!id) return { ok: false, error: "PayPal order is missing." };
+  const db = getDb();
+  const now = new Date().toISOString();
+  try {
+    const balance = db
+      .transaction(() => {
+        db.prepare(
+          `INSERT INTO credit_ledger (id, delta, reason, stripe_session_id, paypal_order_id, detail, created_at)
+           VALUES (?, ?, 'purchase', NULL, ?, ?, ?)`
+        ).run(uuidv4(), pack.credits, id, pack.id, now);
         return getCreditBalance();
       })
       .immediate();
@@ -146,7 +261,7 @@ export function deductCredits(amount: number, detail: string): { ok: boolean; ba
 
 /**
  * Credit meter for a paid fal/Replicate run.
- * Returns undefined when Stripe packs are not configured (Phase 1).
+ * Returns undefined when neither Stripe nor PayPal packs are configured (Phase 1).
  */
 export function creditEstimate(
   seconds: number,

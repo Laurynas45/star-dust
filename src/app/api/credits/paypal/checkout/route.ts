@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { stripeCreditsEnabled } from "@/lib/credits";
-import { createCreditCheckout } from "@/lib/stripe-billing";
+import { paypalCreditsEnabled } from "@/lib/credits";
+import { createPayPalCheckout } from "@/lib/paypal-billing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,15 +11,15 @@ function clientError(err: unknown): string {
 }
 
 export async function POST(req: NextRequest) {
-  if (!stripeCreditsEnabled()) {
-    return NextResponse.json({ error: "Hosted credits are off." }, { status: 404 });
+  if (!paypalCreditsEnabled()) {
+    return NextResponse.json({ error: "PayPal credits are off." }, { status: 404 });
   }
   const body = await req.json().catch(() => ({}));
   const packId =
     typeof body.packId === "string" && body.packId.trim() ? body.packId.trim() : "default";
   try {
-    const session = await createCreditCheckout({ packId, origin: req.nextUrl.origin });
-    return NextResponse.json({ url: session.url });
+    const order = await createPayPalCheckout({ packId, origin: req.nextUrl.origin });
+    return NextResponse.json({ url: order.url });
   } catch (err) {
     return NextResponse.json({ error: clientError(err) }, { status: 400 });
   }

@@ -115,6 +115,7 @@ function openDatabase(): DB {
       delta INTEGER NOT NULL,
       reason TEXT NOT NULL,
       stripe_session_id TEXT,
+      paypal_order_id TEXT,
       detail TEXT,
       created_at TEXT NOT NULL
     );
@@ -123,6 +124,11 @@ function openDatabase(): DB {
       WHERE stripe_session_id IS NOT NULL;
   `);
   migrate(db);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_paypal
+      ON credit_ledger(paypal_order_id)
+      WHERE paypal_order_id IS NOT NULL;
+  `);
   const settings = db.prepare("SELECT id FROM settings WHERE id = 1").get();
   if (!settings) {
     db.prepare(
@@ -163,6 +169,9 @@ function migrate(db: DB) {
   }
   if (!hasColumn(db, "settings", "comfyui_workflow")) {
     db.exec("ALTER TABLE settings ADD COLUMN comfyui_workflow TEXT NOT NULL DEFAULT 'svd'");
+  }
+  if (!hasColumn(db, "credit_ledger", "paypal_order_id")) {
+    db.exec("ALTER TABLE credit_ledger ADD COLUMN paypal_order_id TEXT");
   }
 }
 

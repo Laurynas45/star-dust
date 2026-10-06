@@ -103,7 +103,7 @@ function insufficientFailure(
   };
 }
 
-/** Spends hosted credits after the key check. No-op when Stripe packs are unset. */
+/** Spends hosted credits after the key check. No-op when Stripe and PayPal are unset. */
 function chargeCredits(
   provider: ProviderId,
   seconds: number,
