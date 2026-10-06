@@ -1,4 +1,5 @@
-import { buildEstimate } from "./cost";
+import { creditEstimate, deductCredits } from "./credits";
+import { buildEstimate, withCredits } from "./cost";
 import {
   CLOUD_RISK_NOTE,
   describeProviderUse,
@@ -10,7 +11,7 @@ import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "./safety";
 import { createJob, getProject, getSettings, getShot, listJobs, listShots } from "./storage";
 import { classifyShot, skipReasonText } from "./takes";
 import { imageExists } from "./uploads";
-import { CostEstimate, Job, JobKind, ProviderId, Shot } from "./types";
+import { CostEstimate, CreditEstimate, Job, JobKind, ProviderId, Shot } from "./types";
 
 export type SkippedShot = {
   shotId: string;
@@ -29,6 +30,7 @@ export type RenderFailure = {
   priceAvailable?: false;
   riskNote?: string;
   overBudget?: boolean;
+  insufficientCredits?: boolean;
   cost?: CostEstimate;
 };
 
@@ -70,6 +72,56 @@ function keyFailure(provider: ProviderId): RenderFailure | null {
     priceAvailable: false,
     riskNote: CLOUD_RISK_NOTE,
   };
+}
+
+function creditState(
+  provider: ProviderId,
+  seconds: number,
+  cost?: CostEstimate
+): CreditEstimate | undefined {
+  if (cost?.credits) return cost.credits;
+  if (!isPaidProvider(provider)) return undefined;
+  return creditEstimate(Math.max(0, seconds), provider);
+}
+
+function insufficientFailure(
+  provider: ProviderId,
+  seconds: number,
+  cost?: CostEstimate
+): RenderFailure | null {
+  const credits = creditState(provider, seconds, cost);
+  if (!credits?.insufficient) return null;
+  return {
+    ok: false,
+    status: 409,
+    error: credits.label,
+    insufficientCredits: true,
+    cost: cost ? { ...cost, credits } : undefined,
+    modelName: modelNameFor(provider, getSettings()),
+    priceAvailable: false,
+    riskNote: CLOUD_RISK_NOTE,
+  };
+}
+
+/** Spends hosted credits after the key check. No-op when Stripe packs are unset. */
+function chargeCredits(
+  provider: ProviderId,
+  seconds: number,
+  detail: string,
+  cost?: CostEstimate
+): RenderFailure | null {
+  const credits = creditState(provider, seconds, cost);
+  if (!credits?.hosted || credits.required <= 0) return null;
+  const spent = deductCredits(credits.required, detail);
+  if (!spent.ok) {
+    const fresh = creditEstimate(seconds, provider);
+    if (cost && fresh) cost.credits = fresh;
+    return insufficientFailure(provider, seconds, cost);
+  }
+  if (cost?.credits) {
+    cost.credits = { ...cost.credits, balance: spent.balance, insufficient: false };
+  }
+  return null;
 }
 
 function prepareShot(shotId: string):
@@ -164,8 +216,13 @@ export function renderShot(
   }
   const ack = ackFailure(provider, opts?.acknowledgeModel);
   if (ack) return ack;
+  const seconds = Number(prepared.shot.durationSec) || 0;
+  const short = insufficientFailure(provider, seconds);
+  if (short) return short;
   const key = keyFailure(provider);
   if (key) return key;
+  const charged = chargeCredits(provider, seconds, `shot ${prepared.shot.id}`);
+  if (charged) return charged;
   return { ok: true, jobs: [queueJob(prepared.shot, provider, "take")], skipped: [] };
 }
 
@@ -205,7 +262,11 @@ export function renderAll(
   }
 
   const seconds = pending.reduce((sum, shot) => sum + (Number(shot.durationSec) || 0), 0);
-  const cost = buildEstimate({ provider, modelName, seconds, settings });
+  const cost = withCredits(
+    buildEstimate({ provider, modelName, seconds, settings }),
+    provider,
+    seconds
+  );
   if (pending.length === 0) {
     return { ok: true, jobs: [], skipped, cost };
   }
@@ -224,8 +285,12 @@ export function renderAll(
       riskNote: CLOUD_RISK_NOTE,
     };
   }
+  const short = insufficientFailure(provider, seconds, cost);
+  if (short) return short;
   const key = keyFailure(provider);
   if (key) return { ...key, cost };
+  const charged = chargeCredits(provider, seconds, `render-all ${projectId}`, cost);
+  if (charged) return charged;
 
   const base = Date.now();
   const jobs = pending.map((shot, index) =>
@@ -273,8 +338,13 @@ export function retryFromJob(
   const provider = source.provider;
   const ack = ackFailure(provider, opts?.acknowledgeModel);
   if (ack) return ack;
+  const seconds = source.kind === "preview" ? 0 : Number(source.durationSec) || 0;
+  const short = insufficientFailure(provider, seconds);
+  if (short) return short;
   const key = keyFailure(provider);
   if (key) return key;
+  const charged = chargeCredits(provider, seconds, `retry ${source.id}`);
+  if (charged) return charged;
   const described = describeProviderUse({
     provider,
     settings,

@@ -19,8 +19,8 @@ export default function RootLayout({
         <Nav />
         <main className="mx-auto max-w-6xl px-4 py-8">{children}</main>
         <footer className="mx-auto max-w-6xl px-4 pb-10 text-xs text-[var(--muted)]">
-          Local studio, MIT license. Mock is camera motion only. A hosted pack
-          with accounts and billing is not in this release.
+          Local studio, MIT license. Mock is camera motion only and needs no account.
+          Hosted credit packs and the self-hosted pack are optional.
         </footer>
       </body>
     </html>

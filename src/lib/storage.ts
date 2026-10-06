@@ -110,6 +110,17 @@ function openDatabase(): DB {
     CREATE INDEX IF NOT EXISTS idx_shots_project ON shots(project_id, position);
     CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_jobs_shot ON jobs(shot_id);
+    CREATE TABLE IF NOT EXISTS credit_ledger (
+      id TEXT PRIMARY KEY,
+      delta INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      stripe_session_id TEXT,
+      detail TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_session
+      ON credit_ledger(stripe_session_id)
+      WHERE stripe_session_id IS NOT NULL;
   `);
   migrate(db);
   const settings = db.prepare("SELECT id FROM settings WHERE id = 1").get();

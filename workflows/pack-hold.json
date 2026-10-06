@@ -1,0 +1,6 @@
+{
+  "id": "pack-hold",
+  "title": "Pack hold",
+  "kind": "worker-plan",
+  "note": "Optional self-hosted pack. Local shot order for your own worker. Not a cloud model. Star Dust does not phone home. The MIT studio runs without this file."
+}

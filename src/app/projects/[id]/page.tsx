@@ -125,6 +125,7 @@ export default function ProjectStudioPage() {
   const provider: ProviderId = settings?.provider ?? "mock";
   const modelName = settings ? modelNameFor(provider, settings) : CAPABILITY.mock.title;
   const paid = isPaidProvider(provider);
+  const spendBlocked = Boolean(paid && (cost?.overBudget || cost?.credits?.insufficient));
   const takeClips = useMemo(
     () => jobs.filter((job) => job.kind !== "preview" && job.status === "completed" && job.outputPath),
     [jobs]
@@ -177,12 +178,12 @@ export default function ProjectStudioPage() {
         if (data.cost) setAckCost(data.cost as CostEstimate);
         if (data.needsModelAck && data.modelName) {
           setPending(action);
-          setError(data.overBudget ? data.error : null);
+          setError(data.overBudget || data.insufficientCredits ? data.error : null);
           return;
         }
-        if (data.overBudget) {
+        if (data.overBudget || data.insufficientCredits) {
           setPending(action);
-          setError(data.error || "Over your budget cap");
+          setError(data.error || "Paid Render all is blocked");
           return;
         }
         throw new Error(data.error || "Could not queue the render");
@@ -405,7 +406,7 @@ export default function ProjectStudioPage() {
           <button
             type="button"
             className="btn-primary mt-3 w-full"
-            disabled={busy || shots.length === 0 || Boolean(paid && cost?.overBudget)}
+            disabled={busy || shots.length === 0 || spendBlocked}
             onClick={() => ask({ kind: "all" })}
           >
             {busy ? "Working…" : "Render all"}
@@ -450,7 +451,7 @@ export default function ProjectStudioPage() {
       {paid && (
         <div
           className={`rounded-xl border px-4 py-3 text-sm ${
-            cost?.overBudget
+            spendBlocked
               ? "border-rose-400/40 bg-rose-500/10 text-rose-50"
               : "border-amber-400/30 bg-amber-400/10 text-amber-50"
           }`}
@@ -461,6 +462,9 @@ export default function ProjectStudioPage() {
           <p className="mt-1 text-xs leading-relaxed text-current/80">
             {cost?.label ?? "Cost unknown. No per-second rate is set for this model."}
           </p>
+          {cost?.credits?.hosted && (
+            <p className="mt-1 text-xs leading-relaxed text-current/80">{cost.credits.label}</p>
+          )}
           <p className="mt-1 text-xs text-current/70">{CLOUD_RISK_NOTE}</p>
         </div>
       )}
@@ -948,6 +952,11 @@ export default function ProjectStudioPage() {
                   "Cost unknown. No per-second rate is set for this model. This is not a vendor quote."}
               </p>
             )}
+            {(ackCost ?? cost)?.credits?.hosted && pending.kind === "all" && (
+              <p className="mt-3 text-sm leading-relaxed text-white">
+                {(ackCost ?? cost)?.credits?.label}
+              </p>
+            )}
             <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
                 type="button"
@@ -963,7 +972,13 @@ export default function ProjectStudioPage() {
               <button
                 type="button"
                 className="btn-primary"
-                disabled={busy || Boolean(pending.kind === "all" && (ackCost ?? cost)?.overBudget)}
+                disabled={
+                  busy ||
+                  Boolean(
+                    pending.kind === "all" &&
+                      ((ackCost ?? cost)?.overBudget || (ackCost ?? cost)?.credits?.insufficient)
+                  )
+                }
                 onClick={() => void run(pending, confirmModel)}
               >
                 {busy ? "Queuing…" : "Run this model"}
