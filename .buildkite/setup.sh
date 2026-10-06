@@ -6,7 +6,8 @@ set -euo pipefail
 
 export CI=true
 export DEBIAN_FRONTEND=noninteractive
-unset FAL_KEY REPLICATE_API_TOKEN
+unset FAL_KEY REPLICATE_API_TOKEN STAR_DUST_LICENSE_KEY STAR_DUST_CREDITS_PER_SECOND
+unset STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET STRIPE_PRICE_CREDITS STRIPE_CREDITS_AMOUNT
 
 apt_install() {
   if ! command -v apt-get >/dev/null 2>&1; then

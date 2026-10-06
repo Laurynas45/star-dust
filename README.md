@@ -18,7 +18,7 @@ docker compose up --build
 
 Open [http://localhost:3000](http://localhost:3000). Harbor dusk is already on the studio page, with two shots and a still. Leave the provider on **Mock**, choose **Render all**, then **Export stitch** or download the mp4.
 
-The app listens on port 3000. Clips and the SQLite database stay in `./data` on the host. Keys are not baked into the image. If you later point at fal or Replicate, pass `FAL_KEY` or `REPLICATE_API_TOKEN` in the environment.
+The app listens on port 3000. Clips and the SQLite database stay in `./data` on the host. Keys are not baked into the image. Stripe and a license key are not required. If you later point at fal or Replicate, pass `FAL_KEY` or `REPLICATE_API_TOKEN` in the environment.
 
 ## Providers
 
@@ -84,24 +84,28 @@ npm run build
 npm run test:providers
 ```
 
-`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan workflow injection against that stand-in, and a local stitch. It does not call fal, Replicate, or a real ComfyUI server.
+`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan workflow injection against that stand-in, and a local stitch. It also checks that Stripe left unset stays on that same path, that a signed webhook grants a credit pack without calling Stripe, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, or a real ComfyUI server.
 
 ## Safety
 
 Star Dust refuses sexual content involving a minor before a job is queued and does not store that image.
 
-## This release, and a hosted pack later
+## Hosted credits / self-hosted pack
 
-This repository is the local studio, MIT licensed. Run it on your machine. Bring your own cloud key if you want one.
+Docker, Mock, the shot list, preview cut, and the stitch are the free studio. They need no account, no Stripe key, and no license key. `npm run demo` stays offline.
 
-A hosted pack — accounts and billing — is not in this release. Nothing here charges a card. The shot list, the render queue, and the stitch are the surface that pack would sit on.
+**Hosted credits** turn on only when `STRIPE_SECRET_KEY` and a one-time price id are set. Use `STRIPE_PRICE_CREDITS` (credits come from `STRIPE_CREDITS_AMOUNT`, or 100 if that is empty) or a named pair such as `STRIPE_PRICE_CREDITS_STUDIO` and `STRIPE_CREDITS_STUDIO`. Checkout is a one-time pack, not a subscription. There is one balance for this installation, stored in the local SQLite file, not a per-person account. The webhook adds credits after Stripe reports the payment as paid. The same Checkout session cannot add credits twice. A paid fal or Replicate **Render all** estimates one credit per second (override with `STAR_DUST_CREDITS_PER_SECOND`) and is blocked when the balance is lower. Credits are spent when those jobs are queued. A single shot and a retry use the same balance, so they cannot skip it. The operator's `FAL_KEY` or `REPLICATE_API_TOKEN` still has to be in the environment. Mock, ComfyUI, preview cut, and stitch do not spend credits. If the Stripe variables are empty, the pay buttons stay hidden and Render all behaves as before: your own key, your own per-second rate, and the optional budget cap.
+
+**Self-hosted pack** is optional and does not gate that core. Set `STAR_DUST_LICENSE_KEY` to unlock a local worker plan (`workflows/pack-hold.json`, `npx tsx scripts/pack-worker.ts <projectId>`, and `GET /api/projects/<id>/pack-worker`). Any non-empty value unlocks it. The key is read from the environment only. Star Dust does not call a license server, so an air-gapped Mock render still runs when the key is unset. Without the key, Mock, fal, Replicate, ComfyUI, and the shipped SVD and Wan graphs stay available.
 
 ## Layout
 
 ```
 src/app/                 studio UI and API
-src/lib/storage.ts       SQLite (data/star-dust.sqlite)
+src/lib/storage.ts       SQLite (data/star-dust.sqlite), including the optional credit ledger
+src/lib/credits.ts       hosted credit balance, off unless Stripe packs are set
+src/lib/pack.ts          optional self-hosted pack (local license check)
 src/lib/providers/       mock, fal, Replicate, ComfyUI
-workflows/               shipped ComfyUI graphs (SVD and Wan 2.2 TI2V-5B)
+workflows/               shipped ComfyUI graphs (SVD and Wan 2.2 TI2V-5B) and the optional pack plan
 samples/                 Harbor dusk still and shot list
 ```

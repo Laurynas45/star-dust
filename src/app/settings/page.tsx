@@ -2,10 +2,18 @@
 
 import { useEffect, useState } from "react";
 import { CAPABILITY, CLOUD_RISK_NOTE, COMFY_WORKFLOWS } from "@/lib/provider-info";
-import { AppSettings, ComfyWorkflowId, ProviderId } from "@/lib/types";
+import { AppSettings, ComfyWorkflowId, ProviderId, StudioEnv } from "@/lib/types";
 
-type SettingsResponse = AppSettings & {
-  env: { hasFalKey: boolean; hasReplicateToken: boolean };
+type SettingsResponse = AppSettings & { env: StudioEnv };
+
+const EMPTY_ENV: StudioEnv = {
+  hasFalKey: false,
+  hasReplicateToken: false,
+  hostedCredits: false,
+  creditBalance: null,
+  creditPacks: [],
+  packUnlocked: false,
+  packWorkflows: [],
 };
 
 const ORDER: ProviderId[] = ["mock", "fal", "replicate", "comfyui"];
@@ -16,6 +24,8 @@ export default function SettingsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [probeMsg, setProbeMsg] = useState<string | null>(null);
+  const [creditNote, setCreditNote] = useState<string | null>(null);
+  const [buying, setBuying] = useState<string | null>(null);
 
   useEffect(() => {
     void fetch("/api/settings")
@@ -26,6 +36,18 @@ export default function SettingsPage() {
       .then(setSettings)
       .catch(() => setError("Could not load providers."));
   }, []);
+
+  useEffect(() => {
+    if (!settings?.env.hostedCredits) return;
+    const flag = new URLSearchParams(window.location.search).get("credits");
+    if (flag === "success") {
+      setCreditNote(
+        "Stripe accepted the payment. The balance updates when the webhook confirms it. Opening this page does not add credits."
+      );
+    } else if (flag === "cancel") {
+      setCreditNote("Checkout was cancelled. No credits were added.");
+    }
+  }, [settings?.env.hostedCredits]);
 
   async function save(patch: Record<string, unknown>) {
     setSaving(true);
@@ -41,7 +63,7 @@ export default function SettingsPage() {
       setSettings((prev) =>
         prev
           ? { ...prev, ...data }
-          : { ...data, env: data.env ?? { hasFalKey: false, hasReplicateToken: false } }
+          : { ...data, env: data.env ?? EMPTY_ENV }
       );
       setMessage("Saved");
     } catch (err) {
@@ -61,6 +83,32 @@ export default function SettingsPage() {
     });
     const data = await res.json();
     setProbeMsg(data.message);
+  }
+
+  async function refreshBalance() {
+    const res = await fetch("/api/settings");
+    if (!res.ok) return;
+    setSettings(await res.json());
+  }
+
+  async function buy(packId: string) {
+    setBuying(packId);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/credits/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packId }),
+      });
+      const data = await res.json();
+      if (!res.ok || typeof data.url !== "string") {
+        throw new Error(data.error || "Could not start checkout.");
+      }
+      window.location.href = data.url;
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not start checkout.");
+      setBuying(null);
+    }
   }
 
   function saveRate(provider: "fal" | "replicate", model: string, raw: string) {
@@ -138,6 +186,40 @@ export default function SettingsPage() {
         </ul>
         <p className="text-xs leading-relaxed text-[var(--muted)]">{CLOUD_RISK_NOTE}</p>
       </section>
+
+      {settings.env.hostedCredits && (
+        <section className="panel space-y-4 p-6">
+          <h2 className="text-sm font-semibold text-violet-200">Hosted credits</h2>
+          <p className="text-xs leading-relaxed text-[var(--muted)]">
+            One-time Stripe packs for this installation. Not a subscription. Mock,
+            preview cut, and stitch do not spend credits. A paid fal or Replicate
+            Render all does, and it is blocked when the balance is too low.
+          </p>
+          <p className="text-sm text-white">
+            Balance:{" "}
+            <span className="font-semibold">{settings.env.creditBalance ?? 0}</span> credits
+          </p>
+          {creditNote && <p className="text-xs text-amber-100">{creditNote}</p>}
+          <div className="flex flex-wrap gap-2">
+            {settings.env.creditPacks.map((pack) => (
+              <button
+                key={pack.id}
+                type="button"
+                className="btn-primary"
+                disabled={buying !== null}
+                onClick={() => void buy(pack.id)}
+              >
+                {buying === pack.id
+                  ? "Opening checkout…"
+                  : `Buy ${pack.label} (${pack.credits} credits)`}
+              </button>
+            ))}
+            <button type="button" className="btn-ghost" onClick={() => void refreshBalance()}>
+              Refresh balance
+            </button>
+          </div>
+        </section>
+      )}
 
       <section className="panel space-y-4 p-6">
         <h2 className="text-sm font-semibold text-violet-200">Your rates</h2>
@@ -310,9 +392,27 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      <p className="text-xs text-[var(--muted)]">
-        This release is the local studio. Accounts and billing are not wired up.
-      </p>
+      <section className="panel space-y-3 p-6">
+        <h2 className="text-sm font-semibold text-violet-200">Self-hosted pack</h2>
+        <p className="text-xs leading-relaxed text-[var(--muted)]">
+          Optional. The MIT studio does not need a license. Set{" "}
+          <code className="text-violet-300">STAR_DUST_LICENSE_KEY</code> in the
+          environment to unlock a local worker plan. The key stays in the
+          environment and is not sent anywhere.
+          {settings.env.hostedCredits
+            ? " Hosted credit packs are on for this process."
+            : " Hosted credit packs stay hidden until Stripe is configured."}
+        </p>
+        <p className="text-sm text-white">
+          {settings.env.packUnlocked ? "Pack unlocked." : "Pack locked. Core providers still run."}
+        </p>
+        {settings.env.packUnlocked &&
+          settings.env.packWorkflows.map((workflow) => (
+            <p key={workflow.id} className="text-xs leading-relaxed text-[var(--muted)]">
+              <span className="text-white">{workflow.title}.</span> {workflow.detail}
+            </p>
+          ))}
+      </section>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { studioEnv } from "@/lib/studio-env";
 import { getSettings, saveSettings } from "@/lib/storage";
 import { AppSettings, ComfyWorkflowId, ProviderId, RateTable } from "@/lib/types";
 
@@ -6,13 +7,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function withEnv(settings: AppSettings) {
-  return {
-    ...settings,
-    env: {
-      hasFalKey: Boolean(process.env.FAL_KEY),
-      hasReplicateToken: Boolean(process.env.REPLICATE_API_TOKEN),
-    },
-  };
+  return { ...settings, env: studioEnv() };
 }
 
 export async function GET() {

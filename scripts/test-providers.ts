@@ -8,6 +8,11 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "star-dust-test-"));
 process.env.STAR_DUST_DATA = dataDir;
 delete process.env.FAL_KEY;
 delete process.env.REPLICATE_API_TOKEN;
+delete process.env.STAR_DUST_LICENSE_KEY;
+delete process.env.STAR_DUST_CREDITS_PER_SECOND;
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith("STRIPE_")) delete process.env[key];
+}
 
 function assert(cond: unknown, message: string) {
   if (!cond) throw new Error(message);
@@ -538,6 +543,242 @@ async function main() {
   assert(saved.rates.fal["fal-ai/test-model"] === 0.25, "rate stored in settings");
   assert(!JSON.stringify(saved).includes("FAL_KEY"), "settings have no key");
   assert(saved.budgetCap === 1000, "budget cap stored");
+
+  const credits = await import("../src/lib/credits");
+  const billing = await import("../src/lib/stripe-billing");
+  const pack = await import("../src/lib/pack");
+  const { NextRequest } = await import("next/server");
+  const checkoutRoute = await import("../src/app/api/credits/checkout/route");
+  const webhookRoute = await import("../src/app/api/credits/webhook/route");
+  const settingsRoute = await import("../src/app/api/settings/route");
+  const packRoute = await import("../src/app/api/pack/route");
+  const workerRoute = await import("../src/app/api/projects/[id]/pack-worker/route");
+
+  const phase = storage.createProject("Phase 1");
+  storage.createShot({
+    projectId: phase.id,
+    prompt: "A quiet harbor.",
+    presetId: "slow-zoom-in",
+    durationSec: 4,
+    startImagePath: shot.startImagePath,
+  });
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": 0.25 }, replicate: {} },
+    budgetCap: null,
+  });
+  assert(credits.hostedCreditsEnabled() === false, "stripe unset is not hosted mode");
+  const phase1 = render.renderAll(phase.id);
+  assert(!phase1.ok && phase1.needsModelAck, "stripe unset still asks for the model");
+  assert(!phase1.insufficientCredits, "stripe unset does not block on credits");
+  assert(phase1.cost?.credits == null, "stripe unset leaves the Phase 1 cost shape");
+  const offCheckout = await checkoutRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/credits/checkout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packId: "default" }),
+    })
+  );
+  assert(offCheckout.status === 404, "checkout is hidden when Stripe is unset");
+  const offHook = await webhookRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/credits/webhook", { method: "POST", body: "{}" })
+  );
+  assert(offHook.status === 404, "webhook is hidden when Stripe is unset");
+  const lockedPack = await packRoute.GET();
+  const lockedBody = await lockedPack.json();
+  assert(lockedPack.status === 200 && lockedBody.unlocked === false, "license unset keeps the pack locked");
+  assert(lockedBody.workflowFile == null, "locked pack does not advertise the workflow");
+
+  process.env.STRIPE_SECRET_KEY = "sk_test_placeholder";
+  process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_secret";
+  process.env.STRIPE_PRICE_CREDITS = "price_test_pack";
+  process.env.STRIPE_CREDITS_AMOUNT = "4";
+  process.env.STRIPE_PRICE_CREDITS_STUDIO = "price_test_studio";
+  process.env.STRIPE_CREDITS_STUDIO = "10";
+  process.env.STAR_DUST_CREDITS_PER_SECOND = "1";
+  assert(credits.hostedCreditsEnabled(), "secret plus a price turns hosted credits on");
+  const publicPacks = credits.publicCreditPacks();
+  assert(publicPacks.length === 2, "default pack and named pack");
+  assert(!JSON.stringify(publicPacks).includes("price_"), "price ids stay off the public pack list");
+  assert(credits.getCreditBalance() === 0, "balance starts at zero");
+
+  const settingsOn = await (await settingsRoute.GET()).json();
+  const settingsText = JSON.stringify(settingsOn);
+  assert(settingsOn.env.hostedCredits === true, "settings report hosted credits");
+  assert(settingsOn.env.creditBalance === 0, "settings report the balance");
+  assert(settingsOn.env.packUnlocked === false, "settings do not unlock the pack");
+  assert(!settingsText.includes("sk_test_placeholder"), "settings omit the Stripe secret");
+  assert(!settingsText.includes("whsec_test_secret"), "settings omit the webhook secret");
+  assert(!settingsText.includes("price_test_pack"), "settings omit price ids");
+
+  const blocked = render.renderAll(phase.id, { acknowledgeModel: "fal-ai/test-model" });
+  assert(!blocked.ok && blocked.insufficientCredits, "low balance blocks paid render all");
+  assert(blocked.cost?.credits?.required === 4, "render all estimates one credit per second");
+  assert(/not enough hosted credits/i.test(blocked.error), "block names the credit balance");
+  assert(credits.getCreditBalance() === 0, "a blocked render does not spend credits");
+  assert(storage.listJobs(phase.id).every((job) => job.provider !== "fal"), "blocked render queued nothing");
+
+  const blockedShot = render.renderShot(storage.listShots(phase.id)[0].id, {
+    acknowledgeModel: "fal-ai/test-model",
+  });
+  assert(!blockedShot.ok && blockedShot.insufficientCredits, "a single paid shot cannot bypass the balance");
+
+  const Stripe = (await import("stripe")).default;
+  function signedEvent(payload: string) {
+    return Stripe.webhooks.generateTestHeaderString({ payload, secret: "whsec_test_secret" });
+  }
+  async function postWebhook(payload: string, signature: string) {
+    return webhookRoute.POST(
+      new NextRequest("http://127.0.0.1:3000/api/credits/webhook", {
+        method: "POST",
+        headers: { "stripe-signature": signature, "content-type": "application/json" },
+        body: payload,
+      })
+    );
+  }
+  const grantPayload = JSON.stringify({
+    id: "evt_test_grant",
+    object: "event",
+    type: "checkout.session.completed",
+    data: {
+      object: {
+        id: "cs_test_grant",
+        object: "checkout.session",
+        mode: "payment",
+        payment_status: "paid",
+        metadata: { priceId: "price_test_pack", packId: "default", credits: "9999" },
+      },
+    },
+  });
+  const prevFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = (async () => {
+    networkCalls += 1;
+    throw new Error("network disabled");
+  }) as typeof fetch;
+  try {
+    const granted = await postWebhook(grantPayload, signedEvent(grantPayload));
+    const grantedBody = await granted.json();
+    assert(granted.status === 200 && grantedBody.granted === 4, "webhook grants the configured pack");
+    assert(grantedBody.balance === 4, "webhook balance is the pack size, not metadata credits");
+    assert(networkCalls === 0, "webhook grant does not call the network");
+    const replay = await postWebhook(grantPayload, signedEvent(grantPayload));
+    const replayBody = await replay.json();
+    assert(replay.status === 200 && replayBody.duplicate === true && replayBody.granted === 0, "replay does not double-credit");
+    assert(credits.getCreditBalance() === 4, "balance stays at one grant");
+
+    const subscriptionPayload = JSON.stringify({
+      id: "evt_test_sub",
+      object: "event",
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: "cs_test_sub",
+          object: "checkout.session",
+          mode: "subscription",
+          payment_status: "paid",
+          metadata: { priceId: "price_test_pack", packId: "default" },
+        },
+      },
+    });
+    const sub = await postWebhook(subscriptionPayload, signedEvent(subscriptionPayload));
+    const subBody = await sub.json();
+    assert(sub.status === 200 && subBody.ignored === true, "subscriptions are not credited");
+    assert(credits.getCreditBalance() === 4, "subscription left the balance alone");
+
+    const bad = await postWebhook(grantPayload, "t=1,v1=deadbeef");
+    assert(bad.status === 400, "bad signature is rejected");
+    assert(credits.getCreditBalance() === 4, "bad signature did not grant credits");
+
+    let sawPayment = false;
+    billing.setCheckoutCreatorForTests(async (params) => {
+      sawPayment = params.mode === "payment";
+      assert(!("subscription" in params) && params.mode === "payment", "checkout is a one-time payment");
+      assert(params.line_items[0]?.price === "price_test_pack", "checkout uses the configured price");
+      return { id: "cs_test_local", url: "https://checkout.stripe.test/c/pay/cs_test_local" };
+    });
+    const session = await billing.createCreditCheckout({
+      packId: "default",
+      origin: "http://127.0.0.1:3000",
+    });
+    assert(sawPayment && session.url.startsWith("https://checkout.stripe.test/"), "checkout stays on the test creator");
+    assert(networkCalls === 0, "checkout test did not call Stripe");
+  } finally {
+    globalThis.fetch = prevFetch;
+    billing.setCheckoutCreatorForTests(null);
+  }
+
+  storage.saveSettings({ budgetCap: 0.01 });
+  const beforeCapCredits = credits.getCreditBalance();
+  const cappedCredits = render.renderAll(phase.id, { acknowledgeModel: "fal-ai/test-model" });
+  assert(!cappedCredits.ok && cappedCredits.overBudget && !cappedCredits.insufficientCredits, "budget cap still blocks first");
+  assert(credits.getCreditBalance() === beforeCapCredits, "budget cap does not spend credits");
+  storage.saveSettings({ budgetCap: null });
+
+  process.env.FAL_KEY = "test-not-a-real-key";
+  const spent = render.renderAll(phase.id, { acknowledgeModel: "fal-ai/test-model" });
+  assert(spent.ok && spent.jobs.length === 1 && spent.jobs[0].provider === "fal", "funded render all queues");
+  assert(credits.getCreditBalance() === 0, "render all spends the estimated credits");
+  delete process.env.FAL_KEY;
+  const skippedFunded = render.renderAll(phase.id, { acknowledgeModel: "fal-ai/test-model" });
+  assert(skippedFunded.ok && skippedFunded.jobs.length === 0, "an in-flight shot is not charged again");
+  assert(credits.getCreditBalance() === 0, "skip did not change the balance");
+
+  const failed = storage.createJob({
+    projectId: phase.id,
+    shotId: storage.listShots(phase.id)[0].id,
+    prompt: "A quiet harbor.",
+    presetId: "slow-zoom-in",
+    provider: "fal",
+    imagePath: shot.startImagePath!,
+    modelName: "fal-ai/test-model",
+    durationSec: 4,
+    status: "failed",
+  });
+  const retried = render.retryFromJob(failed, { acknowledgeModel: "fal-ai/test-model" });
+  assert(!retried.ok && retried.insufficientCredits, "retry cannot bypass an empty balance");
+
+  storage.saveSettings({ provider: "mock" });
+  const offline = storage.createProject("Air gap");
+  const offlineShot = storage.createShot({
+    projectId: offline.id,
+    prompt: "Lanterns along the pier.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: shot.startImagePath,
+  });
+  const fetchDuringMock = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network disabled");
+  }) as typeof fetch;
+  try {
+    const mocked = render.renderShot(offlineShot.id);
+    assert(mocked.ok && mocked.jobs.length === 1 && mocked.jobs[0].provider === "mock", "license unset still renders Mock");
+    await mock.runMockGenerate(mocked.jobs[0].id);
+    assert(storage.getJob(mocked.jobs[0].id)?.status === "completed", "Mock finishes with no license and no Stripe call");
+    const preview = render.previewAll(offline.id);
+    assert(preview.ok && preview.jobs[0].provider === "mock", "preview stays free in hosted mode");
+    assert(credits.getCreditBalance() === 0, "Mock did not spend credits");
+    const lockedPlan = pack.workerPlan(offline.id);
+    assert(!lockedPlan.ok && lockedPlan.unlocked === false, "unset license leaves the worker locked");
+    const denied = await workerRoute.GET(new NextRequest("http://127.0.0.1:3000/"), { params: { id: offline.id } });
+    assert(denied.status === 403, "pack worker route stays closed");
+    process.env.STAR_DUST_LICENSE_KEY = "sd-pack-test";
+    const opened = pack.workerPlan(offline.id);
+    assert(opened.ok && opened.shots.length === 1 && opened.workflow === "pack-hold", "license unlocks the local plan");
+    assert(pack.packHoldFileExists(), "pack workflow file is in the tree");
+    assert(!JSON.stringify(opened).includes("sd-pack-test"), "worker plan does not echo the license key");
+    const allowed = await workerRoute.GET(new NextRequest("http://127.0.0.1:3000/"), { params: { id: offline.id } });
+    assert(allowed.status === 200, "pack worker route opens locally");
+    delete process.env.STAR_DUST_LICENSE_KEY;
+    const still = render.renderShot(offlineShot.id, { force: true });
+    assert(still.ok && still.jobs[0].provider === "mock", "clearing the license leaves Mock working");
+  } finally {
+    globalThis.fetch = fetchDuringMock;
+    delete process.env.STAR_DUST_LICENSE_KEY;
+    delete process.env.FAL_KEY;
+  }
 
   console.log("provider checks ok");
   console.log(dataDir);

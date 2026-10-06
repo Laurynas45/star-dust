@@ -1,3 +1,4 @@
+import { creditEstimate } from "./credits";
 import { isPaidProvider, modelNameFor } from "./provider-info";
 import { classifyShot } from "./takes";
 import { getSettings, listJobs, listShots } from "./storage";
@@ -89,6 +90,17 @@ export function buildEstimate(opts: {
   };
 }
 
+/** Attaches the hosted credit meter. Omitted entirely when Stripe packs are unset. */
+export function withCredits(
+  estimate: CostEstimate,
+  provider: ProviderId,
+  seconds: number
+): CostEstimate {
+  if (!isPaidProvider(provider)) return estimate;
+  const credits = creditEstimate(seconds, provider);
+  return credits ? { ...estimate, credits } : estimate;
+}
+
 /** Seconds that a paid Render all would newly send. Skipped shots are not included. */
 export function estimateRenderAll(projectId: string): CostEstimate {
   const settings = getSettings();
@@ -102,5 +114,5 @@ export function estimateRenderAll(projectId: string): CostEstimate {
       if (decision.action === "run") seconds += Number(shot.durationSec) || 0;
     }
   }
-  return buildEstimate({ provider, modelName, seconds, settings });
+  return withCredits(buildEstimate({ provider, modelName, seconds, settings }), provider, seconds);
 }

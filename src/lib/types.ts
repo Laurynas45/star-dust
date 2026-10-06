@@ -77,6 +77,16 @@ export interface RateTable {
   replicate: Record<string, number>;
 }
 
+/** Hosted credit meter. Present only when Stripe packs are configured. */
+export interface CreditEstimate {
+  hosted: true;
+  required: number;
+  balance: number;
+  insufficient: boolean;
+  perSecond: number;
+  label: string;
+}
+
 /** User-entered arithmetic. Never a vendor quote. */
 export interface CostEstimate {
   paid: boolean;
@@ -87,6 +97,30 @@ export interface CostEstimate {
   budgetCap: number | null;
   overBudget: boolean;
   label: string;
+  /** Omitted when Stripe is unset, so the free studio stays on the Phase 1 shape. */
+  credits?: CreditEstimate;
+}
+
+export interface PublicCreditPack {
+  id: string;
+  label: string;
+  credits: number;
+}
+
+export interface PackWorkflowInfo {
+  id: string;
+  title: string;
+  detail: string;
+}
+
+export interface StudioEnv {
+  hasFalKey: boolean;
+  hasReplicateToken: boolean;
+  hostedCredits: boolean;
+  creditBalance: number | null;
+  creditPacks: PublicCreditPack[];
+  packUnlocked: boolean;
+  packWorkflows: PackWorkflowInfo[];
 }
 
 export interface AppSettings {
