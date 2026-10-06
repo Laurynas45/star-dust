@@ -1,0 +1,35 @@
+# Same gates as .github/workflows/ci.yml.
+# Queue: the pipeline default (a Buildkite hosted agent queue, or the default queue).
+# Hosted agents run these steps in the public Node 20 image (full bookworm, so git,
+# ca-certificates, and bash are already there). If the queue ignores `image`,
+# .buildkite/setup.sh installs Node 20 with nvm. The demo step installs ffmpeg.
+# No API keys: setup.sh unsets FAL_KEY and REPLICATE_API_TOKEN before the commands.
+
+image: docker.io/library/node:20-bookworm
+
+steps:
+  - label: "Lint"
+    key: lint
+    command: |
+      set -euo pipefail
+      source .buildkite/setup.sh
+      npm ci
+      npm run lint
+
+  - label: "Build"
+    key: build
+    command: |
+      set -euo pipefail
+      source .buildkite/setup.sh
+      npm ci
+      npm run build
+
+  - label: "Demo and providers"
+    key: demo
+    command: |
+      set -euo pipefail
+      source .buildkite/setup.sh
+      install_ffmpeg
+      npm ci
+      npm run demo
+      npm run test:providers
