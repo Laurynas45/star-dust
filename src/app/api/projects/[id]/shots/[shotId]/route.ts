@@ -1,7 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getShot, updateShot } from "@/lib/storage";
-import { clampDuration, presetById } from "@/lib/types";
+import { ComfyWorkflowId, clampDuration, presetById } from "@/lib/types";
+
+function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
+  if (value === null) return null;
+  if (value === "svd" || value === "wan" || value === "ltx") return value;
+  return undefined;
+}
+
+function flagField(value: unknown): boolean | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "boolean") return value;
+  return undefined;
+}
 import { storeImageIfAllowed } from "@/lib/uploads";
 
 export const runtime = "nodejs";
@@ -38,6 +50,8 @@ export async function PATCH(
         preset.durationSec
       ),
       endImagePath: body.clearEndImage ? "" : undefined,
+      comfyuiWorkflow: workflowField(body.comfyuiWorkflow),
+      comfyLowMemory: flagField(body.comfyLowMemory),
     });
     return NextResponse.json(updated);
   }

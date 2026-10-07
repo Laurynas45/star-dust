@@ -1,0 +1,198 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-fp8.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": { "title": "Load LTX-2.3 distilled FP8 checkpoint" }
+  },
+  "2": {
+    "inputs": {
+      "text_encoder": "gemma_3_12B_it_fp4_mixed.safetensors",
+      "ckpt_name": "ltx-2.3-22b-distilled-fp8.safetensors",
+      "device": "default"
+    },
+    "class_type": "LTXAVTextEncoderLoader",
+    "_meta": { "title": "Load Gemma text encoder" }
+  },
+  "3": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-fp8.safetensors"
+    },
+    "class_type": "LTXVAudioVAELoader",
+    "_meta": { "title": "Load audio VAE from the checkpoint" }
+  },
+  "4": {
+    "inputs": {
+      "text": "",
+      "clip": ["2", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Positive prompt" }
+  },
+  "5": {
+    "inputs": {
+      "text": "blurry, static, overexposed, low quality, text, watermark",
+      "clip": ["2", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Negative prompt" }
+  },
+  "6": {
+    "inputs": {
+      "image": "star-dust-start.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Load Image" }
+  },
+  "7": {
+    "inputs": {
+      "image": ["6", 0],
+      "img_compression": 18
+    },
+    "class_type": "LTXVPreprocess",
+    "_meta": { "title": "LTXV Preprocess" }
+  },
+  "8": {
+    "inputs": {
+      "width": 832,
+      "height": 480,
+      "length": 25,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": { "title": "Empty LTXV Latent Video" }
+  },
+  "9": {
+    "inputs": {
+      "vae": ["1", 2],
+      "image": ["7", 0],
+      "latent": ["8", 0],
+      "strength": 1,
+      "bypass": false
+    },
+    "class_type": "LTXVImgToVideoInplace",
+    "_meta": { "title": "LTXV Image to Video Inplace" }
+  },
+  "10": {
+    "inputs": {
+      "frames_number": 25,
+      "frame_rate": 24,
+      "batch_size": 1,
+      "audio_vae": ["3", 0]
+    },
+    "class_type": "LTXVEmptyLatentAudio",
+    "_meta": { "title": "Empty LTXV Latent Audio" }
+  },
+  "11": {
+    "inputs": {
+      "video_latent": ["9", 0],
+      "audio_latent": ["10", 0]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": { "title": "Concat AV Latent" }
+  },
+  "12": {
+    "inputs": {
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "frame_rate": 24
+    },
+    "class_type": "LTXVConditioning",
+    "_meta": { "title": "LTXV Conditioning" }
+  },
+  "13": {
+    "inputs": {
+      "model": ["1", 0],
+      "max_shift": 2.05,
+      "base_shift": 0.95,
+      "latent": ["11", 0]
+    },
+    "class_type": "ModelSamplingLTXV",
+    "_meta": { "title": "Model Sampling LTXV" }
+  },
+  "14": {
+    "inputs": {
+      "steps": 8,
+      "max_shift": 2.05,
+      "base_shift": 0.95,
+      "stretch": true,
+      "terminal": 0.1,
+      "latent": ["11", 0]
+    },
+    "class_type": "LTXVScheduler",
+    "_meta": { "title": "LTXV Scheduler" }
+  },
+  "15": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": { "title": "KSampler Select" }
+  },
+  "16": {
+    "inputs": {
+      "noise_seed": 0
+    },
+    "class_type": "RandomNoise",
+    "_meta": { "title": "Random Noise" }
+  },
+  "17": {
+    "inputs": {
+      "model": ["13", 0],
+      "positive": ["12", 0],
+      "negative": ["12", 1],
+      "cfg": 1
+    },
+    "class_type": "CFGGuider",
+    "_meta": { "title": "CFG Guider" }
+  },
+  "18": {
+    "inputs": {
+      "noise": ["16", 0],
+      "guider": ["17", 0],
+      "sampler": ["15", 0],
+      "sigmas": ["14", 0],
+      "latent_image": ["11", 0]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": { "title": "Sampler Custom Advanced" }
+  },
+  "19": {
+    "inputs": {
+      "av_latent": ["18", 0]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": { "title": "Separate AV Latent" }
+  },
+  "20": {
+    "inputs": {
+      "samples": ["19", 0],
+      "vae": ["1", 2],
+      "tile_size": 256,
+      "overlap": 64,
+      "temporal_size": 32,
+      "temporal_overlap": 4
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": { "title": "VAE Decode Tiled" }
+  },
+  "21": {
+    "inputs": {
+      "images": ["20", 0],
+      "fps": 24
+    },
+    "class_type": "CreateVideo",
+    "_meta": { "title": "Create Video" }
+  },
+  "22": {
+    "inputs": {
+      "video": ["21", 0],
+      "filename_prefix": "star-dust-ltx",
+      "format": "mp4",
+      "codec": "h264"
+    },
+    "class_type": "SaveVideo",
+    "_meta": { "title": "Save Video" }
+  }
+}

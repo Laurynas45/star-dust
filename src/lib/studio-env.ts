@@ -17,6 +17,8 @@ export function studioEnv(): StudioEnv {
   return {
     hasFalKey: Boolean(process.env.FAL_KEY),
     hasReplicateToken: Boolean(process.env.REPLICATE_API_TOKEN),
+    comfyuiUrlFromEnv: Boolean(process.env.COMFYUI_BASE_URL?.trim()),
+    comfyuiAuthConfigured: Boolean(process.env.COMFYUI_AUTH_HEADER?.trim()),
     hostedCredits: hosted,
     stripeCredits: stripe,
     paypalCredits: paypal,

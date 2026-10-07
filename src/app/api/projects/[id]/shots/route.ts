@@ -1,7 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { createShot, getProject } from "@/lib/storage";
-import { clampDuration, presetById } from "@/lib/types";
+import { ComfyWorkflowId, clampDuration, presetById } from "@/lib/types";
+
+function formWorkflow(value: FormDataEntryValue | null): ComfyWorkflowId | null {
+  if (value === "svd" || value === "wan" || value === "ltx") return value;
+  return null;
+}
+
+function formFlag(value: FormDataEntryValue | null): boolean | null {
+  if (value === "1" || value === "true") return true;
+  if (value === "0" || value === "false") return false;
+  return null;
+}
 import { storeImageIfAllowed } from "@/lib/uploads";
 
 export const runtime = "nodejs";
@@ -72,6 +83,8 @@ export async function POST(
     durationSec,
     startImagePath: storedStart.path,
     endImagePath: endPath,
+    comfyuiWorkflow: formWorkflow(form.get("comfyuiWorkflow")),
+    comfyLowMemory: formFlag(form.get("comfyLowMemory")),
   });
   return NextResponse.json(shot, { status: 201 });
 }

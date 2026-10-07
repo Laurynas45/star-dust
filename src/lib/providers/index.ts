@@ -4,7 +4,7 @@ import { killFfmpeg } from "../ffmpeg";
 import { runMockGenerate } from "./mock";
 import { runFalGenerate } from "./fal";
 import { runReplicateGenerate } from "./replicate";
-import { runComfyuiGenerate } from "./comfyui";
+import { comfyAuthHeaders, resolveComfyBase, runComfyuiGenerate } from "./comfyui";
 
 let chain: Promise<void> = Promise.resolve();
 const scheduled = new Set<string>();
@@ -71,8 +71,8 @@ export function requestCancel(jobId: string) {
   });
   killFfmpeg(jobId);
   if (job.provider === "comfyui") {
-    const base = getSettings().comfyuiBaseUrl.replace(/\/$/, "");
-    void fetch(`${base}/interrupt`, { method: "POST" }).catch(() => undefined);
+    const base = resolveComfyBase(getSettings()).base;
+    void fetch(`${base}/interrupt`, { method: "POST", headers: comfyAuthHeaders() }).catch(() => undefined);
   }
   return updated;
 }

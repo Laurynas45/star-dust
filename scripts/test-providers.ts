@@ -13,6 +13,9 @@ delete process.env.STAR_DUST_CREDITS_PER_SECOND;
 for (const key of Object.keys(process.env)) {
   if (key.startsWith("STRIPE_") || key.startsWith("PAYPAL_")) delete process.env[key];
 }
+delete process.env.COMFYUI_BASE_URL;
+delete process.env.COMFYUI_AUTH_HEADER;
+delete process.env.COMFYUI_AUTH_HEADER_NAME;
 
 function assert(cond: unknown, message: string) {
   if (!cond) throw new Error(message);
@@ -357,6 +360,468 @@ async function main() {
     hasEndImage: false,
   });
   assert(/does not read the text prompt/i.test(svdDescribed.providerNote), "svd note ignores the prompt");
+
+  const choiceMod = await import("../src/lib/comfy-choice");
+  const ltx = await import("../src/lib/ltx");
+  storage.saveSettings({ provider: "comfyui", comfyuiWorkflow: "svd", comfyLowMemory: false });
+  storage.updateProject(SAMPLE_PROJECT_ID, { comfyuiWorkflow: "ltx", comfyLowMemory: null });
+  storage.updateShot(shot.id, { comfyuiWorkflow: null, comfyLowMemory: true });
+  const inherited = choiceMod.resolveComfyChoice({
+    settings: storage.getSettings(),
+    project: storage.getProject(SAMPLE_PROJECT_ID),
+    shot: storage.getShot(shot.id),
+  });
+  assert(inherited.workflow === "ltx" && inherited.lowMemory === true, "shot low-memory inherits project LTX");
+  storage.updateShot(shot.id, { comfyuiWorkflow: "wan", comfyLowMemory: false });
+  const overridden = choiceMod.resolveComfyChoice({
+    settings: storage.getSettings(),
+    project: storage.getProject(SAMPLE_PROJECT_ID),
+    shot: storage.getShot(shot.id),
+  });
+  assert(overridden.workflow === "wan" && overridden.lowMemory === false, "shot workflow overrides the project");
+  const rendered = render.renderShot(shot.id, { force: true });
+  assert(rendered.ok && rendered.jobs.length === 1, "shot render queues the override");
+  assert(rendered.ok && rendered.jobs[0]?.modelName?.includes("Wan 2.2"), "queued model follows the shot");
+  assert(rendered.ok && !rendered.jobs[0]?.modelName?.includes("low-memory"), "override is not the low-memory preset");
+  storage.updateJob(rendered.jobs[0]!.id, { status: "cancelled", error: "test cleanup" });
+
+  storage.updateShot(shot.id, { comfyuiWorkflow: "ltx", comfyLowMemory: true });
+  const lowDescribed = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: false,
+    comfy: { workflow: "ltx", lowMemory: true },
+  });
+  assert(/reads the text prompt/i.test(lowDescribed.providerNote), "ltx note reads the prompt");
+  assert(!/character lock|lip-sync|long-form|long film/i.test(lowDescribed.providerNote), "ltx note makes no extra claims");
+  assert(/832×480/.test(lowDescribed.providerNote), "ltx low-memory note names 480p box");
+  const lowSize = ltx.ltxFrameSize(pixels!.width, pixels!.height, true);
+  const lowFrames = ltx.ltxFrameCount(10, true);
+  assert(lowFrames === ltx.LTX_LOW_MAX_FRAMES, "ten seconds still caps the low-memory clip");
+  let ltxBodies: string[] = [];
+  const ltxStandin = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ name: "ltx-start.png", subfolder: "", type: "input" }));
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        ltxBodies.push(body);
+        const promptId = ltxBodies.length === 1 ? "standin-ltx-low" : "standin-ltx";
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: promptId, node_errors: {} }));
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/history/")) {
+      const promptId = url.pathname.split("/").pop();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          [promptId || ""]: {
+            status: { status_str: "success", completed: true },
+            outputs: {
+              "22": { images: [{ filename: "ltx.mp4", subfolder: "", type: "output" }] },
+            },
+          },
+        })
+      );
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/view") {
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      res.end(mp4);
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  storage.saveSettings({ comfyuiBaseUrl: ltxStandin.url, comfyuiWorkflow: "svd" });
+  const lowJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    durationSec: 10,
+    modelName: lowDescribed.modelName,
+    providerNote: lowDescribed.providerNote,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(lowJob.id);
+  assert(storage.getJob(lowJob.id)?.status === "completed", `ltx low-memory completed: ${storage.getJob(lowJob.id)?.error}`);
+  const fullDescribed = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: false,
+    comfy: { workflow: "ltx", lowMemory: false },
+  });
+  const fullFrames = ltx.ltxFrameCount(4, false);
+  const fullSize = ltx.ltxFrameSize(pixels!.width, pixels!.height, false);
+  const fullJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    durationSec: 4,
+    modelName: fullDescribed.modelName,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(fullJob.id);
+  assert(storage.getJob(fullJob.id)?.status === "completed", `ltx completed: ${storage.getJob(fullJob.id)?.error}`);
+  function ltxNodes(index: number) {
+    const posted = JSON.parse(ltxBodies[index] || "{}") as {
+      prompt?: Record<string, { class_type?: string; inputs?: Record<string, unknown>; _meta?: { title?: string } }>;
+    };
+    return Object.values(posted.prompt || {});
+  }
+  const lowNodes = ltxNodes(0);
+  const fullNodes = ltxNodes(1);
+  assert(
+    lowNodes.some((node) => node.class_type === "LoadImage" && node.inputs?.image === "ltx-start.png"),
+    "ltx injects the start image"
+  );
+  assert(
+    fullNodes.some(
+      (node) =>
+        node.class_type === "CLIPTextEncode" &&
+        node._meta?.title === "Positive prompt" &&
+        node.inputs?.text === shot.prompt
+    ),
+    "ltx injects the prompt"
+  );
+  const lowLatent = lowNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  assert(lowLatent?.inputs?.length === lowFrames, `ltx low frames ${lowLatent?.inputs?.length} != ${lowFrames}`);
+  assert(lowLatent?.inputs?.width === lowSize.width, "ltx low width");
+  assert(lowLatent?.inputs?.height === lowSize.height, "ltx low height");
+  assert(
+    lowNodes.some((node) => node.class_type === "LTXVEmptyLatentAudio" && node.inputs?.frames_number === lowFrames),
+    "ltx audio latent matches the frame count"
+  );
+  const fullLatent = fullNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  assert(fullLatent?.inputs?.length === fullFrames, `ltx frames ${fullLatent?.inputs?.length} != ${fullFrames}`);
+  assert(fullLatent?.inputs?.width === fullSize.width && fullLatent?.inputs?.height === fullSize.height, "ltx size");
+  assert(
+    fullNodes.some(
+      (node) => node.class_type === "RandomNoise" && typeof node.inputs?.noise_seed === "number"
+    ),
+    "ltx injects a seed"
+  );
+  assert(
+    fullNodes.some(
+      (node) =>
+        node.class_type === "CheckpointLoaderSimple" &&
+        node.inputs?.ckpt_name === "ltx-2.3-22b-distilled-fp8.safetensors"
+    ),
+    "ltx checkpoint file"
+  );
+  assert(
+    fullNodes.some(
+      (node) =>
+        node.class_type === "LTXAVTextEncoderLoader" &&
+        node.inputs?.text_encoder === "gemma_3_12B_it_fp4_mixed.safetensors"
+    ),
+    "ltx text encoder file"
+  );
+  assert(
+    fullNodes.some((node) => node.class_type === "CreateVideo" && node.inputs?.fps === ltx.LTX_FPS),
+    "ltx fps"
+  );
+  await ltxStandin.close();
+
+  const secret = "Bearer secret-token-do-not-store";
+  let sawAuth = false;
+  const remote = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    const authed = req.headers.authorization === secret;
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      if (!authed) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      sawAuth = true;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(authed ? 200 : 401, { "Content-Type": "application/json" });
+        res.end(authed ? JSON.stringify({ name: "remote.png", subfolder: "", type: "input" }) : "unauthorized");
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        if (!authed) {
+          res.writeHead(401);
+          res.end("unauthorized");
+          return;
+        }
+        const parsed = JSON.parse(body) as { prompt?: Record<string, { class_type?: string }> };
+        const missing = Object.values(parsed.prompt || {}).some((node) => node.class_type === "LTXVImgToVideoInplace");
+        if (missing && body.includes("MISSING_NODE")) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              node_errors: { "9": { class_type: "LTXVImgToVideoInplace", errors: [{ message: "Node does not exist" }] } },
+            })
+          );
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: "standin-remote", node_errors: {} }));
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/history/standin-remote") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          "standin-remote": {
+            status: { status_str: "success", completed: true },
+            outputs: { "22": { images: [{ filename: "remote.mp4", subfolder: "", type: "output" }] } },
+          },
+        })
+      );
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/view") {
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      res.end(mp4);
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  process.env.COMFYUI_BASE_URL = remote.url;
+  storage.saveSettings({ comfyuiBaseUrl: closedUrl, provider: "comfyui", comfyuiWorkflow: "svd" });
+  const denied = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    modelName: "ComfyUI SVD image-to-video (svd_xt_1_1.safetensors)",
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(denied.id).catch(() => undefined);
+  const deniedJob = storage.getJob(denied.id);
+  assert(deniedJob?.status === "failed", "remote 401 fails");
+  assert(deniedJob?.status !== "running", "remote 401 not left running");
+  assert(/COMFYUI_AUTH_HEADER/.test(deniedJob?.error || ""), "remote 401 names the env header");
+  assert(!deniedJob?.error?.includes("secret-token"), "auth header value is not stored on the job");
+  assert(deniedJob?.error?.includes(remote.url), "remote 401 names the env host");
+  assert(!deniedJob?.error?.includes(String(closedPort)), "env URL wins over the saved URL");
+
+  process.env.COMFYUI_AUTH_HEADER = secret;
+  const remoteJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    modelName: "ComfyUI SVD image-to-video (svd_xt_1_1.safetensors)",
+    durationSec: 2,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(remoteJob.id);
+  assert(storage.getJob(remoteJob.id)?.status === "completed", `remote authed run: ${storage.getJob(remoteJob.id)?.error}`);
+  assert(sawAuth, "auth header was sent");
+  assert(!storage.getJob(remoteJob.id)?.error?.includes("secret-token"), "completed job does not store the header");
+
+  const oomServer = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ name: "oom.png", subfolder: "", type: "input" }));
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: "standin-oom", node_errors: {} }));
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/history/standin-oom") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          "standin-oom": {
+            status: {
+              status_str: "error",
+              messages: [["execution_error", { exception_message: "CUDA out of memory. Tried to allocate 20 GiB." }]],
+            },
+          },
+        })
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  process.env.COMFYUI_BASE_URL = oomServer.url;
+  const oomJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    modelName: lowDescribed.modelName,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(oomJob.id).catch(() => undefined);
+  const oomDone = storage.getJob(oomJob.id);
+  assert(oomDone?.status === "failed", "oom fails the job");
+  assert(oomDone?.status !== "running", "oom is not left running");
+  assert(/out of memory/i.test(oomDone?.error || ""), "oom says memory");
+  assert(/low-memory preset/i.test(oomDone?.error || ""), "oom points at the preset");
+  assert(!oomDone?.error?.includes(secret), "oom error does not include the auth header");
+  await oomServer.close();
+
+  const missingServer = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ name: "miss.png", subfolder: "", type: "input" }));
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              type: "prompt_outputs_failed_validation",
+              message: "Value not in list",
+              details: "ckpt_name 'ltx-2.3-22b-distilled-fp8.safetensors' not in list",
+            },
+          })
+        );
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  process.env.COMFYUI_BASE_URL = missingServer.url;
+  const missingModel = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    modelName: fullDescribed.modelName,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(missingModel.id).catch(() => undefined);
+  const missingDone = storage.getJob(missingModel.id);
+  assert(missingDone?.status === "failed" && missingDone.status !== "running", "missing model fails");
+  assert(/model file/i.test(missingDone?.error || ""), `missing model guidance: ${missingDone?.error}`);
+  await missingServer.close();
+
+  const nodeServer = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{}");
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ name: "node.png", subfolder: "", type: "input" }));
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            node_errors: {
+              "9": { class_type: "LTXVImgToVideoInplace", errors: [{ message: "Node does not exist" }] },
+            },
+          })
+        );
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  process.env.COMFYUI_BASE_URL = nodeServer.url;
+  const missingNode = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    modelName: fullDescribed.modelName,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(missingNode.id).catch(() => undefined);
+  const nodeDone = storage.getJob(missingNode.id);
+  assert(nodeDone?.status === "failed" && nodeDone.status !== "running", "missing node fails");
+  assert(/missing a node/i.test(nodeDone?.error || ""), `missing node guidance: ${nodeDone?.error}`);
+  await nodeServer.close();
+  await remote.close();
+  delete process.env.COMFYUI_BASE_URL;
+  delete process.env.COMFYUI_AUTH_HEADER;
+  storage.updateProject(SAMPLE_PROJECT_ID, { comfyuiWorkflow: null, comfyLowMemory: null });
+  storage.updateShot(shot.id, { comfyuiWorkflow: null, comfyLowMemory: null });
+  storage.saveSettings({ provider: "mock", comfyuiWorkflow: "svd", comfyLowMemory: false });
 
   storage.saveSettings({ provider: "mock" });
   const endJob = storage.createJob({
