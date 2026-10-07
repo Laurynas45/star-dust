@@ -25,9 +25,10 @@ export async function PUT(req: NextRequest) {
   if (typeof body.comfyuiBaseUrl === "string") patch.comfyuiBaseUrl = body.comfyuiBaseUrl.trim();
   if (typeof body.falModel === "string") patch.falModel = body.falModel.trim();
   if (typeof body.replicateModel === "string") patch.replicateModel = body.replicateModel.trim();
-  if (body.comfyuiWorkflow === "svd" || body.comfyuiWorkflow === "wan") {
+  if (body.comfyuiWorkflow === "svd" || body.comfyuiWorkflow === "wan" || body.comfyuiWorkflow === "ltx") {
     patch.comfyuiWorkflow = body.comfyuiWorkflow as ComfyWorkflowId;
   }
+  if (typeof body.comfyLowMemory === "boolean") patch.comfyLowMemory = body.comfyLowMemory;
   if (body.budgetCap === null || body.budgetCap === "") {
     patch.budgetCap = null;
   } else if (body.budgetCap !== undefined) {

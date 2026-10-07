@@ -59,7 +59,9 @@ function openDatabase(): DB {
       description TEXT NOT NULL DEFAULT '',
       character_sheet_path TEXT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      comfyui_workflow TEXT,
+      comfy_low_memory INTEGER
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -72,7 +74,9 @@ function openDatabase(): DB {
       end_image_path TEXT,
       selected_job_id TEXT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      comfyui_workflow TEXT,
+      comfy_low_memory INTEGER
     );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -105,7 +109,8 @@ function openDatabase(): DB {
       replicate_model TEXT NOT NULL,
       rates_json TEXT NOT NULL DEFAULT '{}',
       budget_cap REAL,
-      comfyui_workflow TEXT NOT NULL DEFAULT 'svd'
+      comfyui_workflow TEXT NOT NULL DEFAULT 'svd',
+      comfy_low_memory INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_shots_project ON shots(project_id, position);
     CREATE INDEX IF NOT EXISTS idx_jobs_project ON jobs(project_id, created_at);
@@ -172,6 +177,21 @@ function migrate(db: DB) {
   }
   if (!hasColumn(db, "credit_ledger", "paypal_order_id")) {
     db.exec("ALTER TABLE credit_ledger ADD COLUMN paypal_order_id TEXT");
+  }
+  if (!hasColumn(db, "settings", "comfy_low_memory")) {
+    db.exec("ALTER TABLE settings ADD COLUMN comfy_low_memory INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "projects", "comfyui_workflow")) {
+    db.exec("ALTER TABLE projects ADD COLUMN comfyui_workflow TEXT");
+  }
+  if (!hasColumn(db, "projects", "comfy_low_memory")) {
+    db.exec("ALTER TABLE projects ADD COLUMN comfy_low_memory INTEGER");
+  }
+  if (!hasColumn(db, "shots", "comfyui_workflow")) {
+    db.exec("ALTER TABLE shots ADD COLUMN comfyui_workflow TEXT");
+  }
+  if (!hasColumn(db, "shots", "comfy_low_memory")) {
+    db.exec("ALTER TABLE shots ADD COLUMN comfy_low_memory INTEGER");
   }
 }
 
@@ -253,6 +273,8 @@ function mapProject(row: Record<string, unknown>): Project {
       row.completed_count == null ? undefined : Number(row.completed_count),
     isSample: String(row.id) === SAMPLE_PROJECT_ID,
     coverPath: str(row.cover_path),
+    comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
+    comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
   };
 }
 
@@ -267,6 +289,8 @@ function mapShot(row: Record<string, unknown>): Shot {
     startImagePath: str(row.start_image_path),
     endImagePath: str(row.end_image_path),
     selectedJobId: str(row.selected_job_id),
+    comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
+    comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -358,7 +382,7 @@ export function createProject(name: string, description = ""): Project {
 
 export function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "name" | "description">> & {
+  patch: Partial<Pick<Project, "name" | "description" | "comfyuiWorkflow" | "comfyLowMemory">> & {
     characterSheetPath?: string | null;
   }
 ): Project | undefined {
@@ -372,15 +396,28 @@ export function updateProject(
       patch.characterSheetPath === undefined
         ? current.characterSheetPath ?? null
         : patch.characterSheetPath || null,
+    comfyuiWorkflow:
+      patch.comfyuiWorkflow === undefined ? current.comfyuiWorkflow ?? null : patch.comfyuiWorkflow,
+    comfyLowMemory:
+      patch.comfyLowMemory === undefined ? current.comfyLowMemory ?? null : patch.comfyLowMemory,
     updatedAt: new Date().toISOString(),
   };
   getDb()
     .prepare(
       `UPDATE projects
-       SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?
+       SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
+           comfyui_workflow = ?, comfy_low_memory = ?
        WHERE id = ?`
     )
-    .run(next.name, next.description, next.characterSheetPath, next.updatedAt, id);
+    .run(
+      next.name,
+      next.description,
+      next.characterSheetPath,
+      next.updatedAt,
+      next.comfyuiWorkflow,
+      next.comfyLowMemory == null ? null : next.comfyLowMemory ? 1 : 0,
+      id
+    );
   return getProject(id);
 }
 
@@ -430,6 +467,8 @@ export function createShot(input: {
   durationSec: number;
   startImagePath?: string;
   endImagePath?: string;
+  comfyuiWorkflow?: ComfyWorkflowId | null;
+  comfyLowMemory?: boolean | null;
   id?: string;
 }): Shot {
   const now = new Date().toISOString();
@@ -445,6 +484,8 @@ export function createShot(input: {
     durationSec: input.durationSec,
     startImagePath: input.startImagePath,
     endImagePath: input.endImagePath,
+    comfyuiWorkflow: input.comfyuiWorkflow ?? null,
+    comfyLowMemory: input.comfyLowMemory ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -452,8 +493,9 @@ export function createShot(input: {
     .prepare(
       `INSERT INTO shots (
         id, project_id, position, prompt, preset_id, duration_sec,
-        start_image_path, end_image_path, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        start_image_path, end_image_path, created_at, updated_at,
+        comfyui_workflow, comfy_low_memory
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       shot.id,
@@ -465,7 +507,9 @@ export function createShot(input: {
       shot.startImagePath ?? null,
       shot.endImagePath ?? null,
       shot.createdAt,
-      shot.updatedAt
+      shot.updatedAt,
+      shot.comfyuiWorkflow,
+      shot.comfyLowMemory == null ? null : shot.comfyLowMemory ? 1 : 0
     );
   touchProject(shot.projectId);
   return shot;
@@ -474,7 +518,16 @@ export function createShot(input: {
 export function updateShot(
   id: string,
   patch: Partial<
-    Pick<Shot, "prompt" | "presetId" | "durationSec" | "startImagePath" | "endImagePath">
+    Pick<
+      Shot,
+      | "prompt"
+      | "presetId"
+      | "durationSec"
+      | "startImagePath"
+      | "endImagePath"
+      | "comfyuiWorkflow"
+      | "comfyLowMemory"
+    >
   >
 ): Shot | undefined {
   const current = getShot(id);
@@ -489,13 +542,17 @@ export function updateShot(
         : current.startImagePath ?? null,
     endImagePath:
       patch.endImagePath !== undefined ? patch.endImagePath : current.endImagePath ?? null,
+    comfyuiWorkflow:
+      patch.comfyuiWorkflow === undefined ? current.comfyuiWorkflow ?? null : patch.comfyuiWorkflow,
+    comfyLowMemory:
+      patch.comfyLowMemory === undefined ? current.comfyLowMemory ?? null : patch.comfyLowMemory,
     updatedAt: new Date().toISOString(),
   };
   getDb()
     .prepare(
       `UPDATE shots
        SET prompt = ?, preset_id = ?, duration_sec = ?, start_image_path = ?,
-           end_image_path = ?, updated_at = ?
+           end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -504,6 +561,8 @@ export function updateShot(
       next.durationSec,
       next.startImagePath,
       next.endImagePath,
+      next.comfyuiWorkflow,
+      next.comfyLowMemory == null ? null : next.comfyLowMemory ? 1 : 0,
       next.updatedAt,
       id
     );
@@ -705,7 +764,20 @@ function parseRates(raw: unknown): RateTable {
 }
 
 function parseWorkflow(value: unknown): ComfyWorkflowId {
-  return value === "wan" ? "wan" : "svd";
+  if (value === "wan" || value === "ltx" || value === "svd") return value;
+  return "svd";
+}
+
+function parseOptionalWorkflow(value: unknown): ComfyWorkflowId | null {
+  if (value === "wan" || value === "ltx" || value === "svd") return value;
+  return null;
+}
+
+function parseOptionalFlag(value: unknown): boolean | null {
+  if (value == null) return null;
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  return null;
 }
 
 export function getSettings(): AppSettings {
@@ -718,6 +790,7 @@ export function getSettings(): AppSettings {
         rates_json?: string;
         budget_cap?: number | null;
         comfyui_workflow?: string;
+        comfy_low_memory?: number | null;
       }
     | undefined;
   if (!row) return { ...DEFAULT_SETTINGS, rates: { ...EMPTY_RATES, fal: {}, replicate: {} } };
@@ -728,6 +801,7 @@ export function getSettings(): AppSettings {
     falModel: row.fal_model,
     replicateModel: row.replicate_model,
     comfyuiWorkflow: parseWorkflow(row.comfyui_workflow),
+    comfyLowMemory: Number(row.comfy_low_memory) === 1,
     rates: parseRates(row.rates_json),
     budgetCap: cap == null || !Number.isFinite(Number(cap)) ? null : Number(cap),
   };
@@ -741,6 +815,7 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
     falModel: patch.falModel ?? current.falModel,
     replicateModel: patch.replicateModel ?? current.replicateModel,
     comfyuiWorkflow: patch.comfyuiWorkflow ?? current.comfyuiWorkflow,
+    comfyLowMemory: patch.comfyLowMemory ?? current.comfyLowMemory,
     rates: patch.rates ?? current.rates,
     budgetCap: patch.budgetCap === undefined ? current.budgetCap : patch.budgetCap,
   };
@@ -748,7 +823,7 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
     .prepare(
       `UPDATE settings
        SET provider = ?, comfyui_base_url = ?, fal_model = ?, replicate_model = ?,
-           rates_json = ?, budget_cap = ?, comfyui_workflow = ?
+           rates_json = ?, budget_cap = ?, comfyui_workflow = ?, comfy_low_memory = ?
        WHERE id = 1`
     )
     .run(
@@ -758,7 +833,8 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
       next.replicateModel,
       JSON.stringify(next.rates),
       next.budgetCap,
-      next.comfyuiWorkflow
+      next.comfyuiWorkflow,
+      next.comfyLowMemory ? 1 : 0
     );
   return next;
 }

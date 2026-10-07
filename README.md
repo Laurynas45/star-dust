@@ -10,6 +10,18 @@ Star Dust is a local image-to-video studio that works offline with ffmpeg and no
 
 Mock is camera motion only — a Ken Burns move on the still, not AI motion. The shot list is the product: one clip from a still, render the list in order, then export one stitched mp4. That stitch is ffmpeg. It is not another model.
 
+## Which backend should I use?
+
+Clone it and leave Mock on if you only want the shot list and a stitched mp4. The other rows are for when you want generated motion. None of them lock a character, lip-sync a performance, or turn the shot list into a long film. One clip is still the unit.
+
+| Backend | Use it when | Hardware and keys |
+| --- | --- | --- |
+| Mock (free) | You want the edit with no GPU and no account. CI renders this. | ffmpeg only. Camera motion on the still, not AI motion. No key. |
+| ComfyUI on this machine | ComfyUI is already running where Star Dust runs. | No key in Star Dust. Pick SVD, Wan 2.2 TI2V-5B, or LTX-2.3 per shot or per project. Start with the low-memory preset. Memory notes are guidance, not a measured benchmark. |
+| ComfyUI on another machine or a rented GPU | You do not have a card that can hold the model (an AMD iGPU laptop is the usual case). Run ComfyUI on a desktop or a rented GPU and point Star Dust at it. | Set `COMFYUI_BASE_URL`. If that host expects a header, set `COMFYUI_AUTH_HEADER`. Both stay in the environment. They are not saved in the database and not shown in the UI. |
+| fal | You want a cloud clip and you already have a fal key. | `FAL_KEY` in the environment. A per-second rate you type yourself. That total is your estimate, not a vendor quote. |
+| Replicate | Same idea, on Replicate. | `REPLICATE_API_TOKEN` in the environment. Same kind of self-entered rate. |
+
 ## Docker
 
 ```bash
@@ -18,7 +30,7 @@ docker compose up --build
 
 Open [http://localhost:3000](http://localhost:3000). Harbor dusk is already on the studio page, with two shots and a still. Leave the provider on **Mock**, choose **Render all**, then **Export stitch** or download the mp4.
 
-The app listens on port 3000. Clips and the SQLite database stay in `./data` on the host. Keys are not baked into the image. Stripe, PayPal, and a license key are not required. If you later point at fal or Replicate, pass `FAL_KEY` or `REPLICATE_API_TOKEN` in the environment.
+The app listens on port 3000. Clips and the SQLite database stay in `./data` on the host. Keys are not baked into the image. Stripe, PayPal, and a license key are not required. If you later point at fal or Replicate, pass `FAL_KEY` or `REPLICATE_API_TOKEN` in the environment. For ComfyUI on another machine, pass `COMFYUI_BASE_URL` and, only if that server asks for it, `COMFYUI_AUTH_HEADER`.
 
 ## Providers
 
@@ -27,7 +39,7 @@ The app listens on port 3000. Clips and the SQLite database stay in `./data` on 
 | Mock | No key. Camera motion only (ffmpeg Ken Burns). Not AI motion. |
 | fal | `FAL_KEY` |
 | Replicate | `REPLICATE_API_TOKEN` |
-| ComfyUI | A reachable server, plus one of the shipped workflows. Not a node editor. |
+| ComfyUI | A reachable server, on this machine or at `COMFYUI_BASE_URL`. One of the shipped workflows. Not a node editor. |
 
 Before a fal or Replicate job is created, Star Dust shows the model name. A key is required. Some vendors bill failed generations, and unused credits can expire. This app does not fetch a vendor price.
 
@@ -35,11 +47,15 @@ In Settings you can type a per-second rate for each fal or Replicate model. The 
 
 If the key is missing, the job is not marked running. The error names `FAL_KEY` or `REPLICATE_API_TOKEN`.
 
-ComfyUI posts the workflow you picked, polls `/history`, and downloads the video. If the server is down, the job fails with the URL and the status.
+ComfyUI posts the workflow you picked, polls `/history`, and downloads the video. If the server is down, the job fails with the URL and the status. An out-of-memory error, a missing node, or a missing model fails the job the same way. It does not sit on "running".
 
-**Stable Video Diffusion** (`workflows/comfyui-svd-i2v.api.json`) does not read the text prompt, and it does not take a second reference image. The job says so. It expects `svd_xt_1_1.safetensors`.
+Check server on the Providers page calls `/system_stats`. When `COMFYUI_BASE_URL` is set, that check uses the environment host and does not print the URL. `COMFYUI_AUTH_HEADER` is sent as the `Authorization` value (override the header name with `COMFYUI_AUTH_HEADER_NAME`). The page shows whether the header is present. It never shows the value.
 
-**Wan 2.2 TI2V-5B** (`workflows/comfyui-wan22-ti2v-5b.api.json`) reads the prompt. Star Dust injects the start image, the prompt, a frame count from the shot duration (16 fps, snapped to the Wan 4n+1 length, capped at 81 frames), and the output size (the still fitted inside 832×480). It does not take the end image. It is one short clip. Place these files on the ComfyUI server:
+Pick the graph in Providers (the app default), on the project, or on a shot. A shot overrides the project, and the project overrides Providers. The low-memory preset is the same idea: start at about 480p, short clip. Each graph's card says what that preset actually writes.
+
+**Stable Video Diffusion** (`workflows/comfyui-svd-i2v.api.json`) does not read the text prompt, and it does not take a second reference image. The job says so. It expects `svd_xt_1_1.safetensors` in `ComfyUI/models/checkpoints`. Core nodes only. Default size in the graph is 1024×576, with the shot duration mapped to about 14–25 frames at 6 fps. The low-memory preset uses 768×448 and 14 frames. There is no published system-RAM number here. It is the lightest of the three files.
+
+**Wan 2.2 TI2V-5B** (`workflows/comfyui-wan22-ti2v-5b.api.json`) reads the prompt. Star Dust injects the start image, the prompt, a frame count from the shot duration (16 fps, snapped to the Wan 4n+1 length, capped at 81 frames), and the output size (the still fitted inside 832×480). The low-memory preset keeps that 832×480 box and caps the length at 17 frames. It does not take the end image. It is one short clip. Place these files on the ComfyUI server:
 
 ```
 ComfyUI/models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
@@ -47,9 +63,24 @@ ComfyUI/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
 ComfyUI/models/vae/wan2.2_vae.safetensors
 ```
 
-ComfyUI's own notes say this 5B graph fits about 8 GB VRAM with native offloading. That is the target, including a ROCm build of ComfyUI. Star Dust does not install the weights. The loader uses ComfyUI's default weight dtype so offloading stays ComfyUI's job.
+ComfyUI's own notes say this 5B graph fits about 8 GB VRAM with native offloading. That is a VRAM note, not a system-RAM measurement. The text encoder and the diffusion file are large, and offloading uses system RAM. Star Dust does not install the weights and does not publish a measured RAM figure. The loader uses ComfyUI's default weight dtype so offloading stays ComfyUI's job.
 
-A pinned character sheet is sent only when the call has a reference-image input. Mock, both shipped ComfyUI workflows, and the default fal and Replicate calls do not. The face will not match the sheet.
+**LTX-2.3 distilled FP8** (`workflows/comfyui-ltx23-i2v.api.json`) reads the prompt. Star Dust injects the start image, the prompt, the frame count, the size, and the seed. Default size is the still fitted inside 960×544, at 24 fps, length snapped to 8n+1 and capped at 121 frames (about five seconds). The low-memory preset fits the still inside 832×480 (about 480p) and caps the length at 25 frames (about one second). The graph builds the audio latent LTX-2.3 expects, then saves a silent mp4. It does not take the end image. It is one short clip.
+
+The graph uses core nodes from a current ComfyUI (the LTX-2 nodes in core, plus `CheckpointLoaderSimple`, `CLIPTextEncode`, `LoadImage`, `KSamplerSelect`, `RandomNoise`, `CFGGuider`, `SamplerCustomAdvanced`, `VAEDecodeTiled`, `CreateVideo`, and `SaveVideo`). It does not require ComfyUI-LTXVideo. Place these files on the ComfyUI server:
+
+```
+ComfyUI/models/checkpoints/ltx-2.3-22b-distilled-fp8.safetensors
+ComfyUI/models/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors
+```
+
+The checkpoint is the distilled FP8 file from [Lightricks/LTX-2.3-fp8](https://huggingface.co/Lightricks/LTX-2.3-fp8). The text encoder is the Comfy-Org split file `gemma_3_12B_it_fp4_mixed.safetensors` from [Comfy-Org/ltx-2](https://huggingface.co/Comfy-Org/ltx-2). The same checkpoint also supplies the video VAE and the audio VAE. Star Dust writes those filenames on every run.
+
+Lightricks' ComfyUI-LTXVideo README lists a CUDA GPU with 32 GB+ VRAM for the full setup. This graph loads the distilled FP8 checkpoint instead of the full BF16 file `ltx-2.3-22b-distilled-1.1.safetensors`. That is a smaller official file, not a promise that it runs in 8 GB. Community reports, including r/comfyui threads, describe "runs on 8 GB" setups that still need on the order of 32–64 GB of system RAM when the weights do not fit in VRAM. Treat that as a warning. Star Dust did not measure it. If the job runs out of memory, it fails and names that preset.
+
+A GGUF UNet is optional and is not what this file loads. People who want that path install [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) and edit the diffusion loader. Star Dust does not install custom nodes or weights.
+
+A pinned character sheet is sent only when the call has a reference-image input. Mock, the shipped ComfyUI workflows, and the default fal and Replicate calls do not. The face will not match the sheet.
 
 ## Shot list
 
@@ -84,7 +115,7 @@ npm run build
 npm run test:providers
 ```
 
-`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan workflow injection against that stand-in, and a local stitch. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
+`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan and LTX workflow injection against that stand-in, workflow selection, remote-URL and auth-header failures, out-of-memory and missing node or model failures, and a local stitch. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
 
 ## Safety
 
@@ -102,7 +133,7 @@ PayPal turns on with `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and `PAYPAL_PAC
 
 A paid fal or Replicate **Render all** estimates one credit per second (override with `STAR_DUST_CREDITS_PER_SECOND`) and is blocked when the balance is lower. Credits are spent when those jobs are queued. A single shot and a retry use the same balance, so they cannot skip it. The operator's `FAL_KEY` or `REPLICATE_API_TOKEN` still has to be in the environment. Mock, ComfyUI, preview cut, and stitch do not spend credits. If Stripe and PayPal are both unset, the pay buttons stay hidden and Render all behaves as before: your own key, your own per-second rate, and the optional budget cap.
 
-**Self-hosted pack** is optional and does not gate that core. Set `STAR_DUST_LICENSE_KEY` to unlock a local worker plan (`workflows/pack-hold.json`, `npx tsx scripts/pack-worker.ts <projectId>`, and `GET /api/projects/<id>/pack-worker`). Any non-empty value unlocks it. The key is read from the environment only. Star Dust does not call a license server, so an air-gapped Mock render still runs when the key is unset. Without the key, Mock, fal, Replicate, ComfyUI, and the shipped SVD and Wan graphs stay available.
+**Self-hosted pack** is optional and does not gate that core. Set `STAR_DUST_LICENSE_KEY` to unlock a local worker plan (`workflows/pack-hold.json`, `npx tsx scripts/pack-worker.ts <projectId>`, and `GET /api/projects/<id>/pack-worker`). Any non-empty value unlocks it. The key is read from the environment only. Star Dust does not call a license server, so an air-gapped Mock render still runs when the key is unset. Without the key, Mock, fal, Replicate, ComfyUI, and the shipped SVD, Wan, and LTX graphs stay available.
 
 ## Layout
 
@@ -113,6 +144,6 @@ src/lib/credits.ts       hosted credit balance, off unless Stripe or PayPal pack
 src/lib/paypal-billing.ts  PayPal order capture for that same balance
 src/lib/pack.ts          optional self-hosted pack (local license check)
 src/lib/providers/       mock, fal, Replicate, ComfyUI
-workflows/               shipped ComfyUI graphs (SVD and Wan 2.2 TI2V-5B) and the optional pack plan
+workflows/               shipped ComfyUI graphs (SVD, Wan 2.2 TI2V-5B, LTX-2.3) and the optional pack plan
 samples/                 Harbor dusk still and shot list
 ```

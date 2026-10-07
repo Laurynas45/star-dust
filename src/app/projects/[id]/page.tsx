@@ -4,15 +4,19 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
+import { resolveComfyChoice } from "@/lib/comfy-choice";
 import {
   CAPABILITY,
   CHARACTER_SHEET_HONESTY,
   CLOUD_RISK_NOTE,
+  COMFY_WORKFLOW_ORDER,
+  COMFY_WORKFLOWS,
   isPaidProvider,
   modelNameFor,
 } from "@/lib/provider-info";
 import {
   AppSettings,
+  ComfyWorkflowId,
   CostEstimate,
   Job,
   MAX_SHOT_SECONDS,
@@ -72,6 +76,8 @@ export default function ProjectStudioPage() {
   const [durationSec, setDurationSec] = useState(MOTION_PRESETS[0].durationSec);
   const [startImage, setStartImage] = useState<File | null>(null);
   const [endImage, setEndImage] = useState<File | null>(null);
+  const [shotWorkflow, setShotWorkflow] = useState("");
+  const [shotLowMemory, setShotLowMemory] = useState("");
   const [preview, setPreview] = useState<string | null>(null);
   const [savingShot, setSavingShot] = useState(false);
 
@@ -123,7 +129,19 @@ export default function ProjectStudioPage() {
   }, [startImage]);
 
   const provider: ProviderId = settings?.provider ?? "mock";
-  const modelName = settings ? modelNameFor(provider, settings) : CAPABILITY.mock.title;
+  const projectChoice =
+    settings && detail
+      ? resolveComfyChoice({ settings, project: detail.project, shot: null })
+      : null;
+  const appChoice = settings ? resolveComfyChoice({ settings, project: null, shot: null }) : null;
+  const modelName =
+    settings
+      ? modelNameFor(
+          provider,
+          settings,
+          provider === "comfyui" && projectChoice ? projectChoice : undefined
+        )
+      : CAPABILITY.mock.title;
   const paid = isPaidProvider(provider);
   const spendBlocked = Boolean(paid && (cost?.overBudget || cost?.credits?.insufficient));
   const takeClips = useMemo(
@@ -229,12 +247,16 @@ export default function ProjectStudioPage() {
       form.set("durationSec", String(durationSec));
       form.set("startImage", startImage);
       if (endImage) form.set("endImage", endImage);
+      if (shotWorkflow) form.set("comfyuiWorkflow", shotWorkflow);
+      if (shotLowMemory) form.set("comfyLowMemory", shotLowMemory);
       const res = await fetch(`/api/projects/${projectId}/shots`, { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not add the shot");
       setPrompt("");
       setStartImage(null);
       setEndImage(null);
+      setShotWorkflow("");
+      setShotLowMemory("");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add the shot");
@@ -331,6 +353,40 @@ export default function ProjectStudioPage() {
     const data = await res.json();
     if (!res.ok) {
       setError(data.error || "Could not pin the sheet");
+      return;
+    }
+    await load();
+  }
+
+  async function saveProjectComfy(patch: {
+    comfyuiWorkflow?: ComfyWorkflowId | null;
+    comfyLowMemory?: boolean | null;
+  }) {
+    const res = await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not save the workflow");
+      return;
+    }
+    await load();
+  }
+
+  async function saveShotComfy(
+    shotId: string,
+    patch: { comfyuiWorkflow?: ComfyWorkflowId | null; comfyLowMemory?: boolean | null }
+  ) {
+    const res = await fetch(`/api/projects/${projectId}/shots/${shotId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not save the shot workflow");
       return;
     }
     await load();
@@ -468,13 +524,63 @@ export default function ProjectStudioPage() {
           <p className="mt-1 text-xs text-current/70">{CLOUD_RISK_NOTE}</p>
         </div>
       )}
-      {provider === "comfyui" && (
+      {provider === "comfyui" && settings && projectChoice && appChoice && (
         <div className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm text-sky-50">
-          ComfyUI runs <span className="font-semibold">{modelName}</span>.{" "}
-          {settings?.comfyuiWorkflow === "wan"
-            ? "This graph reads the prompt and sends the start image, frame count, and size."
-            : "This SVD graph does not read the text prompt."}{" "}
-          The server must be reachable. This is not a node editor.
+          <p>
+            This project runs <span className="font-semibold">{COMFY_WORKFLOWS[projectChoice.workflow].title}</span>
+            {projectChoice.lowMemory ? " with the low-memory preset" : ""}.{" "}
+            {COMFY_WORKFLOWS[projectChoice.workflow].goodAt}
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-sky-50/80">
+            {COMFY_WORKFLOWS[projectChoice.workflow].memory}
+          </p>
+          <p className="mt-2 text-xs leading-relaxed text-sky-50/80">
+            Default: {COMFY_WORKFLOWS[projectChoice.workflow].defaults} Low-memory preset:{" "}
+            {COMFY_WORKFLOWS[projectChoice.workflow].lowMemory}
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <label className="text-xs text-sky-50/90">
+              Project workflow
+              <select
+                className="input mt-1"
+                value={project.comfyuiWorkflow ?? ""}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  void saveProjectComfy({
+                    comfyuiWorkflow: value === "" ? null : (value as ComfyWorkflowId),
+                  });
+                }}
+              >
+                <option value="">App default ({COMFY_WORKFLOWS[appChoice.workflow].title})</option>
+                {COMFY_WORKFLOW_ORDER.map((id) => (
+                  <option key={id} value={id}>
+                    {COMFY_WORKFLOWS[id].title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs text-sky-50/90">
+              Low-memory preset
+              <select
+                className="input mt-1"
+                value={project.comfyLowMemory == null ? "" : project.comfyLowMemory ? "1" : "0"}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  void saveProjectComfy({
+                    comfyLowMemory: value === "" ? null : value === "1",
+                  });
+                }}
+              >
+                <option value="">App default ({appChoice.lowMemory ? "on" : "off"})</option>
+                <option value="1">On — about 480p, short clip</option>
+                <option value="0">Off</option>
+              </select>
+            </label>
+          </div>
+          <p className="mt-2 text-xs text-sky-50/70">
+            A shot can override this. The server is the URL in Providers, or COMFYUI_BASE_URL if that
+            is set. This is not a node editor.
+          </p>
         </div>
       )}
       {provider === "mock" && (
@@ -620,11 +726,44 @@ export default function ProjectStudioPage() {
                   max={MAX_SHOT_SECONDS}
                   step={1}
                   value={durationSec}
-                  onChange={(e) => setDurationSec(Number(e.target.value))}
-                />
-              </div>
+                onChange={(e) => setDurationSec(Number(e.target.value))}
+              />
             </div>
-            <button type="submit" className="btn-primary w-full" disabled={savingShot}>
+          </div>
+          {provider === "comfyui" && projectChoice && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-xs text-[var(--muted)]">
+                ComfyUI workflow
+                <select
+                  className="input mt-1"
+                  value={shotWorkflow}
+                  onChange={(e) => setShotWorkflow(e.target.value)}
+                >
+                  <option value="">Project default ({COMFY_WORKFLOWS[projectChoice.workflow].title})</option>
+                  {COMFY_WORKFLOW_ORDER.map((id) => (
+                    <option key={id} value={id}>
+                      {COMFY_WORKFLOWS[id].title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-[var(--muted)]">
+                Low-memory preset
+                <select
+                  className="input mt-1"
+                  value={shotLowMemory}
+                  onChange={(e) => setShotLowMemory(e.target.value)}
+                >
+                  <option value="">
+                    Project default ({projectChoice.lowMemory ? "on" : "off"})
+                  </option>
+                  <option value="1">On — about 480p, short clip</option>
+                  <option value="0">Off</option>
+                </select>
+              </label>
+            </div>
+          )}
+          <button type="submit" className="btn-primary w-full" disabled={savingShot}>
               {savingShot ? "Adding…" : "Add shot"}
             </button>
           </div>
@@ -670,6 +809,14 @@ export default function ProjectStudioPage() {
                       {job && <StatusBadge status={job.status} />}
                     </div>
                     <p className="mt-2 text-sm text-white">{shot.prompt}</p>
+                    {provider === "comfyui" && settings && (
+                      <ShotWorkflowFields
+                        shot={shot}
+                        projectDefault={resolveComfyChoice({ settings, project, shot: null })}
+                        resolved={resolveComfyChoice({ settings, project, shot })}
+                        onChange={(patch) => void saveShotComfy(shot.id, patch)}
+                      />
+                    )}
                     {takes.length > 0 && (
                       <fieldset className="mt-3 space-y-1">
                         <legend className="text-[11px] uppercase tracking-wide text-[var(--muted)]">
@@ -987,6 +1134,63 @@ export default function ProjectStudioPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ShotWorkflowFields(props: {
+  shot: Shot;
+  projectDefault: { workflow: ComfyWorkflowId; lowMemory: boolean };
+  resolved: { workflow: ComfyWorkflowId; lowMemory: boolean };
+  onChange: (patch: { comfyuiWorkflow?: ComfyWorkflowId | null; comfyLowMemory?: boolean | null }) => void;
+}) {
+  const info = COMFY_WORKFLOWS[props.resolved.workflow];
+  return (
+    <div className="mt-3 space-y-2">
+      <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+        {info.title}
+        {props.resolved.lowMemory ? " · low-memory preset" : ""}. {info.defaults}{" "}
+        {props.resolved.lowMemory ? info.lowMemory : ""}
+      </p>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="text-[11px] text-[var(--muted)]">
+          Shot workflow
+          <select
+            className="input mt-1"
+            value={props.shot.comfyuiWorkflow ?? ""}
+            onChange={(e) => {
+              const value = e.target.value;
+              props.onChange({
+                comfyuiWorkflow: value === "" ? null : (value as ComfyWorkflowId),
+              });
+            }}
+          >
+            <option value="">
+              Project default ({COMFY_WORKFLOWS[props.projectDefault.workflow].title})
+            </option>
+            {COMFY_WORKFLOW_ORDER.map((id) => (
+              <option key={id} value={id}>
+                {COMFY_WORKFLOWS[id].title}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[11px] text-[var(--muted)]">
+          Low-memory preset
+          <select
+            className="input mt-1"
+            value={props.shot.comfyLowMemory == null ? "" : props.shot.comfyLowMemory ? "1" : "0"}
+            onChange={(e) => {
+              const value = e.target.value;
+              props.onChange({ comfyLowMemory: value === "" ? null : value === "1" });
+            }}
+          >
+            <option value="">Project default ({props.projectDefault.lowMemory ? "on" : "off"})</option>
+            <option value="1">On — about 480p, short clip</option>
+            <option value="0">Off</option>
+          </select>
+        </label>
+      </div>
     </div>
   );
 }

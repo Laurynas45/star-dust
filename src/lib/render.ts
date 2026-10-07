@@ -1,7 +1,10 @@
+import { resolveComfyChoice } from "./comfy-choice";
 import { creditEstimate, deductCredits } from "./credits";
 import { buildEstimate, withCredits } from "./cost";
 import {
   CLOUD_RISK_NOTE,
+  LOW_MEMORY_MARK,
+  comfyWorkflowFromModelName,
   describeProviderUse,
   isPaidProvider,
   missingKeyMessage,
@@ -11,7 +14,7 @@ import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "./safety";
 import { createJob, getProject, getSettings, getShot, listJobs, listShots } from "./storage";
 import { classifyShot, skipReasonText } from "./takes";
 import { imageExists } from "./uploads";
-import { CostEstimate, CreditEstimate, Job, JobKind, ProviderId, Shot } from "./types";
+import { AppSettings, CostEstimate, CreditEstimate, ComfyWorkflowId, Job, JobKind, ProviderId, Shot } from "./types";
 
 export type SkippedShot = {
   shotId: string;
@@ -149,6 +152,14 @@ function prepareShot(shotId: string):
   return { ok: true, shot };
 }
 
+function comfyForShot(shot: Shot, settings: AppSettings) {
+  return resolveComfyChoice({
+    settings,
+    project: getProject(shot.projectId),
+    shot,
+  });
+}
+
 function queueJob(
   shot: Shot,
   provider: ProviderId,
@@ -162,6 +173,7 @@ function queueJob(
     settings,
     hasCharacterSheet: Boolean(project?.characterSheetPath),
     hasEndImage: Boolean(shot.endImagePath),
+    comfy: provider === "comfyui" ? comfyForShot(shot, settings) : undefined,
   });
   return createJob({
     projectId: shot.projectId,
@@ -190,7 +202,11 @@ export function renderShot(
   if (!prepared.ok) return prepared;
   const settings = getSettings();
   const provider = settings.provider;
-  const modelName = modelNameFor(provider, settings);
+  const modelName = modelNameFor(
+    provider,
+    settings,
+    provider === "comfyui" ? comfyForShot(prepared.shot, settings) : undefined
+  );
   const decision = classifyShot(
     prepared.shot,
     listJobs(prepared.shot.projectId),
@@ -248,7 +264,11 @@ export function renderAll(
   const skipped: SkippedShot[] = [];
   const pending: Shot[] = [];
   for (const shot of shots) {
-    const decision = classifyShot(shot, existing, provider, modelName);
+    const shotModel =
+      provider === "comfyui"
+        ? modelNameFor(provider, settings, comfyForShot(shot, settings))
+        : modelName;
+    const decision = classifyShot(shot, existing, provider, shotModel);
     if (decision.action === "skip") {
       skipped.push({
         shotId: shot.id,
@@ -336,6 +356,15 @@ export function retryFromJob(
   }
   const settings = getSettings();
   const provider = source.provider;
+  const shot = source.shotId ? getShot(source.shotId) : undefined;
+  const namedWorkflow = comfyWorkflowFromModelName(source.modelName);
+  const fallbackWorkflow: ComfyWorkflowId = namedWorkflow ?? settings.comfyuiWorkflow;
+  const comfy = shot
+    ? resolveComfyChoice({ settings, project: getProject(source.projectId), shot })
+    : {
+        workflow: fallbackWorkflow,
+        lowMemory: source.modelName ? source.modelName.includes(LOW_MEMORY_MARK) : settings.comfyLowMemory,
+      };
   const ack = ackFailure(provider, opts?.acknowledgeModel);
   if (ack) return ack;
   const seconds = source.kind === "preview" ? 0 : Number(source.durationSec) || 0;
@@ -351,6 +380,7 @@ export function retryFromJob(
     hasCharacterSheet:
       Boolean(source.characterSheetPath) || Boolean(getProject(source.projectId)?.characterSheetPath),
     hasEndImage: Boolean(source.endImagePath),
+    comfy: provider === "comfyui" ? comfy : undefined,
   });
   const job = createJob({
     projectId: source.projectId,

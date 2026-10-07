@@ -1,14 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ComfyWorkflowCards } from "@/components/ComfyWorkflowCards";
 import { CAPABILITY, CLOUD_RISK_NOTE, COMFY_WORKFLOWS } from "@/lib/provider-info";
-import { AppSettings, ComfyWorkflowId, ProviderId, StudioEnv } from "@/lib/types";
+import { AppSettings, ProviderId, StudioEnv } from "@/lib/types";
 
 type SettingsResponse = AppSettings & { env: StudioEnv };
 
 const EMPTY_ENV: StudioEnv = {
   hasFalKey: false,
   hasReplicateToken: false,
+  comfyuiUrlFromEnv: false,
+  comfyuiAuthConfigured: false,
   hostedCredits: false,
   stripeCredits: false,
   paypalCredits: false,
@@ -196,6 +199,18 @@ export default function SettingsPage() {
               {settings.env.hasReplicateToken ? "Present" : "Missing"}
             </span>
           </li>
+          <li className="flex items-center justify-between rounded-lg bg-[var(--panel-2)] px-3 py-2">
+            <code className="text-violet-300">COMFYUI_BASE_URL</code>
+            <span className={settings.env.comfyuiUrlFromEnv ? "text-emerald-300" : "text-[var(--muted)]"}>
+              {settings.env.comfyuiUrlFromEnv ? "Set" : "Unset"}
+            </span>
+          </li>
+          <li className="flex items-center justify-between rounded-lg bg-[var(--panel-2)] px-3 py-2">
+            <code className="text-violet-300">COMFYUI_AUTH_HEADER</code>
+            <span className={settings.env.comfyuiAuthConfigured ? "text-emerald-300" : "text-[var(--muted)]"}>
+              {settings.env.comfyuiAuthConfigured ? "Present" : "Unset"}
+            </span>
+          </li>
         </ul>
         <p className="text-xs leading-relaxed text-[var(--muted)]">{CLOUD_RISK_NOTE}</p>
       </section>
@@ -376,25 +391,26 @@ export default function SettingsPage() {
         </div>
         <div>
           <p className="label">ComfyUI workflow</p>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {(Object.keys(COMFY_WORKFLOWS) as ComfyWorkflowId[]).map((id) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => save({ comfyuiWorkflow: id })}
-                className={`rounded-xl border p-3 text-left ${
-                  settings.comfyuiWorkflow === id
-                    ? "border-violet-500/60 bg-violet-500/10"
-                    : "border-[var(--border)] bg-[var(--panel-2)]"
-                }`}
-              >
-                <span className="text-sm font-medium text-white">{COMFY_WORKFLOWS[id].title}</span>
-                <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
-                  {COMFY_WORKFLOWS[id].detail}
-                </p>
-              </button>
-            ))}
-          </div>
+          <p className="mb-2 text-xs leading-relaxed text-[var(--muted)]">
+            App default for projects and shots that do not pick their own. Memory
+            lines are approximate guidance, not a benchmark from this app.
+          </p>
+          <ComfyWorkflowCards
+            selected={settings.comfyuiWorkflow}
+            onSelect={(id) => save({ comfyuiWorkflow: id })}
+          />
+          <label className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={settings.comfyLowMemory}
+              onChange={(e) => save({ comfyLowMemory: e.target.checked })}
+            />
+            <span>
+              Low-memory preset for shots that do not override it: start at about 480p, short clip.
+              Each card above says what that means for that graph.
+            </span>
+          </label>
         </div>
         <div>
           <label className="label" htmlFor="comfy-url">
@@ -405,6 +421,7 @@ export default function SettingsPage() {
               id="comfy-url"
               className="input"
               value={settings.comfyuiBaseUrl}
+              disabled={settings.env.comfyuiUrlFromEnv}
               onChange={(e) => setSettings({ ...settings, comfyuiBaseUrl: e.target.value })}
               onBlur={() => save({ comfyuiBaseUrl: settings.comfyuiBaseUrl })}
             />
@@ -412,10 +429,16 @@ export default function SettingsPage() {
               Check server
             </button>
           </div>
-          <p className="mt-2 text-xs text-[var(--muted)]">
+          <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">
+            {settings.env.comfyuiUrlFromEnv
+              ? "COMFYUI_BASE_URL is set, so Check server uses that host. The value stays in the environment and is not shown here. The box above is saved but not used until the variable is unset."
+              : "Saved for ComfyUI on this machine. To use another computer or a rented GPU, set COMFYUI_BASE_URL instead of pasting that host here."}{" "}
+            {settings.env.comfyuiAuthConfigured
+              ? "COMFYUI_AUTH_HEADER is present and is sent as Authorization. The value is not shown."
+              : "Set COMFYUI_AUTH_HEADER if the server expects an Authorization value. It is not stored."}{" "}
             Star Dust posts <code>{COMFY_WORKFLOWS[settings.comfyuiWorkflow].file}</code>, polls{" "}
-            <code>/history</code>, and downloads the video. If the server is down,
-            the job fails with the URL and status.
+            <code>/history</code>, and downloads the video. A down server, a missing model or node, or an
+            out-of-memory error fails the job instead of leaving it running.
           </p>
           {probeMsg && <p className="mt-2 text-xs text-white">{probeMsg}</p>}
         </div>

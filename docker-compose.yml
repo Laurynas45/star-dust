@@ -8,4 +8,7 @@ services:
     environment:
       HOSTNAME: "0.0.0.0"
       PORT: "3000"
+      # Optional. ComfyUI on another machine or a rented GPU. Leave unset for Mock.
+      # COMFYUI_BASE_URL: "https://your-pod-8188.proxy.example"
+      # COMFYUI_AUTH_HEADER: "Bearer replace-me"
     restart: unless-stopped

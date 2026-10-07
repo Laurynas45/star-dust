@@ -5,6 +5,8 @@ export const WAN_MAX_HEIGHT = 480;
 export const WAN_FPS = 16;
 /** 4n+1, short clip. The graph is not a long-form generator. */
 export const WAN_MAX_FRAMES = 81;
+/** 4n+1. About one second at 16 fps. Used by the low-memory preset. */
+export const WAN_LOW_MAX_FRAMES = 17;
 
 function snap32(value: number): number {
   return Math.max(32, Math.round(value / 32) * 32);
@@ -25,12 +27,13 @@ export function wanFrameSize(
   return { width: nextWidth, height: nextHeight };
 }
 
-export function wanFrameCount(durationSec: number): number {
+export function wanFrameCount(durationSec: number, maxFrames: number = WAN_MAX_FRAMES): number {
+  const cap = Number.isFinite(maxFrames) && maxFrames >= 5 ? maxFrames : WAN_MAX_FRAMES;
   const seconds = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 4;
   const raw = Math.max(1, Math.round(seconds * WAN_FPS));
   let length = Math.round((raw - 1) / 4) * 4 + 1;
   if (length < 5) length = 5;
-  if (length > WAN_MAX_FRAMES) length = WAN_MAX_FRAMES;
+  if (length > cap) length = cap;
   return Math.round((length - 1) / 4) * 4 + 1;
 }
 

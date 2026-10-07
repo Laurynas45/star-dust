@@ -2,7 +2,7 @@ export type ProviderId = "mock" | "fal" | "replicate" | "comfyui";
 
 export type JobKind = "take" | "preview";
 
-export type ComfyWorkflowId = "svd" | "wan";
+export type ComfyWorkflowId = "svd" | "wan" | "ltx";
 
 export type JobStatus =
   | "queued"
@@ -22,6 +22,10 @@ export interface Project {
   completedCount?: number;
   isSample?: boolean;
   coverPath?: string;
+  /** Null inherits the app default in Providers. */
+  comfyuiWorkflow?: ComfyWorkflowId | null;
+  /** Null inherits the project, then the app default. */
+  comfyLowMemory?: boolean | null;
 }
 
 export interface Shot {
@@ -35,6 +39,10 @@ export interface Shot {
   endImagePath?: string;
   /** Take the stitch uses. When unset, the stitch uses the newest completed take. */
   selectedJobId?: string;
+  /** Null inherits the project, then the app default. */
+  comfyuiWorkflow?: ComfyWorkflowId | null;
+  /** Null inherits the project, then the app default. */
+  comfyLowMemory?: boolean | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -125,6 +133,10 @@ export interface PackWorkflowInfo {
 export interface StudioEnv {
   hasFalKey: boolean;
   hasReplicateToken: boolean;
+  /** True when COMFYUI_BASE_URL is set. The URL itself is not included. */
+  comfyuiUrlFromEnv: boolean;
+  /** True when COMFYUI_AUTH_HEADER is set. The header value is not included. */
+  comfyuiAuthConfigured: boolean;
   hostedCredits: boolean;
   stripeCredits: boolean;
   paypalCredits: boolean;
@@ -141,6 +153,8 @@ export interface AppSettings {
   falModel: string;
   replicateModel: string;
   comfyuiWorkflow: ComfyWorkflowId;
+  /** App default for shots and projects that do not override it. */
+  comfyLowMemory: boolean;
   rates: RateTable;
   budgetCap: number | null;
 }
@@ -184,6 +198,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   falModel: "fal-ai/minimax/video-01/image-to-video",
   replicateModel: "stability-ai/stable-video-diffusion",
   comfyuiWorkflow: "svd",
+  comfyLowMemory: false,
   rates: { fal: {}, replicate: {} },
   budgetCap: null,
 };
