@@ -1,4 +1,5 @@
 import { resolveComfyChoice } from "./comfy-choice";
+import { chainProviderNote, planChain } from "./continuity";
 import { creditEstimate, deductCredits } from "./credits";
 import { buildEstimate, withCredits } from "./cost";
 import {
@@ -164,7 +165,8 @@ function queueJob(
   shot: Shot,
   provider: ProviderId,
   kind: JobKind,
-  createdAt?: string
+  createdAt?: string,
+  chain?: { imagePath: string; awaitPreviousFrame: boolean }
 ): Job {
   const settings = getSettings();
   const project = getProject(shot.projectId);
@@ -175,6 +177,9 @@ function queueJob(
     hasEndImage: Boolean(shot.endImagePath),
     comfy: provider === "comfyui" ? comfyForShot(shot, settings) : undefined,
   });
+  const providerNote = chain
+    ? `${described.providerNote} ${chainProviderNote(chain.awaitPreviousFrame)}`
+    : described.providerNote;
   return createJob({
     projectId: shot.projectId,
     shotId: shot.id,
@@ -182,13 +187,14 @@ function queueJob(
     presetId: shot.presetId,
     provider,
     kind,
-    imagePath: shot.startImagePath!,
+    imagePath: chain?.imagePath ?? shot.startImagePath!,
     endImagePath: shot.endImagePath,
     characterSheetPath: project?.characterSheetPath,
     characterNote: described.characterNote,
-    providerNote: described.providerNote,
+    providerNote,
     modelName: described.modelName,
     durationSec: shot.durationSec,
+    awaitPreviousFrame: chain?.awaitPreviousFrame ?? false,
     status: "queued",
     createdAt,
   });
@@ -230,6 +236,8 @@ export function renderShot(
       ],
     };
   }
+  const plan = planChain(prepared.shot, new Set());
+  if (!plan.ok) return { ok: false, status: 400, error: plan.error };
   const ack = ackFailure(provider, opts?.acknowledgeModel);
   if (ack) return ack;
   const seconds = Number(prepared.shot.durationSec) || 0;
@@ -239,7 +247,12 @@ export function renderShot(
   if (key) return key;
   const charged = chargeCredits(provider, seconds, `shot ${prepared.shot.id}`);
   if (charged) return charged;
-  return { ok: true, jobs: [queueJob(prepared.shot, provider, "take")], skipped: [] };
+  const chain = prepared.shot.chainFromPrevious ? plan : undefined;
+  return {
+    ok: true,
+    jobs: [queueJob(prepared.shot, provider, "take", undefined, chain)],
+    skipped: [],
+  };
 }
 
 export function renderAll(
@@ -281,13 +294,24 @@ export function renderAll(
     }
   }
 
-  const seconds = pending.reduce((sum, shot) => sum + (Number(shot.durationSec) || 0), 0);
+  const batchIds = new Set(pending.map((shot) => shot.id));
+  const runnable: { shot: Shot; imagePath: string; awaitPreviousFrame: boolean }[] = [];
+  for (const shot of pending) {
+    const plan = planChain(shot, batchIds);
+    if (!plan.ok) {
+      skipped.push({ shotId: shot.id, position: shot.position, reason: plan.error });
+    } else {
+      runnable.push({ shot, imagePath: plan.imagePath, awaitPreviousFrame: plan.awaitPreviousFrame });
+    }
+  }
+
+  const seconds = runnable.reduce((sum, item) => sum + (Number(item.shot.durationSec) || 0), 0);
   const cost = withCredits(
     buildEstimate({ provider, modelName, seconds, settings }),
     provider,
     seconds
   );
-  if (pending.length === 0) {
+  if (runnable.length === 0) {
     return { ok: true, jobs: [], skipped, cost };
   }
 
@@ -313,8 +337,16 @@ export function renderAll(
   if (charged) return charged;
 
   const base = Date.now();
-  const jobs = pending.map((shot, index) =>
-    queueJob(shot, provider, "take", new Date(base + index).toISOString())
+  const jobs = runnable.map((item, index) =>
+    queueJob(
+      item.shot,
+      provider,
+      "take",
+      new Date(base + index).toISOString(),
+      item.shot.chainFromPrevious
+        ? { imagePath: item.imagePath, awaitPreviousFrame: item.awaitPreviousFrame }
+        : undefined
+    )
   );
   return { ok: true, jobs, skipped, cost };
 }
@@ -351,12 +383,18 @@ export function retryFromJob(
   if (generationIsRefused(source.prompt, [])) {
     return { ok: false, status: 400, error: MINOR_SEXUAL_REFUSAL, refused: true };
   }
-  if (!imageExists(source.imagePath)) {
+  const shotForChain = source.shotId ? getShot(source.shotId) : undefined;
+  const chainPlan =
+    shotForChain?.chainFromPrevious && source.kind !== "preview"
+      ? planChain(shotForChain, new Set())
+      : null;
+  if (chainPlan && !chainPlan.ok) return { ok: false, status: 400, error: chainPlan.error };
+  if (!chainPlan && !imageExists(source.imagePath)) {
     return { ok: false, status: 400, error: "Start image is missing from disk." };
   }
   const settings = getSettings();
   const provider = source.provider;
-  const shot = source.shotId ? getShot(source.shotId) : undefined;
+  const shot = shotForChain;
   const namedWorkflow = comfyWorkflowFromModelName(source.modelName);
   const fallbackWorkflow: ComfyWorkflowId = namedWorkflow ?? settings.comfyuiWorkflow;
   const comfy = shot
@@ -389,14 +427,18 @@ export function retryFromJob(
     presetId: source.presetId,
     provider,
     kind: source.kind === "preview" ? "preview" : "take",
-    imagePath: source.imagePath,
+    imagePath: chainPlan && chainPlan.ok ? chainPlan.imagePath : source.imagePath,
     endImagePath: source.endImagePath,
     characterSheetPath:
       source.characterSheetPath ?? getProject(source.projectId)?.characterSheetPath,
     characterNote: described.characterNote,
-    providerNote: described.providerNote,
+    providerNote:
+      chainPlan && chainPlan.ok
+        ? `${described.providerNote} ${chainProviderNote(chainPlan.awaitPreviousFrame)}`
+        : described.providerNote,
     modelName: described.modelName,
     durationSec: source.durationSec,
+    awaitPreviousFrame: chainPlan && chainPlan.ok ? chainPlan.awaitPreviousFrame : false,
     status: "queued",
   });
   return { ok: true, jobs: [job], skipped: [] };

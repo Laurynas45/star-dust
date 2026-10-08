@@ -1,5 +1,7 @@
 export type ProviderId = "mock" | "fal" | "replicate" | "comfyui";
 
+export type SeamMode = "cut" | "crossfade";
+
 export type JobKind = "take" | "preview";
 
 export type ComfyWorkflowId = "svd" | "wan" | "ltx";
@@ -26,6 +28,10 @@ export interface Project {
   comfyuiWorkflow?: ComfyWorkflowId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
+  /** How clips join in the stitch. Cut is the historical hard cut. */
+  seamMode: SeamMode;
+  /** Crossfade length when seamMode is crossfade. Ignored for a hard cut. */
+  seamFadeSec: number;
 }
 
 export interface Shot {
@@ -43,6 +49,16 @@ export interface Shot {
   comfyuiWorkflow?: ComfyWorkflowId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
+  /** When true, the next take starts from the previous shot's last frame. */
+  chainFromPrevious: boolean;
+  /** Extracted last frame, stored like any other still. The user's start image stays put. */
+  chainedStartImagePath?: string;
+  /** Take id the chained still was extracted from. */
+  chainedFromJobId?: string;
+  /** Join into this shot. Null inherits the project seam. */
+  seamMode?: SeamMode | null;
+  /** Null inherits the project crossfade length. */
+  seamFadeSec?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -78,6 +94,8 @@ export interface Job {
   modelName?: string;
   durationSec?: number;
   remoteId?: string;
+  /** The worker must extract the previous shot's last frame before the provider runs. */
+  awaitPreviousFrame?: boolean;
 }
 
 export interface RateTable {
@@ -207,6 +225,23 @@ export const SAMPLE_PROJECT_ID = "sample-harbor-dusk";
 
 export const MIN_SHOT_SECONDS = 1;
 export const MAX_SHOT_SECONDS = 10;
+
+export const MIN_SEAM_FADE_SEC = 0.25;
+export const MAX_SEAM_FADE_SEC = 1;
+export const DEFAULT_SEAM_FADE_SEC = 0.5;
+export const SEAM_FADE_CHOICES = [0.25, 0.5, 0.75, 1] as const;
+
+export const CHAIN_HONESTY =
+  "Starting from the previous shot's last frame helps continuity of pose and framing. Identity and details still drift over many chained shots. Star Dust does not lock characters.";
+
+export const SEAM_HONESTY =
+  "Hard cut is the default. A short crossfade blends the pixels at the join. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
+
+export function clampSeamFade(value: number, fallback = DEFAULT_SEAM_FADE_SEC): number {
+  if (!Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value * 1000) / 1000;
+  return Math.min(MAX_SEAM_FADE_SEC, Math.max(MIN_SEAM_FADE_SEC, rounded));
+}
 
 export function clampDuration(value: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getShot, updateShot } from "@/lib/storage";
-import { ComfyWorkflowId, clampDuration, presetById } from "@/lib/types";
+import { ComfyWorkflowId, SeamMode, clampDuration, clampSeamFade, presetById } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
@@ -12,6 +12,18 @@ function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
 function flagField(value: unknown): boolean | null | undefined {
   if (value === null) return null;
   if (typeof value === "boolean") return value;
+  return undefined;
+}
+
+function seamField(value: unknown): SeamMode | null | undefined {
+  if (value === null) return null;
+  if (value === "cut" || value === "crossfade") return value;
+  return undefined;
+}
+
+function fadeField(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "number") return clampSeamFade(value);
   return undefined;
 }
 import { storeImageIfAllowed } from "@/lib/uploads";
@@ -52,6 +64,10 @@ export async function PATCH(
       endImagePath: body.clearEndImage ? "" : undefined,
       comfyuiWorkflow: workflowField(body.comfyuiWorkflow),
       comfyLowMemory: flagField(body.comfyLowMemory),
+      chainFromPrevious:
+        typeof body.chainFromPrevious === "boolean" ? body.chainFromPrevious : undefined,
+      seamMode: seamField(body.seamMode),
+      seamFadeSec: fadeField(body.seamFadeSec),
     });
     return NextResponse.json(updated);
   }

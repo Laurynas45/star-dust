@@ -7,7 +7,7 @@ import {
   listShots,
   updateProject,
 } from "@/lib/storage";
-import { ComfyWorkflowId } from "@/lib/types";
+import { ComfyWorkflowId, SeamMode, clampSeamFade } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
@@ -18,6 +18,11 @@ function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
 function flagField(value: unknown): boolean | null | undefined {
   if (value === null) return null;
   if (typeof value === "boolean") return value;
+  return undefined;
+}
+
+function seamModeField(value: unknown): SeamMode | undefined {
+  if (value === "cut" || value === "crossfade") return value;
   return undefined;
 }
 
@@ -48,6 +53,8 @@ export async function PATCH(
     description: typeof body.description === "string" ? body.description : undefined,
     comfyuiWorkflow: workflowField(body.comfyuiWorkflow),
     comfyLowMemory: flagField(body.comfyLowMemory),
+    seamMode: seamModeField(body.seamMode),
+    seamFadeSec: typeof body.seamFadeSec === "number" ? clampSeamFade(body.seamFadeSec) : undefined,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

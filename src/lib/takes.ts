@@ -1,3 +1,4 @@
+import { startImageForMatch } from "./continuity";
 import { Job, ProviderId, Shot } from "./types";
 
 export function isPreview(job: Job): boolean {
@@ -14,7 +15,7 @@ export function takeInputsMatch(
   if (isPreview(job)) return false;
   if (job.provider !== provider) return false;
   if ((job.modelName ?? "") !== modelName) return false;
-  if (job.imagePath !== (shot.startImagePath ?? "")) return false;
+  if (job.imagePath !== startImageForMatch(shot)) return false;
   if ((job.endImagePath ?? "") !== (shot.endImagePath ?? "")) return false;
   if (job.prompt !== shot.prompt) return false;
   if (job.presetId !== shot.presetId) return false;

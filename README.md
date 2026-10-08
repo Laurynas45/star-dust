@@ -87,7 +87,17 @@ A pinned character sheet is sent only when the call has a reference-image input.
 1. **Shot list** — start image, optional end image, prompt, duration, preset.
 2. **Preview cut** — every shot renders with Mock and stitches, so you can watch the whole edit for $0. The label is camera motion on stills, not AI motion. Preview clips do not overwrite or count as a shot's take.
 3. **Render all** — shots run in order on the provider you picked. A shot is skipped when it already has a completed take for the same provider, model, image(s), prompt, duration, and preset, and when a take is already queued or running. **Re-render** on a shot forces a new take. Previous takes stay on disk and in the database. Pick which take the stitch uses.
-4. **Export stitch** — the chosen take of each completed shot becomes one mp4. ffmpeg does that. It is not another model.
+4. **Export stitch** — the chosen take of each completed shot becomes one mp4. ffmpeg does that. It is not another model. The join is a hard cut, or a short crossfade (0.25–1s) for the whole project or for one join.
+
+## Multi-shot continuity
+
+People making anything longer than one clip usually save the last frame of clip N and feed it in as the start image of clip N+1, then fight a seam at the join.
+
+**Start from previous shot's last frame** does that inside the shot list. When the option is on and the previous shot has a finished take, ffmpeg extracts that clip's final frame, stores it like any other still, and the next take uses it. Your original still stays on the shot. Turn the option off and the next render uses that still again. If the previous shot is not rendered yet, this shot waits behind it when that take is already queued, or it tells you to render the previous shot first. It does not silently use your still. Mock, fal, Replicate, and ComfyUI all go through the same step. Preview cut does not: it is camera motion on your stills.
+
+**Joins** are a hard cut (the default, same as before) or a crossfade of 0.25, 0.5, 0.75, or 1 second. Set it on the project, or override the join that leads into one shot. Star Dust does not grade colour or brightness across the join. A measured match on a short generated clip is easy to wash the next shot out, so it is not attempted.
+
+Chaining helps continuity of pose and framing. Identity and details still drift over many chained shots. Star Dust does not lock characters, does not lip-sync, and does not turn the shot list into a long film. One clip is still the unit.
 
 Gallery: download one take, or download all takes as a zip. Preview clips stay out of that gallery. Jobs can be cancelled and retried.
 
@@ -115,7 +125,7 @@ npm run build
 npm run test:providers
 ```
 
-`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan and LTX workflow injection against that stand-in, workflow selection, remote-URL and auth-header failures, out-of-memory and missing node or model failures, and a local stitch. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
+`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan and LTX workflow injection against that stand-in, workflow selection, remote-URL and auth-header failures, out-of-memory and missing node or model failures, and a local stitch. It also renders a 3-shot Mock project with last-frame chaining and a crossfade, with no API key, and checks that the mp4 duration matches the clips minus the fades. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
 
 ## Safety
 

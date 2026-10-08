@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
   AppSettings,
   ComfyWorkflowId,
+  DEFAULT_SEAM_FADE_SEC,
   DEFAULT_SETTINGS,
   EMPTY_RATES,
   Job,
@@ -14,7 +15,9 @@ import {
   ProviderId,
   RateTable,
   SAMPLE_PROJECT_ID,
+  SeamMode,
   Shot,
+  clampSeamFade,
   presetById,
 } from "./types";
 
@@ -61,7 +64,9 @@ function openDatabase(): DB {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       comfyui_workflow TEXT,
-      comfy_low_memory INTEGER
+      comfy_low_memory INTEGER,
+      seam_mode TEXT NOT NULL DEFAULT 'cut',
+      seam_fade_sec REAL NOT NULL DEFAULT 0.5
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -76,7 +81,12 @@ function openDatabase(): DB {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       comfyui_workflow TEXT,
-      comfy_low_memory INTEGER
+      comfy_low_memory INTEGER,
+      chain_from_previous INTEGER NOT NULL DEFAULT 0,
+      chained_start_image_path TEXT,
+      chained_from_job_id TEXT,
+      seam_mode TEXT,
+      seam_fade_sec REAL
     );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -98,6 +108,7 @@ function openDatabase(): DB {
       model_name TEXT,
       duration_sec REAL,
       remote_id TEXT,
+      await_previous_frame INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -193,6 +204,30 @@ function migrate(db: DB) {
   if (!hasColumn(db, "shots", "comfy_low_memory")) {
     db.exec("ALTER TABLE shots ADD COLUMN comfy_low_memory INTEGER");
   }
+  if (!hasColumn(db, "projects", "seam_mode")) {
+    db.exec("ALTER TABLE projects ADD COLUMN seam_mode TEXT NOT NULL DEFAULT 'cut'");
+  }
+  if (!hasColumn(db, "projects", "seam_fade_sec")) {
+    db.exec("ALTER TABLE projects ADD COLUMN seam_fade_sec REAL NOT NULL DEFAULT 0.5");
+  }
+  if (!hasColumn(db, "shots", "chain_from_previous")) {
+    db.exec("ALTER TABLE shots ADD COLUMN chain_from_previous INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "shots", "chained_start_image_path")) {
+    db.exec("ALTER TABLE shots ADD COLUMN chained_start_image_path TEXT");
+  }
+  if (!hasColumn(db, "shots", "chained_from_job_id")) {
+    db.exec("ALTER TABLE shots ADD COLUMN chained_from_job_id TEXT");
+  }
+  if (!hasColumn(db, "shots", "seam_mode")) {
+    db.exec("ALTER TABLE shots ADD COLUMN seam_mode TEXT");
+  }
+  if (!hasColumn(db, "shots", "seam_fade_sec")) {
+    db.exec("ALTER TABLE shots ADD COLUMN seam_fade_sec REAL");
+  }
+  if (!hasColumn(db, "jobs", "await_previous_frame")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN await_previous_frame INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 function seedSample(db: DB) {
@@ -275,6 +310,9 @@ function mapProject(row: Record<string, unknown>): Project {
     coverPath: str(row.cover_path),
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
+    seamMode: parseSeamMode(row.seam_mode) ?? "cut",
+    seamFadeSec:
+      row.seam_fade_sec == null ? DEFAULT_SEAM_FADE_SEC : clampSeamFade(Number(row.seam_fade_sec)),
   };
 }
 
@@ -291,6 +329,11 @@ function mapShot(row: Record<string, unknown>): Shot {
     selectedJobId: str(row.selected_job_id),
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
+    chainFromPrevious: Number(row.chain_from_previous) === 1,
+    chainedStartImagePath: str(row.chained_start_image_path),
+    chainedFromJobId: str(row.chained_from_job_id),
+    seamMode: parseSeamMode(row.seam_mode),
+    seamFadeSec: row.seam_fade_sec == null ? null : clampSeamFade(Number(row.seam_fade_sec)),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -319,6 +362,7 @@ function mapJob(row: Record<string, unknown>): Job {
     modelName: str(row.model_name),
     durationSec: row.duration_sec == null ? undefined : Number(row.duration_sec),
     remoteId: str(row.remote_id),
+    awaitPreviousFrame: Number(row.await_previous_frame) === 1,
   };
 }
 
@@ -368,6 +412,8 @@ export function createProject(name: string, description = ""): Project {
     updatedAt: now,
     shotCount: 0,
     completedCount: 0,
+    seamMode: "cut",
+    seamFadeSec: DEFAULT_SEAM_FADE_SEC,
   };
   getDb()
     .prepare(
@@ -382,7 +428,9 @@ export function createProject(name: string, description = ""): Project {
 
 export function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "name" | "description" | "comfyuiWorkflow" | "comfyLowMemory">> & {
+  patch: Partial<
+    Pick<Project, "name" | "description" | "comfyuiWorkflow" | "comfyLowMemory" | "seamMode" | "seamFadeSec">
+  > & {
     characterSheetPath?: string | null;
   }
 ): Project | undefined {
@@ -400,13 +448,16 @@ export function updateProject(
       patch.comfyuiWorkflow === undefined ? current.comfyuiWorkflow ?? null : patch.comfyuiWorkflow,
     comfyLowMemory:
       patch.comfyLowMemory === undefined ? current.comfyLowMemory ?? null : patch.comfyLowMemory,
+    seamMode: patch.seamMode === undefined ? current.seamMode : patch.seamMode,
+    seamFadeSec:
+      patch.seamFadeSec === undefined ? current.seamFadeSec : clampSeamFade(patch.seamFadeSec),
     updatedAt: new Date().toISOString(),
   };
   getDb()
     .prepare(
       `UPDATE projects
        SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
-           comfyui_workflow = ?, comfy_low_memory = ?
+           comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?
        WHERE id = ?`
     )
     .run(
@@ -416,6 +467,8 @@ export function updateProject(
       next.updatedAt,
       next.comfyuiWorkflow,
       next.comfyLowMemory == null ? null : next.comfyLowMemory ? 1 : 0,
+      next.seamMode,
+      next.seamFadeSec,
       id
     );
   return getProject(id);
@@ -469,6 +522,7 @@ export function createShot(input: {
   endImagePath?: string;
   comfyuiWorkflow?: ComfyWorkflowId | null;
   comfyLowMemory?: boolean | null;
+  chainFromPrevious?: boolean;
   id?: string;
 }): Shot {
   const now = new Date().toISOString();
@@ -486,6 +540,7 @@ export function createShot(input: {
     endImagePath: input.endImagePath,
     comfyuiWorkflow: input.comfyuiWorkflow ?? null,
     comfyLowMemory: input.comfyLowMemory ?? null,
+    chainFromPrevious: Boolean(input.chainFromPrevious),
     createdAt: now,
     updatedAt: now,
   };
@@ -494,8 +549,8 @@ export function createShot(input: {
       `INSERT INTO shots (
         id, project_id, position, prompt, preset_id, duration_sec,
         start_image_path, end_image_path, created_at, updated_at,
-        comfyui_workflow, comfy_low_memory
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        comfyui_workflow, comfy_low_memory, chain_from_previous
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       shot.id,
@@ -509,7 +564,8 @@ export function createShot(input: {
       shot.createdAt,
       shot.updatedAt,
       shot.comfyuiWorkflow,
-      shot.comfyLowMemory == null ? null : shot.comfyLowMemory ? 1 : 0
+      shot.comfyLowMemory == null ? null : shot.comfyLowMemory ? 1 : 0,
+      shot.chainFromPrevious ? 1 : 0
     );
   touchProject(shot.projectId);
   return shot;
@@ -527,6 +583,11 @@ export function updateShot(
       | "endImagePath"
       | "comfyuiWorkflow"
       | "comfyLowMemory"
+      | "chainFromPrevious"
+      | "chainedStartImagePath"
+      | "chainedFromJobId"
+      | "seamMode"
+      | "seamFadeSec"
     >
   >
 ): Shot | undefined {
@@ -546,13 +607,32 @@ export function updateShot(
       patch.comfyuiWorkflow === undefined ? current.comfyuiWorkflow ?? null : patch.comfyuiWorkflow,
     comfyLowMemory:
       patch.comfyLowMemory === undefined ? current.comfyLowMemory ?? null : patch.comfyLowMemory,
+    chainFromPrevious:
+      patch.chainFromPrevious === undefined ? current.chainFromPrevious : patch.chainFromPrevious,
+    chainedStartImagePath:
+      patch.chainedStartImagePath !== undefined
+        ? patch.chainedStartImagePath || null
+        : current.chainedStartImagePath ?? null,
+    chainedFromJobId:
+      patch.chainedFromJobId !== undefined
+        ? patch.chainedFromJobId || null
+        : current.chainedFromJobId ?? null,
+    seamMode: patch.seamMode === undefined ? current.seamMode ?? null : patch.seamMode,
+    seamFadeSec:
+      patch.seamFadeSec === undefined
+        ? current.seamFadeSec ?? null
+        : patch.seamFadeSec == null
+          ? null
+          : clampSeamFade(patch.seamFadeSec),
     updatedAt: new Date().toISOString(),
   };
   getDb()
     .prepare(
       `UPDATE shots
        SET prompt = ?, preset_id = ?, duration_sec = ?, start_image_path = ?,
-           end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?, updated_at = ?
+           end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?,
+           chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
+           seam_mode = ?, seam_fade_sec = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -563,6 +643,11 @@ export function updateShot(
       next.endImagePath,
       next.comfyuiWorkflow,
       next.comfyLowMemory == null ? null : next.comfyLowMemory ? 1 : 0,
+      next.chainFromPrevious ? 1 : 0,
+      next.chainedStartImagePath,
+      next.chainedFromJobId,
+      next.seamMode,
+      next.seamFadeSec,
       next.updatedAt,
       id
     );
@@ -642,6 +727,7 @@ export function createJob(input: {
   modelName?: string;
   durationSec?: number;
   progress?: number;
+  awaitPreviousFrame?: boolean;
   createdAt?: string;
 }): Job {
   const now = input.createdAt ?? new Date().toISOString();
@@ -663,6 +749,7 @@ export function createJob(input: {
     modelName: input.modelName,
     durationSec: input.durationSec,
     progress: input.progress ?? 0,
+    awaitPreviousFrame: Boolean(input.awaitPreviousFrame),
     createdAt: now,
     updatedAt: now,
   };
@@ -672,8 +759,8 @@ export function createJob(input: {
         id, project_id, shot_id, prompt, preset_id, provider, kind, status, image_path,
         end_image_path, character_sheet_path, character_note, provider_note,
         output_path, error, progress, model_name, duration_sec, remote_id,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?)`
+        await_previous_frame, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)`
     )
     .run(
       job.id,
@@ -693,6 +780,7 @@ export function createJob(input: {
       job.progress ?? 0,
       job.modelName ?? null,
       job.durationSec ?? null,
+      job.awaitPreviousFrame ? 1 : 0,
       job.createdAt,
       job.updatedAt
     );
@@ -715,7 +803,8 @@ export function updateJob(id: string, patch: Partial<Job>): Job | undefined {
         status = ?, prompt = ?, preset_id = ?, provider = ?, image_path = ?,
         end_image_path = ?, character_sheet_path = ?, character_note = ?,
         provider_note = ?, output_path = ?, error = ?, progress = ?,
-        model_name = ?, duration_sec = ?, remote_id = ?, shot_id = ?, updated_at = ?
+        model_name = ?, duration_sec = ?, remote_id = ?, shot_id = ?,
+        await_previous_frame = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -735,6 +824,7 @@ export function updateJob(id: string, patch: Partial<Job>): Job | undefined {
       next.durationSec ?? null,
       next.remoteId ?? null,
       next.shotId ?? null,
+      next.awaitPreviousFrame ? 1 : 0,
       next.updatedAt,
       id
     );
@@ -770,6 +860,11 @@ function parseWorkflow(value: unknown): ComfyWorkflowId {
 
 function parseOptionalWorkflow(value: unknown): ComfyWorkflowId | null {
   if (value === "wan" || value === "ltx" || value === "svd") return value;
+  return null;
+}
+
+function parseSeamMode(value: unknown): SeamMode | null {
+  if (value === "cut" || value === "crossfade") return value;
   return null;
 }
 

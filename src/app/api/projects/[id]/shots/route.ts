@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
-import { createShot, getProject } from "@/lib/storage";
+import { createShot, getProject, listShots } from "@/lib/storage";
 import { ComfyWorkflowId, clampDuration, presetById } from "@/lib/types";
 
 function formWorkflow(value: FormDataEntryValue | null): ComfyWorkflowId | null {
@@ -76,6 +76,7 @@ export async function POST(
     }
     endPath = storedEnd.path;
   }
+  const hasPrevious = listShots(params.id).length > 0;
   const shot = createShot({
     projectId: params.id,
     prompt,
@@ -85,6 +86,7 @@ export async function POST(
     endImagePath: endPath,
     comfyuiWorkflow: formWorkflow(form.get("comfyuiWorkflow")),
     comfyLowMemory: formFlag(form.get("comfyLowMemory")),
+    chainFromPrevious: hasPrevious && form.get("chainFromPrevious") === "1",
   });
   return NextResponse.json(shot, { status: 201 });
 }

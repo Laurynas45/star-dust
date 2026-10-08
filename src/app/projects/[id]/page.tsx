@@ -16,6 +16,7 @@ import {
 } from "@/lib/provider-info";
 import {
   AppSettings,
+  CHAIN_HONESTY,
   ComfyWorkflowId,
   CostEstimate,
   Job,
@@ -24,6 +25,9 @@ import {
   MOTION_PRESETS,
   Project,
   ProviderId,
+  SEAM_FADE_CHOICES,
+  SEAM_HONESTY,
+  SeamMode,
   Shot,
   presetById,
 } from "@/lib/types";
@@ -40,6 +44,8 @@ type StitchResponse = {
   includedJobIds?: string[];
   skipped: { shotId: string; position: number; reason: string }[];
   kind?: "takes" | "preview";
+  durationSec?: number;
+  seams?: { position: number; mode: "cut" | "crossfade"; fadeSec: number; note?: string }[];
 };
 
 type SkippedShot = {
@@ -78,6 +84,7 @@ export default function ProjectStudioPage() {
   const [endImage, setEndImage] = useState<File | null>(null);
   const [shotWorkflow, setShotWorkflow] = useState("");
   const [shotLowMemory, setShotLowMemory] = useState("");
+  const [chainNew, setChainNew] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [savingShot, setSavingShot] = useState(false);
 
@@ -209,7 +216,7 @@ export default function ProjectStudioPage() {
       setPending(null);
       setAckCost(null);
       const skipped = (data.skipped ?? []) as SkippedShot[];
-      if ((data.jobs ?? []).length === 0 && skipped.length > 0) {
+      if (skipped.length > 0) {
         setNotice(skipped.map((item) => `Shot ${item.position}: ${item.reason}`).join(" "));
       }
       await load();
@@ -249,6 +256,7 @@ export default function ProjectStudioPage() {
       if (endImage) form.set("endImage", endImage);
       if (shotWorkflow) form.set("comfyuiWorkflow", shotWorkflow);
       if (shotLowMemory) form.set("comfyLowMemory", shotLowMemory);
+      if (chainNew) form.set("chainFromPrevious", "1");
       const res = await fetch(`/api/projects/${projectId}/shots`, { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not add the shot");
@@ -257,6 +265,7 @@ export default function ProjectStudioPage() {
       setEndImage(null);
       setShotWorkflow("");
       setShotLowMemory("");
+      setChainNew(false);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add the shot");
@@ -358,9 +367,11 @@ export default function ProjectStudioPage() {
     await load();
   }
 
-  async function saveProjectComfy(patch: {
+  async function saveProjectPatch(patch: {
     comfyuiWorkflow?: ComfyWorkflowId | null;
     comfyLowMemory?: boolean | null;
+    seamMode?: SeamMode;
+    seamFadeSec?: number;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -375,9 +386,15 @@ export default function ProjectStudioPage() {
     await load();
   }
 
-  async function saveShotComfy(
+  async function saveShotPatch(
     shotId: string,
-    patch: { comfyuiWorkflow?: ComfyWorkflowId | null; comfyLowMemory?: boolean | null }
+    patch: {
+      comfyuiWorkflow?: ComfyWorkflowId | null;
+      comfyLowMemory?: boolean | null;
+      chainFromPrevious?: boolean;
+      seamMode?: SeamMode | null;
+      seamFadeSec?: number | null;
+    }
   ) {
     const res = await fetch(`/api/projects/${projectId}/shots/${shotId}`, {
       method: "PATCH",
@@ -447,8 +464,8 @@ export default function ProjectStudioPage() {
           <p className="font-mono text-[11px] text-violet-300">01 · Shot list</p>
           <h2 className="mt-1 text-lg font-medium text-white">One clip from a still</h2>
           <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
-            Start image, optional end image, prompt, duration, preset. This is
-            the unit Star Dust renders.
+            Start image, optional end image, prompt, duration, preset. A later
+            shot can start from the previous shot&apos;s last frame.
           </p>
         </article>
         <article className="panel flex flex-col p-4">
@@ -472,7 +489,7 @@ export default function ProjectStudioPage() {
           <p className="font-mono text-[11px] text-violet-300">03 · Export stitch</p>
           <h2 className="mt-1 text-lg font-medium text-white">One mp4, same editor</h2>
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
-            ffmpeg joins the take you chose for each shot. The stitch is not a new model.
+            ffmpeg joins the take you chose. Hard cut, or a short crossfade. The stitch is not a new model.
           </p>
           <button
             type="button"
@@ -485,13 +502,54 @@ export default function ProjectStudioPage() {
         </article>
       </section>
 
+      <section className="panel space-y-3 p-4">
+        <div>
+          <p className="font-mono text-[11px] text-violet-300">Joins</p>
+          <h2 className="mt-1 text-lg font-medium text-white">Hard cut or a short crossfade</h2>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted)]">{SEAM_HONESTY}</p>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted)]">{CHAIN_HONESTY}</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="text-xs text-[var(--muted)]">
+            Project join
+            <select
+              className="input mt-1"
+              value={project.seamMode}
+              onChange={(e) => void saveProjectPatch({ seamMode: e.target.value as SeamMode })}
+            >
+              <option value="cut">Hard cut</option>
+              <option value="crossfade">Crossfade</option>
+            </select>
+          </label>
+          <label className="text-xs text-[var(--muted)]">
+            Crossfade length
+            <select
+              className="input mt-1"
+              value={String(project.seamFadeSec)}
+              disabled={project.seamMode !== "crossfade"}
+              onChange={(e) => void saveProjectPatch({ seamFadeSec: Number(e.target.value) })}
+            >
+              {SEAM_FADE_CHOICES.map((seconds) => (
+                <option key={seconds} value={seconds}>
+                  {seconds}s
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+          A shot can override the join that leads into it. The first shot has no join.
+        </p>
+      </section>
+
       <section className="panel flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <p className="font-mono text-[11px] text-emerald-300">Preview cut · free</p>
           <h2 className="mt-1 text-lg font-medium text-white">Watch the whole edit for $0</h2>
           <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
-            Renders every shot with Mock and stitches them. Camera motion on stills, not AI
-            motion. Preview clips do not replace or count as the shot&apos;s takes.
+            Renders every shot with Mock and stitches them. Camera motion on your stills, not AI
+            motion. Last-frame chaining applies when you render a take, not in this preview.
+            Preview clips do not replace or count as the shot&apos;s takes.
           </p>
         </div>
         <button
@@ -546,7 +604,7 @@ export default function ProjectStudioPage() {
                 value={project.comfyuiWorkflow ?? ""}
                 onChange={(e) => {
                   const value = e.target.value;
-                  void saveProjectComfy({
+                  void saveProjectPatch({
                     comfyuiWorkflow: value === "" ? null : (value as ComfyWorkflowId),
                   });
                 }}
@@ -566,7 +624,7 @@ export default function ProjectStudioPage() {
                 value={project.comfyLowMemory == null ? "" : project.comfyLowMemory ? "1" : "0"}
                 onChange={(e) => {
                   const value = e.target.value;
-                  void saveProjectComfy({
+                  void saveProjectPatch({
                     comfyLowMemory: value === "" ? null : value === "1",
                   });
                 }}
@@ -763,6 +821,20 @@ export default function ProjectStudioPage() {
               </label>
             </div>
           )}
+          {shots.length > 0 && (
+            <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={chainNew}
+                onChange={(e) => setChainNew(e.target.checked)}
+              />
+              <span>
+                <span className="text-white">Start from previous shot&apos;s last frame.</span>{" "}
+                {CHAIN_HONESTY} Your still stays on the shot if you turn this off.
+              </span>
+            </label>
+          )}
           <button type="submit" className="btn-primary w-full" disabled={savingShot}>
               {savingShot ? "Adding…" : "Add shot"}
             </button>
@@ -781,19 +853,56 @@ export default function ProjectStudioPage() {
               const chosen = stitchChoice(shot, takes);
               const takeBusy = job?.status === "queued" || job?.status === "running";
               const preset = presetById(shot.presetId);
+              const prev = index > 0 ? shots[index - 1] : undefined;
+              const prevTakes = prev ? takesFor(prev.id) : [];
+              const prevLatest = prev ? latestTake(prev.id) : undefined;
+              const prevBusy =
+                prevLatest?.status === "queued" || prevLatest?.status === "running";
+              const showChained = Boolean(shot.chainFromPrevious && shot.chainedStartImagePath);
+              const chainLine = !shot.chainFromPrevious || !prev
+                ? null
+                : prevBusy
+                  ? `Waits for shot ${prev.position}'s take, then uses its last frame. Your still is not used.`
+                  : prevTakes.length === 0
+                    ? `Needs shot ${prev.position}'s finished take first. Your still is not used.`
+                    : shot.chainedFromJobId && stitchChoice(prev, prevTakes) !== shot.chainedFromJobId
+                      ? "The previous shot's chosen take changed. Render this shot again to use its new last frame."
+                      : "The next render starts from the previous shot's last frame.";
               return (
                 <li key={shot.id} className="panel grid gap-4 p-4 sm:grid-cols-[140px_1fr]">
-                  <div className="overflow-hidden rounded-lg bg-black">
-                    {shot.startImagePath ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={`/api/media/${shot.startImagePath}`}
-                        alt=""
-                        className="aspect-video w-full object-cover"
-                      />
-                    ) : (
-                      <div className="flex aspect-video items-center justify-center text-xs text-[var(--muted)]">
-                        No still
+                  <div className="space-y-2">
+                    <div className="overflow-hidden rounded-lg bg-black">
+                      {showChained ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={`/api/media/${shot.chainedStartImagePath}`}
+                          alt="Last frame from the previous shot"
+                          className="aspect-video w-full object-cover"
+                        />
+                      ) : shot.startImagePath ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={`/api/media/${shot.startImagePath}`}
+                          alt="Your still"
+                          className="aspect-video w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex aspect-video items-center justify-center text-xs text-[var(--muted)]">
+                          No still
+                        </div>
+                      )}
+                    </div>
+                    {showChained && shot.startImagePath && (
+                      <div className="flex items-center gap-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={`/api/media/${shot.startImagePath}`}
+                          alt="Your still"
+                          className="h-10 w-16 rounded object-cover"
+                        />
+                        <p className="text-[10px] leading-snug text-[var(--muted)]">
+                          Your still. Turning chaining off uses this again.
+                        </p>
                       </div>
                     )}
                   </div>
@@ -809,12 +918,74 @@ export default function ProjectStudioPage() {
                       {job && <StatusBadge status={job.status} />}
                     </div>
                     <p className="mt-2 text-sm text-white">{shot.prompt}</p>
+                    {index > 0 && (
+                      <div className="mt-3 space-y-2">
+                        <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={shot.chainFromPrevious}
+                            onChange={(e) =>
+                              void saveShotPatch(shot.id, { chainFromPrevious: e.target.checked })
+                            }
+                          />
+                          <span>
+                            <span className="text-white">Start from previous shot&apos;s last frame.</span>{" "}
+                            {CHAIN_HONESTY}
+                          </span>
+                        </label>
+                        {chainLine && <p className="text-[11px] leading-relaxed text-amber-100/80">{chainLine}</p>}
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <label className="text-[11px] text-[var(--muted)]">
+                            Join from the previous shot
+                            <select
+                              className="input mt-1"
+                              value={shot.seamMode ?? ""}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                void saveShotPatch(shot.id, {
+                                  seamMode: value === "" ? null : (value as SeamMode),
+                                });
+                              }}
+                            >
+                              <option value="">
+                                Project default (
+                                {project.seamMode === "crossfade"
+                                  ? `crossfade ${project.seamFadeSec}s`
+                                  : "hard cut"}
+                                )
+                              </option>
+                              <option value="cut">Hard cut</option>
+                              <option value="crossfade">Crossfade</option>
+                            </select>
+                          </label>
+                          {shot.seamMode === "crossfade" && (
+                            <label className="text-[11px] text-[var(--muted)]">
+                              This join&apos;s crossfade
+                              <select
+                                className="input mt-1"
+                                value={String(shot.seamFadeSec ?? project.seamFadeSec)}
+                                onChange={(e) =>
+                                  void saveShotPatch(shot.id, { seamFadeSec: Number(e.target.value) })
+                                }
+                              >
+                                {SEAM_FADE_CHOICES.map((seconds) => (
+                                  <option key={seconds} value={seconds}>
+                                    {seconds}s
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     {provider === "comfyui" && settings && (
                       <ShotWorkflowFields
                         shot={shot}
                         projectDefault={resolveComfyChoice({ settings, project, shot: null })}
                         resolved={resolveComfyChoice({ settings, project, shot })}
-                        onChange={(patch) => void saveShotComfy(shot.id, patch)}
+                        onChange={(patch) => void saveShotPatch(shot.id, patch)}
                       />
                     )}
                     {takes.length > 0 && (
@@ -1036,8 +1207,20 @@ export default function ProjectStudioPage() {
             <div className="space-y-2 p-4">
               <p className="text-sm text-white">
                 Stitch of {stitch.includedShotIds.length} completed shot
-                {stitch.includedShotIds.length === 1 ? "" : "s"}.
+                {stitch.includedShotIds.length === 1 ? "" : "s"}
+                {typeof stitch.durationSec === "number" ? ` · ${stitch.durationSec.toFixed(2)}s` : ""}.
               </p>
+              {stitch.seams && stitch.seams.length > 0 && (
+                <p className="text-xs text-[var(--muted)]">
+                  {stitch.seams
+                    .map((seam) => {
+                      const label =
+                        seam.mode === "crossfade" ? `crossfade ${seam.fadeSec}s` : "hard cut";
+                      return `Into shot ${seam.position}: ${label}${seam.note ? ` (${seam.note})` : ""}`;
+                    })
+                    .join(" · ")}
+                </p>
+              )}
               {stitch.skipped.length > 0 && (
                 <p className="text-xs text-[var(--muted)]">
                   {stitch.skipped.map((item) => `Shot ${item.position}: ${item.reason}`).join(" · ")}
