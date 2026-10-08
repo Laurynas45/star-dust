@@ -21,6 +21,73 @@ function assert(cond: unknown, message: string) {
   if (!cond) throw new Error(message);
 }
 
+function solidPng(dir: string, name: string, color: string): Buffer {
+  const file = path.join(dir, name);
+  const made = spawnSync(
+    "ffmpeg",
+    ["-y", "-f", "lavfi", "-i", `color=c=${color}:s=320x180`, "-frames:v", "1", file],
+    { encoding: "utf8" }
+  );
+  if (made.status !== 0) throw new Error(made.stderr || `could not make ${color} still`);
+  return fs.readFileSync(file);
+}
+
+function averageRgb(file: string): { r: number; g: number; b: number } {
+  const probe = spawnSync(
+    "ffmpeg",
+    ["-v", "error", "-i", file, "-vf", "scale=1:1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-frames:v", "1", "-"]
+  );
+  const bytes = probe.stdout;
+  if (probe.status !== 0 || !Buffer.isBuffer(bytes) || bytes.length < 3) {
+    throw new Error(probe.stderr?.toString() || "color probe failed");
+  }
+  return { r: bytes[0], g: bytes[1], b: bytes[2] };
+}
+
+function isRed(color: { r: number; g: number; b: number }): boolean {
+  return color.r > 180 && color.g < 80 && color.b < 80;
+}
+
+function isBlue(color: { r: number; g: number; b: number }): boolean {
+  return color.b > 180 && color.r < 80 && color.g < 80;
+}
+
+function isGreen(color: { r: number; g: number; b: number }): boolean {
+  return color.g > 180 && color.r < 80 && color.b < 80;
+}
+
+function mediaDuration(file: string): number {
+  const probe = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      file,
+    ],
+    { encoding: "utf8" }
+  );
+  const value = Number(String(probe.stdout).trim());
+  if (probe.status !== 0 || !Number.isFinite(value)) {
+    throw new Error(probe.stderr || "duration probe failed");
+  }
+  return value;
+}
+
+function firstFrameRgb(file: string): { r: number; g: number; b: number } {
+  const png = path.join(path.dirname(file), `frame-${process.pid}-${Date.now()}.png`);
+  const made = spawnSync("ffmpeg", ["-y", "-i", file, "-frames:v", "1", png], { encoding: "utf8" });
+  if (made.status !== 0) throw new Error(made.stderr || "could not read the first frame");
+  try {
+    return averageRgb(png);
+  } finally {
+    fs.rmSync(png, { force: true });
+  }
+}
+
 function tinyMp4(): string {
   const file = path.join(dataDir, "tiny.mp4");
   const probe = spawnSync(
@@ -56,6 +123,7 @@ async function main() {
   const comfy = await import("../src/lib/providers/comfyui");
   const mock = await import("../src/lib/providers/mock");
   const stitch = await import("../src/lib/stitch");
+  const providers = await import("../src/lib/providers");
   const { SAMPLE_PROJECT_ID } = await import("../src/lib/types");
 
   assert(!safety.isDisallowedMinorSexualContent("a child flying a kite at dusk"), "innocent child scene");
@@ -1475,6 +1543,141 @@ async function main() {
     delete process.env.STAR_DUST_LICENSE_KEY;
     delete process.env.FAL_KEY;
   }
+
+  storage.saveSettings({ provider: "mock" });
+  const continuity = storage.createProject("Continuity");
+  const red = storage.saveUpload(continuity.id, "red.png", solidPng(dataDir, "red.png", "red"));
+  const blue = storage.saveUpload(continuity.id, "blue.png", solidPng(dataDir, "blue.png", "blue"));
+  const green = storage.saveUpload(continuity.id, "green.png", solidPng(dataDir, "green.png", "green"));
+  const shotA = storage.createShot({
+    projectId: continuity.id,
+    prompt: "Red lanterns over the water.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: red,
+  });
+  const shotB = storage.createShot({
+    projectId: continuity.id,
+    prompt: "Continue directly from the last frame.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: blue,
+    chainFromPrevious: true,
+  });
+  const shotC = storage.createShot({
+    projectId: continuity.id,
+    prompt: "Keep the same framing along the pier.",
+    presetId: "slow-zoom-out",
+    durationSec: 2,
+    startImagePath: green,
+    chainFromPrevious: true,
+  });
+  storage.updateProject(continuity.id, { seamMode: "crossfade", seamFadeSec: 0.5 });
+  assert(isRed(averageRgb(storage.resolveDataPath(red))), "red still is red");
+  assert(isBlue(averageRgb(storage.resolveDataPath(blue))), "blue still is blue");
+
+  const blockedChain = render.renderShot(shotB.id);
+  assert(!blockedChain.ok, "chained shot does not render without the previous take");
+  assert(
+    blockedChain.ok === false &&
+      blockedChain.error.includes("finished take") &&
+      blockedChain.error.includes("Your still was not used"),
+    `chain error names the missing take: ${blockedChain.ok ? "" : blockedChain.error}`
+  );
+  assert(storage.listJobs(continuity.id).length === 0, "missing previous take queued nothing");
+  assert(storage.getShot(shotB.id)?.startImagePath === blue, "user still unchanged when chain cannot start");
+
+  const chainedRun = render.renderAll(continuity.id);
+  assert(chainedRun.ok && chainedRun.jobs.length === 3, "three chained shots queue together");
+  const queuedB = chainedRun.ok ? chainedRun.jobs.find((job) => job.shotId === shotB.id) : undefined;
+  const queuedC = chainedRun.ok ? chainedRun.jobs.find((job) => job.shotId === shotC.id) : undefined;
+  assert(queuedB?.awaitPreviousFrame && queuedB.imagePath !== blue, "shot 2 waits and does not use its still");
+  assert(queuedC?.awaitPreviousFrame && queuedC.imagePath !== green, "shot 3 waits and does not use its still");
+  assert(/last frame/i.test(queuedB?.providerNote || ""), "job says it uses the last frame");
+  assert(
+    !/character lock|lip-sync|long-form/i.test(queuedB?.providerNote || ""),
+    "chain note makes no character-lock, lip-sync, or long-form claim"
+  );
+  await providers.startJob(queuedC!.id);
+  for (const id of [shotA.id, shotB.id, shotC.id]) {
+    const done = storage
+      .listJobs(continuity.id)
+      .find((job) => job.shotId === id && job.kind !== "preview" && job.status === "completed" && job.outputPath);
+    assert(done, `shot ${id} completed from the chained queue`);
+  }
+  const doneB = storage.listJobs(continuity.id).find((job) => job.shotId === shotB.id && job.status === "completed");
+  const doneC = storage.listJobs(continuity.id).find((job) => job.shotId === shotC.id && job.status === "completed");
+  assert(doneB?.imagePath && doneB.imagePath !== blue && doneB.imagePath.startsWith("uploads/"), "shot 2 start still is stored");
+  assert(doneC?.imagePath && doneC.imagePath !== green, "shot 3 did not use the green still");
+  const keptB = storage.getShot(shotB.id);
+  const keptC = storage.getShot(shotC.id);
+  assert(keptB?.startImagePath === blue && keptC?.startImagePath === green, "original stills stay on the shots");
+  assert(keptB?.chainedStartImagePath === doneB?.imagePath, "chained frame is the shot's stored still");
+  const chainedPng = storage.resolveDataPath(keptB!.chainedStartImagePath!);
+  const header = fs.readFileSync(chainedPng).subarray(0, 4);
+  assert(header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4e && header[3] === 0x47, "chained still is a png");
+  assert(isRed(averageRgb(chainedPng)), "extracted frame keeps the previous clip's colour");
+  assert(isRed(firstFrameRgb(storage.resolveDataPath(doneB!.outputPath!))), "shot 2 clip starts from that frame");
+  assert(isRed(firstFrameRgb(storage.resolveDataPath(doneC!.outputPath!))), "shot 3 continues from shot 2");
+
+  const clipDurations = [shotA, shotB, shotC].map((item) => {
+    const job = storage
+      .listJobs(continuity.id)
+      .find((entry) => entry.shotId === item.id && entry.status === "completed" && entry.outputPath);
+    return mediaDuration(storage.resolveDataPath(job!.outputPath!));
+  });
+  const clipSum = clipDurations.reduce((sum, value) => sum + value, 0);
+  const faded = await stitch.stitchProject(continuity.id);
+  const fadedAbs = storage.resolveDataPath(faded.outputPath);
+  assert(fs.statSync(fadedAbs).size > 1000, "crossfade stitch is a real mp4");
+  assert(faded.seams.length === 2 && faded.seams.every((seam) => seam.mode === "crossfade" && seam.fadeSec === 0.5), "both joins crossfade 0.5s");
+  const fadedDur = mediaDuration(fadedAbs);
+  assert(Math.abs(faded.durationSec - fadedDur) < 0.05, "reported stitch duration matches ffprobe");
+  assert(
+    Math.abs(fadedDur - (clipSum - 1)) <= 0.4,
+    `crossfade duration ${fadedDur} should be about ${clipSum - 1}`
+  );
+
+  storage.updateProject(continuity.id, { seamMode: "cut" });
+  storage.updateShot(shotC.id, { seamMode: "crossfade", seamFadeSec: 0.5 });
+  const oneJoin = await stitch.stitchProject(continuity.id);
+  assert(oneJoin.seams[0]?.mode === "cut" && oneJoin.seams[1]?.mode === "crossfade", "per-join override");
+  assert(
+    Math.abs(oneJoin.durationSec - (clipSum - 0.5)) <= 0.4,
+    `one crossfade duration ${oneJoin.durationSec} should be about ${clipSum - 0.5}`
+  );
+
+  storage.updateShot(shotC.id, { seamMode: null, seamFadeSec: null });
+  const hardCut = await stitch.stitchProject(continuity.id);
+  assert(hardCut.seams.every((seam) => seam.mode === "cut"), "project hard cut");
+  assert(Math.abs(hardCut.durationSec - clipSum) <= 0.4, `hard cut duration ${hardCut.durationSec} should be about ${clipSum}`);
+  assert(hardCut.durationSec > faded.durationSec + 0.6, "hard cut is longer than the two crossfades");
+
+  const skippedChain = render.renderAll(continuity.id);
+  assert(skippedChain.ok && skippedChain.jobs.length === 0, "a current chained take is skipped like any other match");
+
+  storage.updateShot(shotB.id, { chainFromPrevious: false });
+  const unchained = render.renderShot(shotB.id, { force: true });
+  assert(unchained.ok && unchained.jobs.length === 1, "turning chaining off queues the original still");
+  assert(unchained.ok && unchained.jobs[0].imagePath === blue && !unchained.jobs[0].awaitPreviousFrame, "off uses the user's still");
+  await providers.startJob(unchained.ok ? unchained.jobs[0].id : "");
+  const blueTake = storage.getJob(unchained.ok ? unchained.jobs[0].id : "");
+  assert(blueTake?.status === "completed" && blueTake.outputPath, "unchained take completed");
+  assert(isBlue(firstFrameRgb(storage.resolveDataPath(blueTake!.outputPath!))), "unchained clip starts on the user's still");
+  assert(storage.getShot(shotB.id)?.startImagePath === blue, "user still still present after turning chaining off");
+
+  const chainUploadsBefore = fs.readdirSync(path.join(dataDir, "uploads", continuity.id)).length;
+  const chainJobsBefore = storage.listJobs(continuity.id).length;
+  const chainPrompt = storage.getShot(shotC.id)?.prompt;
+  storage.updateShot(shotC.id, { prompt: "nude child" });
+  const refusedChain = render.renderAll(continuity.id);
+  assert(!refusedChain.ok && refusedChain.refused, "chaining still refuses sexual content involving a minor before queue");
+  assert(storage.listJobs(continuity.id).length === chainJobsBefore, "refused chain stored no job");
+  assert(
+    fs.readdirSync(path.join(dataDir, "uploads", continuity.id)).length === chainUploadsBefore,
+    "refused chain stored no image"
+  );
+  storage.updateShot(shotC.id, { prompt: chainPrompt });
 
   console.log("provider checks ok");
   console.log(dataDir);

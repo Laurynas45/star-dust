@@ -1,5 +1,6 @@
+import { inflightTake, previousShot, resolveJobChain } from "../continuity";
 import { ProviderId } from "../types";
-import { getJob, getSettings, listJobs, updateJob } from "../storage";
+import { getJob, getSettings, getShot, listJobs, updateJob } from "../storage";
 import { killFfmpeg } from "../ffmpeg";
 import { runMockGenerate } from "./mock";
 import { runFalGenerate } from "./fal";
@@ -8,27 +9,44 @@ import { comfyAuthHeaders, resolveComfyBase, runComfyuiGenerate } from "./comfyu
 
 let chain: Promise<void> = Promise.resolve();
 const scheduled = new Set<string>();
+const starting = new Set<string>();
 let resumed = false;
 
 export async function startJob(jobId: string): Promise<void> {
+  if (starting.has(jobId)) return;
   const job = getJob(jobId);
   if (!job || job.status !== "queued") return;
-  const provider: ProviderId = job.provider || getSettings().provider;
-  switch (provider) {
-    case "mock":
-      await runMockGenerate(jobId);
-      break;
-    case "fal":
-      await runFalGenerate(jobId);
-      break;
-    case "replicate":
-      await runReplicateGenerate(jobId);
-      break;
-    case "comfyui":
-      await runComfyuiGenerate(jobId);
-      break;
-    default:
-      await runMockGenerate(jobId);
+  starting.add(jobId);
+  try {
+    if (job.awaitPreviousFrame && job.shotId) {
+      const shot = getShot(job.shotId);
+      const prev = shot?.chainFromPrevious ? previousShot(shot) : undefined;
+      const blocking = prev ? inflightTake(prev) : undefined;
+      if (blocking?.status === "queued") await startJob(blocking.id);
+      const ready = await resolveJobChain(jobId);
+      if (!ready) return;
+    }
+    const current = getJob(jobId);
+    if (!current || current.status !== "queued") return;
+    const provider: ProviderId = current.provider || getSettings().provider;
+    switch (provider) {
+      case "mock":
+        await runMockGenerate(jobId);
+        break;
+      case "fal":
+        await runFalGenerate(jobId);
+        break;
+      case "replicate":
+        await runReplicateGenerate(jobId);
+        break;
+      case "comfyui":
+        await runComfyuiGenerate(jobId);
+        break;
+      default:
+        await runMockGenerate(jobId);
+    }
+  } finally {
+    starting.delete(jobId);
   }
 }
 

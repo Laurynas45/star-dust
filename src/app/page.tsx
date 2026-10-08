@@ -81,9 +81,9 @@ export default function StudioHome() {
         </div>
         <ol className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
           {[
-            ["01", "Shot list", "Start still, optional end still, prompt, duration, preset."],
+            ["01", "Shot list", "Start still, optional end still, prompt, duration, preset. A later shot can continue from the previous last frame."],
             ["02", "Render all", "Shots run in order. A matching completed take is skipped."],
-            ["03", "Export stitch", "ffmpeg writes one mp4 from the completed clips."],
+            ["03", "Export stitch", "ffmpeg writes one mp4. Joins are a hard cut or a short crossfade."],
           ].map(([index, title, copy]) => (
             <li key={index} className="panel flex gap-3 p-3">
               <span className="font-mono text-xs text-violet-300">{index}</span>
