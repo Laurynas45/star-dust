@@ -66,7 +66,8 @@ function openDatabase(): DB {
       comfyui_workflow TEXT,
       comfy_low_memory INTEGER,
       seam_mode TEXT NOT NULL DEFAULT 'cut',
-      seam_fade_sec REAL NOT NULL DEFAULT 0.5
+      seam_fade_sec REAL NOT NULL DEFAULT 0.5,
+      style_base TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -228,6 +229,9 @@ function migrate(db: DB) {
   if (!hasColumn(db, "jobs", "await_previous_frame")) {
     db.exec("ALTER TABLE jobs ADD COLUMN await_previous_frame INTEGER NOT NULL DEFAULT 0");
   }
+  if (!hasColumn(db, "projects", "style_base")) {
+    db.exec("ALTER TABLE projects ADD COLUMN style_base TEXT NOT NULL DEFAULT ''");
+  }
 }
 
 function seedSample(db: DB) {
@@ -313,6 +317,7 @@ function mapProject(row: Record<string, unknown>): Project {
     seamMode: parseSeamMode(row.seam_mode) ?? "cut",
     seamFadeSec:
       row.seam_fade_sec == null ? DEFAULT_SEAM_FADE_SEC : clampSeamFade(Number(row.seam_fade_sec)),
+    styleBase: String(row.style_base ?? ""),
   };
 }
 
@@ -414,6 +419,7 @@ export function createProject(name: string, description = ""): Project {
     completedCount: 0,
     seamMode: "cut",
     seamFadeSec: DEFAULT_SEAM_FADE_SEC,
+    styleBase: "",
   };
   getDb()
     .prepare(
@@ -429,7 +435,16 @@ export function createProject(name: string, description = ""): Project {
 export function updateProject(
   id: string,
   patch: Partial<
-    Pick<Project, "name" | "description" | "comfyuiWorkflow" | "comfyLowMemory" | "seamMode" | "seamFadeSec">
+    Pick<
+      Project,
+      | "name"
+      | "description"
+      | "comfyuiWorkflow"
+      | "comfyLowMemory"
+      | "seamMode"
+      | "seamFadeSec"
+      | "styleBase"
+    >
   > & {
     characterSheetPath?: string | null;
   }
@@ -451,13 +466,15 @@ export function updateProject(
     seamMode: patch.seamMode === undefined ? current.seamMode : patch.seamMode,
     seamFadeSec:
       patch.seamFadeSec === undefined ? current.seamFadeSec : clampSeamFade(patch.seamFadeSec),
+    styleBase: patch.styleBase === undefined ? current.styleBase : patch.styleBase.trim(),
     updatedAt: new Date().toISOString(),
   };
   getDb()
     .prepare(
       `UPDATE projects
        SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
-           comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?
+           comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?,
+           style_base = ?
        WHERE id = ?`
     )
     .run(
@@ -469,6 +486,7 @@ export function updateProject(
       next.comfyLowMemory == null ? null : next.comfyLowMemory ? 1 : 0,
       next.seamMode,
       next.seamFadeSec,
+      next.styleBase,
       id
     );
   return getProject(id);

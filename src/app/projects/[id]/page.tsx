@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -27,9 +27,12 @@ import {
   ProviderId,
   SEAM_FADE_CHOICES,
   SEAM_HONESTY,
+  STYLE_BASE_HONESTY,
   SeamMode,
   Shot,
+  effectivePrompt,
   presetById,
+  styleBaseText,
 } from "@/lib/types";
 
 type SettingsResponse = AppSettings & {
@@ -87,6 +90,8 @@ export default function ProjectStudioPage() {
   const [chainNew, setChainNew] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [savingShot, setSavingShot] = useState(false);
+  const [styleBaseDraft, setStyleBaseDraft] = useState<string | null>(null);
+  const styleBaseDraftRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -179,10 +184,48 @@ export default function ProjectStudioPage() {
     return takes[takes.length - 1]?.id;
   }
 
+  function editStyleBase(value: string) {
+    styleBaseDraftRef.current = value;
+    setStyleBaseDraft(value);
+  }
+
+  async function persistStyleBase(value: string): Promise<boolean> {
+    const current = detail?.project.styleBase ?? "";
+    if (value.trim() === current) {
+      styleBaseDraftRef.current = null;
+      setStyleBaseDraft(null);
+      return true;
+    }
+    const res = await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ styleBase: value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not save the shared style text");
+      return false;
+    }
+    styleBaseDraftRef.current = null;
+    setStyleBaseDraft(null);
+    await load();
+    return true;
+  }
+
+  async function flushStyleBase(): Promise<boolean> {
+    const draft = styleBaseDraftRef.current;
+    if (draft === null) return true;
+    return persistStyleBase(draft);
+  }
+
   async function run(action: Pending, acknowledgeModel?: string) {
     setBusy(true);
     setError(null);
     setNotice(null);
+    if (!(await flushStyleBase())) {
+      setBusy(false);
+      return;
+    }
     const body: Record<string, unknown> = {};
     if (acknowledgeModel) body.acknowledgeModel = acknowledgeModel;
     if (action.kind === "shot" && action.force) body.force = true;
@@ -247,6 +290,10 @@ export default function ProjectStudioPage() {
     }
     setSavingShot(true);
     setError(null);
+    if (!(await flushStyleBase())) {
+      setSavingShot(false);
+      return;
+    }
     try {
       const form = new FormData();
       form.set("prompt", prompt);
@@ -278,6 +325,10 @@ export default function ProjectStudioPage() {
     setPreviewing(true);
     setError(null);
     setNotice(null);
+    if (!(await flushStyleBase())) {
+      setPreviewing(false);
+      return;
+    }
     try {
       const res = await fetch(`/api/projects/${projectId}/preview`, { method: "POST" });
       const data = await res.json();
@@ -464,7 +515,8 @@ export default function ProjectStudioPage() {
           <p className="font-mono text-[11px] text-violet-300">01 · Shot list</p>
           <h2 className="mt-1 text-lg font-medium text-white">One clip from a still</h2>
           <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
-            Start image, optional end image, prompt, duration, preset. A later
+            Start image, optional end image, prompt, duration, preset. Shared style
+            text, when set, is prefixed onto the prompt a provider sees. A later
             shot can start from the previous shot&apos;s last frame.
           </p>
         </article>
@@ -696,6 +748,43 @@ export default function ProjectStudioPage() {
         </div>
       </section>
 
+      <section className="panel space-y-3 p-4">
+        <div>
+          <p className="font-mono text-[11px] text-violet-300">Shared text</p>
+          <h2 className="mt-1 text-lg font-medium text-white">Shared style / character text</h2>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted)]">{STYLE_BASE_HONESTY}</p>
+        </div>
+        <label className="block text-xs text-[var(--muted)]" htmlFor="style-base">
+          Shared style / character text
+          <textarea
+            id="style-base"
+            className="input mt-1 min-h-[88px] resize-y"
+            value={styleBaseDraft ?? project.styleBase}
+            placeholder="dusk harbor, warm lantern light, same wool coat"
+            onChange={(e) => editStyleBase(e.target.value)}
+            onBlur={() => {
+              const draft = styleBaseDraftRef.current;
+              if (draft !== null) void persistStyleBase(draft);
+            }}
+          />
+        </label>
+        {styleBaseText(styleBaseDraft ?? project.styleBase) ? (
+          <p className="line-clamp-3 text-xs leading-relaxed text-[var(--muted)]">
+            <span className="font-medium text-white">Effective prompt preview.</span>{" "}
+            {shots[0]
+              ? `Shot ${shots[0].position}: ${effectivePrompt(styleBaseDraft ?? project.styleBase, shots[0].prompt)}`
+              : styleBaseText(styleBaseDraft ?? project.styleBase)}
+            {shots.length > 1
+              ? " The same text is prefixed on every shot. Each shot prompt stays the action."
+              : " The shot prompt stays the action."}
+          </p>
+        ) : (
+          <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+            Empty, so each shot prompt is sent on its own.
+          </p>
+        )}
+      </section>
+
       <section className="space-y-4">
         <div className="flex items-end justify-between gap-3">
           <h2 className="text-lg font-semibold text-white">Shot list</h2>
@@ -750,6 +839,10 @@ export default function ProjectStudioPage() {
                 placeholder="Lantern light drifts as the camera pushes in."
                 required
               />
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                Action or scene for this shot. Shared style text is not copied into the shot.
+                It is added in front only when a take or preview is queued.
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -918,6 +1011,11 @@ export default function ProjectStudioPage() {
                       {job && <StatusBadge status={job.status} />}
                     </div>
                     <p className="mt-2 text-sm text-white">{shot.prompt}</p>
+                    {styleBaseText(project.styleBase) && (
+                      <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[var(--muted)]">
+                        Provider sees: {effectivePrompt(project.styleBase, shot.prompt)}
+                      </p>
+                    )}
                     {index > 0 && (
                       <div className="mt-3 space-y-2">
                         <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">

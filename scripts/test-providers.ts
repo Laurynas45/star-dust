@@ -1679,6 +1679,112 @@ async function main() {
   );
   storage.updateShot(shotC.id, { prompt: chainPrompt });
 
+  const { STYLE_BASE_HONESTY, effectivePrompt } = await import("../src/lib/types");
+  assert(/text only — not a character lock/i.test(STYLE_BASE_HONESTY), "helper says this is text only, not a character lock");
+  assert(/identity can still drift/i.test(STYLE_BASE_HONESTY), "helper says identity can still drift");
+  assert(/does not lock a face/i.test(STYLE_BASE_HONESTY), "helper does not promise a face lock");
+  assert(/lip-sync/i.test(STYLE_BASE_HONESTY) && /long film/i.test(STYLE_BASE_HONESTY), "helper names the limits on lip-sync and a long film");
+  const actionA = "Slow push toward the lanterns.";
+  const actionB = "Drift right along the pier.";
+  assert(
+    effectivePrompt("dusk harbor, ", "the tide slides.") === "dusk harbor, the tide slides.",
+    "join trims a trailing comma"
+  );
+  assert(
+    effectivePrompt("dusk harbor,", ", the tide slides.") === "dusk harbor, the tide slides.",
+    "join drops a double comma"
+  );
+  assert(effectivePrompt("", actionA) === actionA, "empty style base keeps the shot prompt");
+  assert(effectivePrompt("   ", actionA) === actionA, "blank style base keeps the shot prompt");
+  assert(effectivePrompt(",,,", actionA) === actionA, "comma-only style base keeps the shot prompt");
+  assert(effectivePrompt("warm light,", "") === "warm light", "dangling comma is dropped when the shot prompt is empty");
+  assert(
+    !safety.isDisallowedMinorSexualContent("soft nude lighting"),
+    "style base alone is not a minor-sexual refusal"
+  );
+  assert(
+    !safety.isDisallowedMinorSexualContent("a child walks the pier"),
+    "shot action alone is not a minor-sexual refusal"
+  );
+  assert(
+    safety.isDisallowedMinorSexualContent(effectivePrompt("soft nude lighting", "a child walks the pier")),
+    "joined style base and shot action is refused"
+  );
+
+  const columns = storage.getDb().prepare("PRAGMA table_info(projects)").all() as { name: string }[];
+  assert(columns.some((column) => column.name === "style_base"), "projects.style_base exists");
+  assert(storage.getProject(SAMPLE_PROJECT_ID)?.styleBase === "", "harbor dusk leaves style base empty");
+
+  const styled = storage.createProject("Style base");
+  assert(storage.getProject(styled.id)?.styleBase === "", "new project style base is empty");
+  const base = "Dusk harbor, warm lantern light, same wool coat";
+  storage.updateProject(styled.id, { styleBase: `  ${base},  ` });
+  assert(storage.getProject(styled.id)?.styleBase === `${base},`, "style base is stored trimmed");
+  const styleA = storage.createShot({
+    projectId: styled.id,
+    prompt: actionA,
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: red,
+  });
+  const styleB = storage.createShot({
+    projectId: styled.id,
+    prompt: actionB,
+    presetId: "pan-right",
+    durationSec: 2,
+    startImagePath: blue,
+  });
+  assert(storage.getShot(styleA.id)?.prompt === actionA, "shot prompt is not rewritten into the base");
+  const joinedA = `${base}, ${actionA}`;
+  const joinedB = `${base}, ${actionB}`;
+  const styledTake = render.renderShot(styleA.id);
+  assert(styledTake.ok && styledTake.jobs.length === 1, "style base take queued");
+  assert(styledTake.ok && styledTake.jobs[0].prompt === joinedA, "take job stores the joined prompt");
+  assert(styledTake.ok && styledTake.jobs[0].provider === "mock", "style base take uses Mock");
+  await mock.runMockGenerate(styledTake.ok ? styledTake.jobs[0].id : "");
+  const styledDone = storage.getJob(styledTake.ok ? styledTake.jobs[0].id : "");
+  assert(styledDone?.status === "completed" && styledDone.outputPath, "style base Mock take rendered an mp4");
+  assert(
+    fs.statSync(storage.resolveDataPath(styledDone!.outputPath!)).size > 1000,
+    "style base mp4 is a real file"
+  );
+  assert(storage.getShot(styleA.id)?.prompt === actionA, "completed take left the shot prompt as the action");
+
+  const styledPreview = render.previewAll(styled.id);
+  assert(styledPreview.ok && styledPreview.jobs.length === 2, "preview queues every shot");
+  assert(
+    styledPreview.ok &&
+      styledPreview.jobs.find((job) => job.shotId === styleA.id)?.prompt === joinedA &&
+      styledPreview.jobs.find((job) => job.shotId === styleB.id)?.prompt === joinedB,
+    "preview jobs store the joined prompt"
+  );
+  for (const job of styledPreview.ok ? styledPreview.jobs : []) {
+    await mock.runMockGenerate(job.id);
+    const done = storage.getJob(job.id);
+    assert(done?.status === "completed" && done.prompt === effectivePrompt(base + ",", storage.getShot(job.shotId!)!.prompt), "preview clip kept the joined prompt");
+    assert(done?.outputPath && fs.statSync(storage.resolveDataPath(done.outputPath)).size > 1000, "preview mp4 with style base");
+  }
+
+  const matched = render.renderAll(styled.id);
+  assert(matched.ok && matched.jobs.length === 1 && matched.jobs[0].shotId === styleB.id, "matching joined take is skipped");
+  assert(matched.ok && matched.jobs[0].prompt === joinedB, "the shot that still needs a take gets the joined prompt");
+
+  storage.updateProject(styled.id, { styleBase: "" });
+  assert(storage.getProject(styled.id)?.styleBase === "", "style base can be cleared");
+  const plain = render.renderShot(styleA.id, { force: true });
+  assert(plain.ok && plain.jobs[0].prompt === actionA, "empty style base leaves the shot prompt unchanged on the job");
+  await mock.runMockGenerate(plain.ok ? plain.jobs[0].id : "");
+  assert(storage.getJob(plain.ok ? plain.jobs[0].id : "")?.status === "completed", "empty style base still renders Mock");
+
+  const jobsBeforeStyleRefusal = storage.listJobs(styled.id).length;
+  storage.updateProject(styled.id, { styleBase: "soft nude lighting" });
+  storage.updateShot(styleB.id, { prompt: "a child walks the pier" });
+  const refusedStyle = render.renderAll(styled.id);
+  assert(!refusedStyle.ok && refusedStyle.refused, "joined style base and shot prompt is refused before queue");
+  const refusedStylePreview = render.previewAll(styled.id);
+  assert(!refusedStylePreview.ok && refusedStylePreview.refused, "preview refuses the joined prompt before queue");
+  assert(storage.listJobs(styled.id).length === jobsBeforeStyleRefusal, "refused style base stored no job");
+
   console.log("provider checks ok");
   console.log(dataDir);
 }

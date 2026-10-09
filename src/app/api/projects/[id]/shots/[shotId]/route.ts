@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
-import { deleteShot, getShot, updateShot } from "@/lib/storage";
-import { ComfyWorkflowId, SeamMode, clampDuration, clampSeamFade, presetById } from "@/lib/types";
+import { deleteShot, getProject, getShot, updateShot } from "@/lib/storage";
+import { ComfyWorkflowId, SeamMode, clampDuration, clampSeamFade, effectivePrompt, presetById } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
@@ -50,7 +50,8 @@ export async function PATCH(
   if (contentType.includes("application/json")) {
     const body = await req.json().catch(() => ({}));
     const prompt = typeof body.prompt === "string" ? body.prompt : shot.prompt;
-    if (generationIsRefused(prompt, [])) {
+    const styleBase = getProject(shot.projectId)?.styleBase ?? "";
+    if (generationIsRefused(effectivePrompt(styleBase, prompt), [])) {
       return NextResponse.json({ error: MINOR_SEXUAL_REFUSAL, refused: true }, { status: 400 });
     }
     const preset = presetById(typeof body.presetId === "string" ? body.presetId : shot.presetId);
@@ -78,7 +79,8 @@ export async function PATCH(
   const durationSec = clampDuration(Number(form.get("durationSec")), shot.durationSec);
   const start = await fileBuffer(form.get("startImage"));
   const end = await fileBuffer(form.get("endImage"));
-  if (generationIsRefused(prompt, [start?.name || "", end?.name || ""])) {
+  const seen = effectivePrompt(getProject(shot.projectId)?.styleBase, prompt);
+  if (generationIsRefused(seen, [start?.name || "", end?.name || ""])) {
     return NextResponse.json({ error: MINOR_SEXUAL_REFUSAL, refused: true }, { status: 400 });
   }
   let startImagePath = shot.startImagePath;
@@ -86,7 +88,7 @@ export async function PATCH(
   if (start) {
     const stored = storeImageIfAllowed({
       projectId: shot.projectId,
-      prompt,
+      prompt: seen,
       filename: start.name,
       buffer: start.buf,
     });
@@ -101,7 +103,7 @@ export async function PATCH(
   if (end) {
     const stored = storeImageIfAllowed({
       projectId: shot.projectId,
-      prompt,
+      prompt: seen,
       filename: end.name,
       buffer: end.buf,
     });
