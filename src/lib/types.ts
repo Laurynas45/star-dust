@@ -32,6 +32,12 @@ export interface Project {
   seamMode: SeamMode;
   /** Crossfade length when seamMode is crossfade. Ignored for a hard cut. */
   seamFadeSec: number;
+  /**
+   * Shared style / character text. Empty by default.
+   * Prefixed onto each shot prompt when a take or preview job is created.
+   * Text only — not a character lock.
+   */
+  styleBase: string;
 }
 
 export interface Shot {
@@ -236,6 +242,26 @@ export const CHAIN_HONESTY =
 
 export const SEAM_HONESTY =
   "Hard cut is the default. A short crossfade blends the pixels at the join. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
+
+export const STYLE_BASE_HONESTY =
+  "Text only — not a character lock. These words are added in front of every shot when a take or preview is queued. Identity can still drift across shots. Star Dust does not lock a face, lip-sync, or build a long film.";
+
+/** Shared base with surrounding commas removed. Empty when the field is blank or only commas. */
+export function styleBaseText(styleBase: string | null | undefined): string {
+  return (styleBase ?? "").trim().replace(/^[,\s]+|[,\s]+$/g, "");
+}
+
+/**
+ * Prompt a provider sees. An empty style base leaves the shot prompt unchanged.
+ * A set base is joined as `styleBase, shot prompt`, without a double or dangling comma.
+ */
+export function effectivePrompt(styleBase: string | null | undefined, shotPrompt: string): string {
+  const base = styleBaseText(styleBase);
+  if (!base) return shotPrompt;
+  const action = shotPrompt.trim().replace(/^[,\s]+/, "");
+  if (!action) return base;
+  return `${base}, ${action}`;
+}
 
 export function clampSeamFade(value: number, fallback = DEFAULT_SEAM_FADE_SEC): number {
   if (!Number.isFinite(value)) return fallback;

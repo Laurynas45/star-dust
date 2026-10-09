@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { createShot, getProject, listShots } from "@/lib/storage";
-import { ComfyWorkflowId, clampDuration, presetById } from "@/lib/types";
+import { ComfyWorkflowId, clampDuration, effectivePrompt, presetById } from "@/lib/types";
 
 function formWorkflow(value: FormDataEntryValue | null): ComfyWorkflowId | null {
   if (value === "svd" || value === "wan" || value === "ltx") return value;
@@ -29,7 +29,8 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  if (!getProject(params.id)) {
+  const project = getProject(params.id);
+  if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
   const form = await req.formData();
@@ -44,12 +45,13 @@ export async function POST(
   if (!start) {
     return NextResponse.json({ error: "Start image is required" }, { status: 400 });
   }
-  if (generationIsRefused(prompt, [start.name, end?.name || ""])) {
+  if (generationIsRefused(effectivePrompt(project.styleBase, prompt), [start.name, end?.name || ""])) {
     return NextResponse.json({ error: MINOR_SEXUAL_REFUSAL, refused: true }, { status: 400 });
   }
+  const seen = effectivePrompt(project.styleBase, prompt);
   const storedStart = storeImageIfAllowed({
     projectId: params.id,
-    prompt,
+    prompt: seen,
     filename: start.name,
     buffer: start.buf,
     extraFilenames: end ? [end.name] : [],
@@ -64,7 +66,7 @@ export async function POST(
   if (end) {
     const storedEnd = storeImageIfAllowed({
       projectId: params.id,
-      prompt,
+      prompt: seen,
       filename: end.name,
       buffer: end.buf,
     });

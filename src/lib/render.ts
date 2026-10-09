@@ -15,7 +15,17 @@ import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "./safety";
 import { createJob, getProject, getSettings, getShot, listJobs, listShots } from "./storage";
 import { classifyShot, skipReasonText } from "./takes";
 import { imageExists } from "./uploads";
-import { AppSettings, CostEstimate, CreditEstimate, ComfyWorkflowId, Job, JobKind, ProviderId, Shot } from "./types";
+import {
+  AppSettings,
+  CostEstimate,
+  CreditEstimate,
+  ComfyWorkflowId,
+  Job,
+  JobKind,
+  ProviderId,
+  Shot,
+  effectivePrompt,
+} from "./types";
 
 export type SkippedShot = {
   shotId: string;
@@ -147,7 +157,8 @@ function prepareShot(shotId: string):
       error: `Shot ${shot.position} end image is missing from disk.`,
     };
   }
-  if (generationIsRefused(shot.prompt, [])) {
+  const project = getProject(shot.projectId);
+  if (generationIsRefused(effectivePrompt(project?.styleBase, shot.prompt), [])) {
     return { ok: false, status: 400, error: MINOR_SEXUAL_REFUSAL, refused: true };
   }
   return { ok: true, shot };
@@ -183,7 +194,7 @@ function queueJob(
   return createJob({
     projectId: shot.projectId,
     shotId: shot.id,
-    prompt: shot.prompt,
+    prompt: effectivePrompt(project?.styleBase, shot.prompt),
     presetId: shot.presetId,
     provider,
     kind,

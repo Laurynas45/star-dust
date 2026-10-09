@@ -84,7 +84,7 @@ A pinned character sheet is sent only when the call has a reference-image input.
 
 ## Shot list
 
-1. **Shot list** — start image, optional end image, prompt, duration, preset.
+1. **Shot list** — start image, optional end image, prompt, duration, preset. A project can also hold shared style / character text. It is empty unless you set it.
 2. **Preview cut** — every shot renders with Mock and stitches, so you can watch the whole edit for $0. The label is camera motion on stills, not AI motion. Preview clips do not overwrite or count as a shot's take.
 3. **Render all** — shots run in order on the provider you picked. A shot is skipped when it already has a completed take for the same provider, model, image(s), prompt, duration, and preset, and when a take is already queued or running. **Re-render** on a shot forces a new take. Previous takes stay on disk and in the database. Pick which take the stitch uses.
 4. **Export stitch** — the chosen take of each completed shot becomes one mp4. ffmpeg does that. It is not another model. The join is a hard cut, or a short crossfade (0.25–1s) for the whole project or for one join.
@@ -98,6 +98,14 @@ People making anything longer than one clip usually save the last frame of clip 
 **Joins** are a hard cut (the default, same as before) or a crossfade of 0.25, 0.5, 0.75, or 1 second. Set it on the project, or override the join that leads into one shot. Star Dust does not grade colour or brightness across the join. A measured match on a short generated clip is easy to wash the next shot out, so it is not attempted.
 
 Chaining helps continuity of pose and framing. Identity and details still drift over many chained shots. Star Dust does not lock characters, does not lip-sync, and does not turn the shot list into a long film. One clip is still the unit.
+
+### Shared style / character text
+
+Last-frame chaining is one continuity lever. Shared wording is the other cheap one.
+
+**Shared style / character text** is a single project field. Harbor dusk leaves it empty, so those sample prompts are sent alone and the dusk harbor mood stays in the shot text. When you set the field, every take and every preview job stores the effective prompt: that text, then a comma, then the shot prompt. A double comma or a dangling comma at the join is dropped. The shot prompt stays the action or scene. Star Dust does not copy the base into each shot.
+
+This is the shared-base pattern people rebuild in ComfyUI (FunPack Prompt Combiner / Story Writer style): the same words in front of every shot. It is text only — not a character lock. Identity can still drift across shots. Together with last-frame chaining, a reel can share wording and a starting frame. Star Dust does not lock a face, lip-sync, or turn the shot list into a long film. One clip is still the unit.
 
 Gallery: download one take, or download all takes as a zip. Preview clips stay out of that gallery. Jobs can be cancelled and retried.
 
@@ -125,7 +133,7 @@ npm run build
 npm run test:providers
 ```
 
-`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan and LTX workflow injection against that stand-in, workflow selection, remote-URL and auth-header failures, out-of-memory and missing node or model failures, and a local stitch. It also renders a 3-shot Mock project with last-frame chaining and a crossfade, with no API key, and checks that the mp4 duration matches the clips minus the fades. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
+`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan and LTX workflow injection against that stand-in, workflow selection, remote-URL and auth-header failures, out-of-memory and missing node or model failures, and a local stitch. It also renders a 3-shot Mock project with last-frame chaining and a crossfade, with no API key, and checks that the mp4 duration matches the clips minus the fades. It also checks that a project style base is joined onto Mock take and preview prompts, that an empty style base leaves the shot prompt unchanged, and that a joined prompt which is sexual content involving a minor is refused before a job is queued. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
 
 ## Safety
 

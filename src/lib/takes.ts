@@ -1,5 +1,6 @@
 import { startImageForMatch } from "./continuity";
-import { Job, ProviderId, Shot } from "./types";
+import { getProject } from "./storage";
+import { Job, ProviderId, Shot, effectivePrompt } from "./types";
 
 export function isPreview(job: Job): boolean {
   return job.kind === "preview";
@@ -10,14 +11,15 @@ export function takeInputsMatch(
   job: Job,
   shot: Shot,
   provider: ProviderId,
-  modelName: string
+  modelName: string,
+  styleBase = ""
 ): boolean {
   if (isPreview(job)) return false;
   if (job.provider !== provider) return false;
   if ((job.modelName ?? "") !== modelName) return false;
   if (job.imagePath !== startImageForMatch(shot)) return false;
   if ((job.endImagePath ?? "") !== (shot.endImagePath ?? "")) return false;
-  if (job.prompt !== shot.prompt) return false;
+  if (job.prompt !== effectivePrompt(styleBase, shot.prompt)) return false;
   if (job.presetId !== shot.presetId) return false;
   if (job.durationSec == null || Number(job.durationSec) !== Number(shot.durationSec)) return false;
   return true;
@@ -36,6 +38,7 @@ export function classifyShot(
   provider: ProviderId,
   modelName: string
 ): { action: "run" } | { action: "skip"; reason: SkipReason; jobId: string } {
+  const styleBase = getProject(shot.projectId)?.styleBase ?? "";
   const takes = jobs.filter((job) => job.shotId === shot.id && !isPreview(job));
   const inflight = takes.find((job) => job.status === "queued" || job.status === "running");
   if (inflight) return { action: "skip", reason: "inflight", jobId: inflight.id };
@@ -44,7 +47,7 @@ export function classifyShot(
       (job) =>
         job.status === "completed" &&
         Boolean(job.outputPath) &&
-        takeInputsMatch(job, shot, provider, modelName)
+        takeInputsMatch(job, shot, provider, modelName, styleBase)
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   if (matches[0]) return { action: "skip", reason: "match", jobId: matches[0].id };

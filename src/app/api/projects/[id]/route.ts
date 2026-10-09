@@ -7,7 +7,8 @@ import {
   listShots,
   updateProject,
 } from "@/lib/storage";
-import { ComfyWorkflowId, SeamMode, clampSeamFade } from "@/lib/types";
+import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
+import { ComfyWorkflowId, SeamMode, clampSeamFade, effectivePrompt } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
@@ -48,6 +49,18 @@ export async function PATCH(
   { params }: { params: { id: string } }
 ) {
   const body = await req.json().catch(() => ({}));
+  const styleBase = typeof body.styleBase === "string" ? body.styleBase : undefined;
+  if (styleBase !== undefined) {
+    const project = getProject(params.id);
+    if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    const shots = listShots(params.id);
+    const refused =
+      generationIsRefused(styleBase, []) ||
+      shots.some((shot) => generationIsRefused(effectivePrompt(styleBase, shot.prompt), []));
+    if (refused) {
+      return NextResponse.json({ error: MINOR_SEXUAL_REFUSAL, refused: true }, { status: 400 });
+    }
+  }
   const updated = updateProject(params.id, {
     name: typeof body.name === "string" ? body.name : undefined,
     description: typeof body.description === "string" ? body.description : undefined,
@@ -55,6 +68,7 @@ export async function PATCH(
     comfyLowMemory: flagField(body.comfyLowMemory),
     seamMode: seamModeField(body.seamMode),
     seamFadeSec: typeof body.seamFadeSec === "number" ? clampSeamFade(body.seamFadeSec) : undefined,
+    styleBase,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

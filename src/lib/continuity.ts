@@ -2,8 +2,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { runFfmpeg } from "./ffmpeg";
-import { getJob, getShot, listJobs, listShots, resolveDataPath, updateJob, updateShot } from "./storage";
-import { Job, Shot } from "./types";
+import { getJob, getProject, getShot, listJobs, listShots, resolveDataPath, updateJob, updateShot } from "./storage";
+import { Job, Shot, effectivePrompt } from "./types";
 import { storeImageIfAllowed } from "./uploads";
 
 /** Placeholder image path. It is not the user's still, and it is not a file. */
@@ -134,7 +134,7 @@ export async function resolveJobChain(jobId: string): Promise<boolean> {
     const buffer = fs.readFileSync(temp);
     const stored = storeImageIfAllowed({
       projectId: shot.projectId,
-      prompt: shot.prompt,
+      prompt: effectivePrompt(getProject(shot.projectId)?.styleBase, shot.prompt),
       filename: "last-frame.png",
       buffer,
     });
