@@ -758,9 +758,12 @@ export default function ProjectStudioPage() {
           Shared style / character text
           <textarea
             id="style-base"
+            name="star-dust-style-base"
+            autoComplete="off"
             className="input mt-1 min-h-[88px] resize-y"
+            key={project.updatedAt}
             value={styleBaseDraft ?? project.styleBase}
-            placeholder="dusk harbor, warm lantern light, same wool coat"
+            placeholder="Leave empty to send each shot prompt alone"
             onChange={(e) => editStyleBase(e.target.value)}
             onBlur={() => {
               const draft = styleBaseDraftRef.current;
@@ -780,7 +783,8 @@ export default function ProjectStudioPage() {
           </p>
         ) : (
           <p className="text-[11px] leading-relaxed text-[var(--muted)]">
-            Empty, so each shot prompt is sent on its own.
+            Empty, so each shot prompt is sent on its own. An example, once you type it:
+            dusk harbor, warm lantern light, same wool coat.
           </p>
         )}
       </section>
