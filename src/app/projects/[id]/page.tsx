@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
+import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
 import { resolveComfyChoice } from "@/lib/comfy-choice";
 import {
   CAPABILITY,
@@ -956,6 +957,8 @@ export default function ProjectStudioPage() {
               const prevBusy =
                 prevLatest?.status === "queued" || prevLatest?.status === "running";
               const showChained = Boolean(shot.chainFromPrevious && shot.chainedStartImagePath);
+              const depth = chainDepth(shots, shot.id);
+              const depthNote = shot.chainFromPrevious ? chainDepthNote(depth) : null;
               const chainLine = !shot.chainFromPrevious || !prev
                 ? null
                 : prevBusy
@@ -1036,6 +1039,34 @@ export default function ProjectStudioPage() {
                             {CHAIN_HONESTY}
                           </span>
                         </label>
+                        {shot.chainFromPrevious && (
+                          <div className="space-y-2">
+                            <p className="text-[11px] font-medium text-white">{chainDepthLabel(depth)}</p>
+                            {depthNote && (
+                              <p
+                                className={`text-[11px] leading-relaxed ${
+                                  depth >= 4 ? "text-amber-100/90" : "text-[var(--muted)]"
+                                }`}
+                              >
+                                {depthNote}
+                              </p>
+                            )}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                className="btn-ghost !px-3 !py-1.5 text-xs"
+                                onClick={() =>
+                                  void saveShotPatch(shot.id, { chainFromPrevious: false })
+                                }
+                              >
+                                Use original still
+                              </button>
+                              <span className="text-[11px] leading-relaxed text-[var(--muted)]">
+                                Turns the option off. Your still and any extracted frame stay.
+                              </span>
+                            </div>
+                          </div>
+                        )}
                         {chainLine && <p className="text-[11px] leading-relaxed text-amber-100/80">{chainLine}</p>}
                         <div className="grid gap-2 sm:grid-cols-2">
                           <label className="text-[11px] text-[var(--muted)]">
