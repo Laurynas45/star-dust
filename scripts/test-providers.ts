@@ -420,6 +420,196 @@ async function main() {
     "wan diffusion file"
   );
   await wanStandin.close();
+
+  const flfSize = wan.wanFlfFrameSize(pixels!.width, pixels!.height, false);
+  const flfFrames = wan.wanFrameCount(shot.durationSec || 4);
+  let flfUploads = 0;
+  let flfPrompts = 0;
+  let flfBody = "";
+  const flfStandin = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      req.resume();
+      req.on("end", () => {
+        flfUploads += 1;
+        const name = flfUploads === 1 ? "flf-start.png" : "flf-end.png";
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ name, subfolder: "", type: "input" }));
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        flfPrompts += 1;
+        flfBody = body;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: "standin-flf", node_errors: {} }));
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/history/standin-flf") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          "standin-flf": {
+            status: { status_str: "success", completed: true },
+            outputs: {
+              "16": { images: [{ filename: "flf.mp4", subfolder: "", type: "output" }] },
+            },
+          },
+        })
+      );
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/view") {
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      res.end(mp4);
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  storage.saveSettings({
+    provider: "comfyui",
+    comfyuiBaseUrl: flfStandin.url,
+    comfyuiWorkflow: "wan-flf",
+  });
+  const flfMissing = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: false,
+    comfy: { workflow: "wan-flf", lowMemory: false },
+  });
+  assert(/does not switch this graph to TI2V-5B/.test(flfMissing.providerNote), "flf missing-end note");
+  assert(!/character lock/i.test(flfMissing.providerNote), "flf missing-end note makes no lock claim");
+  const flfRefused = render.renderShot(shot.id, { force: true });
+  assert(!flfRefused.ok && flfRefused.status === 400, "flf render refuses a shot with no end still");
+  assert(
+    !flfRefused.ok && /does not switch this graph to TI2V-5B/.test(flfRefused.error),
+    "flf render error names the missing end"
+  );
+  const missingJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    durationSec: shot.durationSec,
+    modelName: info.WAN_FLF_MODEL_NAME,
+    status: "queued",
+  });
+  let missingThrew = false;
+  try {
+    await comfy.runComfyuiGenerate(missingJob.id);
+  } catch {
+    missingThrew = true;
+  }
+  const flfMissingDone = storage.getJob(missingJob.id);
+  assert(missingThrew, "flf missing end throws");
+  assert(flfMissingDone?.status === "failed", "flf missing end fails the job");
+  assert(/does not switch this graph to TI2V-5B/.test(flfMissingDone?.error || ""), "flf missing end error");
+  assert(flfPrompts === 0 && flfUploads === 0, "flf missing end does not post a graph");
+  const ti2vWithEnd = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: true,
+    comfy: { workflow: "wan", lowMemory: false },
+  });
+  assert(/end image was not sent/i.test(ti2vWithEnd.providerNote), "ti2v still ignores the end image");
+  const flfDescribed = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: true,
+    comfy: { workflow: "wan-flf", lowMemory: false },
+  });
+  assert(/start image, the end image/.test(flfDescribed.providerNote), "flf note sends both stills");
+  assert(/not a character lock/i.test(flfDescribed.providerNote), "flf note is not a character lock");
+  assert(/identity can still drift/i.test(flfDescribed.providerNote), "flf note says identity can drift");
+  assert(/one short clip/i.test(flfDescribed.providerNote), "flf note keeps one clip as the unit");
+  assert(!/lip-sync|long film|face lock/i.test(flfDescribed.providerNote), "flf note makes no extra claims");
+  const flfJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    endImagePath: shot.startImagePath,
+    durationSec: shot.durationSec,
+    modelName: flfDescribed.modelName,
+    providerNote: flfDescribed.providerNote,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(flfJob.id);
+  const flfDone = storage.getJob(flfJob.id);
+  assert(flfDone?.status === "completed", `flf stand-in completed: ${flfDone?.error}`);
+  assert(flfPrompts === 1 && flfUploads === 2, "flf uploads both stills and posts once");
+  const flfPosted = JSON.parse(flfBody) as {
+    prompt?: Record<string, { class_type?: string; inputs?: Record<string, unknown>; _meta?: { title?: string } }>;
+  };
+  const flfNodes = Object.values(flfPosted.prompt || {});
+  assert(
+    flfNodes.some(
+      (node) =>
+        node.class_type === "LoadImage" &&
+        node._meta?.title === "Start image" &&
+        node.inputs?.image === "flf-start.png"
+    ),
+    "flf injects the start image"
+  );
+  assert(
+    flfNodes.some(
+      (node) =>
+        node.class_type === "LoadImage" &&
+        node._meta?.title === "End image" &&
+        node.inputs?.image === "flf-end.png"
+    ),
+    "flf injects the end image"
+  );
+  const flfLatent = flfNodes.find((node) => node.class_type === "WanFirstLastFrameToVideo");
+  assert(flfLatent?.inputs?.length === flfFrames, `flf frame count ${flfLatent?.inputs?.length} != ${flfFrames}`);
+  assert(flfLatent?.inputs?.width === flfSize.width, "flf width");
+  assert(flfLatent?.inputs?.height === flfSize.height, "flf height");
+  assert(
+    flfNodes.some(
+      (node) =>
+        node.class_type === "CLIPTextEncode" &&
+        node._meta?.title === "Positive prompt" &&
+        node.inputs?.text === shot.prompt
+    ),
+    "flf injects the prompt"
+  );
+  assert(
+    flfNodes.some(
+      (node) => node.class_type === "UNETLoader" && node.inputs?.unet_name === info.WAN_FLF_HIGH_NOISE
+    ),
+    "flf high-noise file"
+  );
+  assert(
+    flfNodes.some(
+      (node) => node.class_type === "UNETLoader" && node.inputs?.unet_name === info.WAN_FLF_LOW_NOISE
+    ),
+    "flf low-noise file"
+  );
+  assert(!flfNodes.some((node) => node.class_type === "Wan22ImageToVideoLatent"), "flf does not post the TI2V latent");
+  assert(!flfNodes.some((node) => node.class_type === "LoraLoaderModelOnly"), "flf does not load the lightx2v lora");
+  assert(!/gguf|svi2pro|minimax|freevideo/i.test(flfBody), "flf graph has no custom-node packs");
+  assert(info.comfyWorkflowFromModelName(info.WAN_FLF_MODEL_NAME) === "wan-flf", "flf model name does not route to TI2V");
+  assert(info.comfyWorkflowFromModelName(info.WAN_MODEL_NAME) === "wan", "ti2v model name stays on the 5B graph");
+  await flfStandin.close();
   storage.saveSettings({ comfyuiWorkflow: "svd" });
   const svdDescribed = info.describeProviderUse({
     provider: "comfyui",

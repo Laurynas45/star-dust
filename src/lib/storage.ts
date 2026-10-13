@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
   AppSettings,
   ComfyWorkflowId,
+  isComfyWorkflowId,
   DEFAULT_SEAM_FADE_SEC,
   DEFAULT_SETTINGS,
   EMPTY_RATES,
@@ -872,12 +873,12 @@ function parseRates(raw: unknown): RateTable {
 }
 
 function parseWorkflow(value: unknown): ComfyWorkflowId {
-  if (value === "wan" || value === "ltx" || value === "svd") return value;
+  if (isComfyWorkflowId(value)) return value;
   return "svd";
 }
 
 function parseOptionalWorkflow(value: unknown): ComfyWorkflowId | null {
-  if (value === "wan" || value === "ltx" || value === "svd") return value;
+  if (isComfyWorkflowId(value)) return value;
   return null;
 }
 

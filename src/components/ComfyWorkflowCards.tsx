@@ -8,7 +8,7 @@ export function ComfyWorkflowCards(props: {
   onSelect: (id: ComfyWorkflowId) => void;
 }) {
   return (
-    <div className="grid gap-2 lg:grid-cols-3">
+    <div className="grid gap-2 sm:grid-cols-2">
       {COMFY_WORKFLOW_ORDER.map((id) => {
         const info = COMFY_WORKFLOWS[id];
         const on = props.selected === id;
