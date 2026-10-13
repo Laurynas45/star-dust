@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { studioEnv } from "@/lib/studio-env";
 import { getSettings, saveSettings } from "@/lib/storage";
-import { AppSettings, ComfyWorkflowId, ProviderId, RateTable } from "@/lib/types";
+import { AppSettings, ProviderId, RateTable, isComfyWorkflowId } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,8 +25,8 @@ export async function PUT(req: NextRequest) {
   if (typeof body.comfyuiBaseUrl === "string") patch.comfyuiBaseUrl = body.comfyuiBaseUrl.trim();
   if (typeof body.falModel === "string") patch.falModel = body.falModel.trim();
   if (typeof body.replicateModel === "string") patch.replicateModel = body.replicateModel.trim();
-  if (body.comfyuiWorkflow === "svd" || body.comfyuiWorkflow === "wan" || body.comfyuiWorkflow === "ltx") {
-    patch.comfyuiWorkflow = body.comfyuiWorkflow as ComfyWorkflowId;
+  if (isComfyWorkflowId(body.comfyuiWorkflow)) {
+    patch.comfyuiWorkflow = body.comfyuiWorkflow;
   }
   if (typeof body.comfyLowMemory === "boolean") patch.comfyLowMemory = body.comfyLowMemory;
   if (body.budgetCap === null || body.budgetCap === "") {

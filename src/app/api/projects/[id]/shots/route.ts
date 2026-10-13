@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { createShot, getProject, listShots } from "@/lib/storage";
-import { ComfyWorkflowId, clampDuration, effectivePrompt, presetById } from "@/lib/types";
+import { ComfyWorkflowId, clampDuration, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
 
 function formWorkflow(value: FormDataEntryValue | null): ComfyWorkflowId | null {
-  if (value === "svd" || value === "wan" || value === "ltx") return value;
+  if (isComfyWorkflowId(value)) return value;
   return null;
 }
 

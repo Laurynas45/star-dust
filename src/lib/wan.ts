@@ -8,23 +8,54 @@ export const WAN_MAX_FRAMES = 81;
 /** 4n+1. About one second at 16 fps. Used by the low-memory preset. */
 export const WAN_LOW_MAX_FRAMES = 17;
 
+/**
+ * Official Wan 2.2 14B FLF template's small box.
+ * Heavier than TI2V-5B. Not a measured Star Dust benchmark.
+ */
+export const WAN_FLF_MAX_WIDTH = 640;
+export const WAN_FLF_MAX_HEIGHT = 640;
+/** Low-memory preset box for the same 14B weights. Still not the 5B graph. */
+export const WAN_FLF_LOW_MAX_WIDTH = 480;
+export const WAN_FLF_LOW_MAX_HEIGHT = 480;
+
 function snap32(value: number): number {
   return Math.max(32, Math.round(value / 32) * 32);
 }
 
 export function wanFrameSize(
   width: number,
-  height: number
-): { width: number; height: number } {
-  if (!(width > 0) || !(height > 0)) {
-    return { width: WAN_MAX_WIDTH, height: WAN_MAX_HEIGHT };
+  height: number,
+  limits: { maxWidth: number; maxHeight: number } = {
+    maxWidth: WAN_MAX_WIDTH,
+    maxHeight: WAN_MAX_HEIGHT,
   }
-  const scale = Math.min(WAN_MAX_WIDTH / width, WAN_MAX_HEIGHT / height, 1);
+): { width: number; height: number } {
+  const maxWidth = limits.maxWidth;
+  const maxHeight = limits.maxHeight;
+  if (!(width > 0) || !(height > 0)) {
+    return { width: maxWidth, height: maxHeight };
+  }
+  const scale = Math.min(maxWidth / width, maxHeight / height, 1);
   let nextWidth = snap32(width * scale);
   let nextHeight = snap32(height * scale);
-  if (nextWidth > WAN_MAX_WIDTH) nextWidth = Math.floor(WAN_MAX_WIDTH / 32) * 32;
-  if (nextHeight > WAN_MAX_HEIGHT) nextHeight = Math.floor(WAN_MAX_HEIGHT / 32) * 32;
+  if (nextWidth > maxWidth) nextWidth = Math.floor(maxWidth / 32) * 32;
+  if (nextHeight > maxHeight) nextHeight = Math.floor(maxHeight / 32) * 32;
   return { width: nextWidth, height: nextHeight };
+}
+
+/** Both stills are fitted inside this box. The node resizes the end image to match. */
+export function wanFlfFrameSize(
+  width: number,
+  height: number,
+  lowMemory: boolean
+): { width: number; height: number } {
+  return wanFrameSize(
+    width,
+    height,
+    lowMemory
+      ? { maxWidth: WAN_FLF_LOW_MAX_WIDTH, maxHeight: WAN_FLF_LOW_MAX_HEIGHT }
+      : { maxWidth: WAN_FLF_MAX_WIDTH, maxHeight: WAN_FLF_MAX_HEIGHT }
+  );
 }
 
 export function wanFrameCount(durationSec: number, maxFrames: number = WAN_MAX_FRAMES): number {

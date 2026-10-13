@@ -8,6 +8,10 @@ import {
   LTX_CHECKPOINT,
   LTX_TEXT_ENCODER,
   WAN_DIFFUSION,
+  WAN_FLF_HIGH_NOISE,
+  WAN_FLF_LOW_NOISE,
+  WAN_FLF_MISSING_END,
+  WAN_FLF_VAE,
   WAN_TEXT_ENCODER,
   WAN_VAE,
   comfyWorkflowFromModelName,
@@ -27,6 +31,7 @@ import {
   WAN_MAX_HEIGHT,
   WAN_MAX_WIDTH,
   imagePixelSize,
+  wanFlfFrameSize,
   wanFrameCount,
   wanFrameSize,
 } from "../wan";
@@ -135,10 +140,10 @@ export function explainComfyProblem(raw: string, url: string): string | null {
       lower
     )
   ) {
-    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, and LTX-2.3. Star Dust does not download weights. The job was not left running. Server said: ${text}`;
+    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, and LTX-2.3. Star Dust does not download weights. The job was not left running. Server said: ${text}`;
   }
   if (/does not exist|missing node|unknown node|node type|class_type|custom node/.test(lower)) {
-    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2, and the shipped LTX-2.3 graph use core nodes from a current ComfyUI. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. The job was not left running. Server said: ${text}`;
+    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, and the shipped LTX-2.3 graph use core nodes from a current ComfyUI. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. The job was not left running. Server said: ${text}`;
   }
   return null;
 }
@@ -161,6 +166,11 @@ export function loadWorkflow(): Workflow {
 
 export function loadWanWorkflow(): Workflow {
   const file = path.join(process.cwd(), "workflows", "comfyui-wan22-ti2v-5b.api.json");
+  return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
+}
+
+export function loadWanFlfWorkflow(): Workflow {
+  const file = path.join(process.cwd(), "workflows", "comfyui-wan22-14b-flf2v.api.json");
   return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
 }
 
@@ -244,6 +254,52 @@ export function patchWanWorkflow(
   return next;
 }
 
+export function patchWanFlfWorkflow(
+  workflow: Workflow,
+  opts: {
+    startImageName: string;
+    endImageName: string;
+    prompt: string;
+    seed: number;
+    frames: number;
+    width: number;
+    height: number;
+    fps: number;
+  }
+): Workflow {
+  const next = structuredClone(workflow);
+  for (const node of Object.values(next)) {
+    if (!node.inputs) continue;
+    if (node.class_type === "LoadImage" && node._meta?.title === "Start image") {
+      node.inputs.image = opts.startImageName;
+    }
+    if (node.class_type === "LoadImage" && node._meta?.title === "End image") {
+      node.inputs.image = opts.endImageName;
+    }
+    if (node.class_type === "UNETLoader" && node._meta?.title === "High-noise diffusion") {
+      node.inputs.unet_name = WAN_FLF_HIGH_NOISE;
+    }
+    if (node.class_type === "UNETLoader" && node._meta?.title === "Low-noise diffusion") {
+      node.inputs.unet_name = WAN_FLF_LOW_NOISE;
+    }
+    if (node.class_type === "CLIPLoader") node.inputs.clip_name = WAN_TEXT_ENCODER;
+    if (node.class_type === "VAELoader") node.inputs.vae_name = WAN_FLF_VAE;
+    if (node.class_type === "CLIPTextEncode" && node._meta?.title === "Positive prompt") {
+      node.inputs.text = opts.prompt;
+    }
+    if (node.class_type === "WanFirstLastFrameToVideo") {
+      node.inputs.width = opts.width;
+      node.inputs.height = opts.height;
+      node.inputs.length = opts.frames;
+    }
+    if (node.class_type === "KSamplerAdvanced" && node._meta?.title === "High-noise sampler") {
+      node.inputs.noise_seed = opts.seed;
+    }
+    if (node.class_type === "CreateVideo") node.inputs.fps = opts.fps;
+  }
+  return next;
+}
+
 export function patchLtxWorkflow(
   workflow: Workflow,
   opts: {
@@ -285,6 +341,35 @@ export function patchLtxWorkflow(
   return next;
 }
 
+async function uploadComfyImage(
+  base: string,
+  jobId: string,
+  absPath: string,
+  label: string
+): Promise<string> {
+  const uploadUrl = `${base}/upload/image`;
+  const bytes = fs.readFileSync(absPath);
+  const form = new FormData();
+  form.append("image", new Blob([bytes]), path.basename(absPath));
+  form.append("overwrite", "true");
+  let upload: Response;
+  try {
+    upload = await comfyFetch(uploadUrl, { method: "POST", body: form });
+  } catch (err) {
+    fail(jobId, netFailure(uploadUrl, err));
+  }
+  if (!upload.ok) {
+    const body = await readErrorBody(upload);
+    fail(jobId, httpFailure(uploadUrl, upload.status, body));
+  }
+  const uploaded = (await upload.json()) as { name?: string; subfolder?: string };
+  const imageName = uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name;
+  if (!imageName) {
+    fail(jobId, `ComfyUI at ${publicComfyUrl(uploadUrl)} returned HTTP 200 without a filename for the ${label}.`);
+  }
+  return imageName;
+}
+
 function collectFiles(value: unknown, found: ComfyFile[]) {
   if (!value || typeof value !== "object") return;
   if (Array.isArray(value)) {
@@ -313,8 +398,9 @@ function historyError(entry: { status?: { status_str?: string; messages?: unknow
 }
 
 /**
- * Queues the selected shipped workflow (SVD, Wan 2.2 TI2V-5B, or LTX-2.3), polls /history, downloads the file.
+ * Queues the selected shipped workflow (SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, or LTX-2.3), polls /history, downloads the file.
  * Not a node editor. If the server is down, or it reports OOM or a missing node or model, the job fails.
+ * FLF2V requires an end image and does not fall back to TI2V-5B.
  */
 export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const initial = getJob(jobId);
@@ -339,32 +425,24 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const job = updateJob(jobId, { status: "running", progress: 10 });
   if (!job) throw new Error("Job not found");
 
-  const inputAbs = resolveDataPath(job.imagePath);
-  if (!fs.existsSync(inputAbs)) fail(jobId, `Image not found: ${job.imagePath}`);
-
-  const uploadUrl = `${base}/upload/image`;
-  const bytes = fs.readFileSync(inputAbs);
-  const form = new FormData();
-  form.append("image", new Blob([bytes]), path.basename(inputAbs));
-  form.append("overwrite", "true");
-  let upload: Response;
-  try {
-    upload = await comfyFetch(uploadUrl, { method: "POST", body: form });
-  } catch (err) {
-    fail(jobId, netFailure(uploadUrl, err));
-  }
-  if (!upload.ok) {
-    const body = await readErrorBody(upload);
-    fail(jobId, httpFailure(uploadUrl, upload.status, body));
-  }
-  const uploaded = (await upload.json()) as { name?: string; subfolder?: string };
-  const imageName = uploaded.subfolder
-    ? `${uploaded.subfolder}/${uploaded.name}`
-    : uploaded.name;
-  if (!imageName) fail(jobId, `ComfyUI at ${publicComfyUrl(uploadUrl)} returned HTTP 200 without a filename.`);
-
   const duration = job.durationSec && job.durationSec > 0 ? job.durationSec : 4;
   const plan = comfyPlanForJob(job, settings);
+  if (plan.workflow === "wan-flf" && !job.endImagePath) fail(jobId, WAN_FLF_MISSING_END);
+
+  const inputAbs = resolveDataPath(job.imagePath);
+  if (!fs.existsSync(inputAbs)) fail(jobId, `Image not found: ${job.imagePath}`);
+  const endAbs = job.endImagePath ? resolveDataPath(job.endImagePath) : null;
+  if (plan.workflow === "wan-flf") {
+    if (!endAbs || !fs.existsSync(endAbs)) {
+      fail(jobId, `End image not found: ${job.endImagePath}`);
+    }
+  }
+
+  const bytes = fs.readFileSync(inputAbs);
+  const imageName = await uploadComfyImage(base, jobId, inputAbs, "start image");
+  const endImageName =
+    plan.workflow === "wan-flf" && endAbs ? await uploadComfyImage(base, jobId, endAbs, "end image") : null;
+
   const seed = Math.floor(Math.random() * 1_000_000_000);
   let workflow: Workflow;
   if (plan.workflow === "ltx") {
@@ -388,6 +466,20 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       : { width: WAN_MAX_WIDTH, height: WAN_MAX_HEIGHT };
     workflow = patchWanWorkflow(loadWanWorkflow(), {
       imageName,
+      prompt: job.prompt,
+      seed,
+      frames: wanFrameCount(duration, plan.lowMemory ? WAN_LOW_MAX_FRAMES : WAN_MAX_FRAMES),
+      width: size.width,
+      height: size.height,
+      fps: WAN_FPS,
+    });
+  } else if (plan.workflow === "wan-flf") {
+    if (!endImageName) fail(jobId, WAN_FLF_MISSING_END);
+    const pixels = imagePixelSize(bytes);
+    const size = wanFlfFrameSize(pixels?.width ?? 0, pixels?.height ?? 0, plan.lowMemory);
+    workflow = patchWanFlfWorkflow(loadWanFlfWorkflow(), {
+      startImageName: imageName,
+      endImageName,
       prompt: job.prompt,
       seed,
       frames: wanFrameCount(duration, plan.lowMemory ? WAN_LOW_MAX_FRAMES : WAN_MAX_FRAMES),

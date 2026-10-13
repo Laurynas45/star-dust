@@ -14,6 +14,17 @@ export const WAN_VAE = "wan2.2_vae.safetensors";
 
 export const WAN_MODEL_NAME = "ComfyUI Wan 2.2 TI2V-5B";
 
+/** Files the Wan 2.2 14B first-last-frame graph expects. Same names as the official FLF template. */
+export const WAN_FLF_HIGH_NOISE = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors";
+export const WAN_FLF_LOW_NOISE = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors";
+export const WAN_FLF_VAE = "wan_2.1_vae.safetensors";
+
+export const WAN_FLF_MODEL_NAME = "ComfyUI Wan 2.2 14B FLF2V";
+
+/** Returned before a job is queued when FLF2V is selected and the shot has no end still. */
+export const WAN_FLF_MISSING_END =
+  "Wan 2.2 14B first-last frame needs an end still. This shot has no end image, so the job was not started. Star Dust does not switch this graph to TI2V-5B.";
+
 /** Distilled FP8 checkpoint the shipped LTX graph writes into the loaders. */
 export const LTX_CHECKPOINT = "ltx-2.3-22b-distilled-fp8.safetensors";
 /** Gemma file the shipped LTX graph writes into the text encoder loader. */
@@ -21,7 +32,7 @@ export const LTX_TEXT_ENCODER = "gemma_3_12B_it_fp4_mixed.safetensors";
 
 export const LTX_MODEL_NAME = "ComfyUI LTX-2.3 distilled FP8";
 
-export const COMFY_WORKFLOW_ORDER: ComfyWorkflowId[] = ["svd", "wan", "ltx"];
+export const COMFY_WORKFLOW_ORDER: ComfyWorkflowId[] = ["svd", "wan", "wan-flf", "ltx"];
 
 export type ComfyWorkflowInfo = {
   title: string;
@@ -37,7 +48,7 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
   svd: {
     title: "Stable Video Diffusion",
     file: "workflows/comfyui-svd-i2v.api.json",
-    goodAt: "Short motion from one still. It does not read the prompt. Lightest of the three shipped graphs.",
+    goodAt: "Short motion from one still. It does not read the prompt. Lightest of the shipped graphs.",
     memory:
       "No measured VRAM or system-RAM figure. The checkpoint is svd_xt_1_1.safetensors, an older and smaller file than Wan 2.2 or LTX-2.3. System RAM is whatever ComfyUI needs to load that file.",
     defaults: "1024×576 in the graph. Shot duration becomes about 14–25 frames at 6 fps.",
@@ -54,7 +65,21 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
     defaults: "The still fitted inside 832×480. 16 fps, length snapped to 4n+1, capped at 81 frames.",
     lowMemory: "Same 832×480 box (about 480p) with the frame count capped at 17, about one second.",
     detail:
-      "Reads the prompt. Star Dust injects the start image, prompt, frame count, and size. ComfyUI's notes target about 8 GB VRAM with offloading. System RAM is separate and not measured here.",
+      "Reads the prompt. Star Dust injects the start image, prompt, frame count, and size. ComfyUI's notes target about 8 GB VRAM with offloading. System RAM is separate and not measured here. This graph does not take the end image.",
+  },
+  "wan-flf": {
+    title: "Wan 2.2 14B FLF2V",
+    file: "workflows/comfyui-wan22-14b-flf2v.api.json",
+    goodAt:
+      "Steers one short clip between a start still and an end still. Not a character lock. Identity can still drift. TI2V-5B stays the low-VRAM Wan path.",
+    memory:
+      "No core 5B first-last graph exists. This is the official 14B FLF path, and it is heavier than TI2V-5B's about 8 GB VRAM note. ComfyUI's FLF template note, for the fp8 graph at 640×640 on an RTX 4090D 24GB, is about 84% VRAM. That note is guidance from the template, not a measurement Star Dust ran. System RAM is separate and not measured here.",
+    defaults:
+      "Both stills fitted inside 640×640, the official template's small size. 16 fps, length snapped to 4n+1, capped at 81 frames. Two-stage 20-step sample. No lightx2v LoRA.",
+    lowMemory:
+      "Both stills fitted inside 480×480 and the frame count capped at 17, about one second. The 14B weights are still loaded. This is not the 5B graph.",
+    detail:
+      "Reads the prompt. Star Dust injects the start image, the end image, the prompt, the frame count, and the size. A shot with no end still does not run, and this graph does not fall back to TI2V-5B. One short clip. Not a character lock.",
   },
   ltx: {
     title: "LTX-2.3 distilled FP8",
@@ -74,12 +99,19 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
 
 export function comfyModelName(workflow: ComfyWorkflowId, lowMemory: boolean): string {
   const base =
-    workflow === "ltx" ? LTX_MODEL_NAME : workflow === "wan" ? WAN_MODEL_NAME : COMFY_MODEL_NAME;
+    workflow === "ltx"
+      ? LTX_MODEL_NAME
+      : workflow === "wan-flf"
+        ? WAN_FLF_MODEL_NAME
+        : workflow === "wan"
+          ? WAN_MODEL_NAME
+          : COMFY_MODEL_NAME;
   return lowMemory ? `${base}${LOW_MEMORY_MARK}` : base;
 }
 
 export function comfyWorkflowFromModelName(modelName?: string): ComfyWorkflowId | null {
   if (!modelName) return null;
+  if (modelName.includes("FLF2V")) return "wan-flf";
   if (modelName.includes("LTX-2.3")) return "ltx";
   if (modelName.includes("Wan 2.2")) return "wan";
   if (modelName.includes("SVD")) return "svd";
@@ -112,7 +144,7 @@ export const CAPABILITY: Record<
   comfyui: {
     title: "ComfyUI",
     label:
-      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, and LTX-2.3 distilled FP8 graphs. Not a node editor.",
+      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, and LTX-2.3 distilled FP8 graphs. Not a node editor.",
   },
 };
 
@@ -212,6 +244,23 @@ export function describeProviderUse(opts: {
     if (opts.hasCharacterSheet) {
       characterNote =
         "Character sheet was not sent. This Wan workflow has no reference-image input, so the face will not match the sheet.";
+    }
+  } else if (opts.provider === "comfyui" && comfy.workflow === "wan-flf") {
+    if (!opts.hasEndImage) {
+      parts.push(WAN_FLF_MISSING_END);
+    } else {
+      parts.push(
+        `${modelName} posts workflows/comfyui-wan22-14b-flf2v.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the end image, the prompt, a frame count from the shot duration, and the output size (both stills fitted inside ${comfy.lowMemory ? "480×480" : "640×640"}). This steers motion between the two stills. It is not a character lock. Identity can still drift. One short clip is the unit. Wan 2.2 TI2V-5B stays the lower-VRAM path. ${COMFY_SERVER_NOTE}`
+      );
+      if (comfy.lowMemory) {
+        parts.push(
+          "The low-memory preset is on: both stills fitted inside 480×480, with the frame count capped at 17. The 14B weights are still loaded."
+        );
+      }
+    }
+    if (opts.hasCharacterSheet) {
+      characterNote =
+        "Character sheet was not sent. This first-last workflow has no reference-image input, so the face will not match the sheet.";
     }
   } else if (opts.provider === "comfyui") {
     parts.push(

@@ -5,6 +5,7 @@ import { buildEstimate, withCredits } from "./cost";
 import {
   CLOUD_RISK_NOTE,
   LOW_MEMORY_MARK,
+  WAN_FLF_MISSING_END,
   comfyWorkflowFromModelName,
   describeProviderUse,
   isPaidProvider,
@@ -73,6 +74,13 @@ function ackFailure(provider: ProviderId, acknowledgeModel?: string): RenderFail
     };
   }
   return null;
+}
+
+function flfEndFailure(shot: Shot, provider: ProviderId, settings: AppSettings): RenderFailure | null {
+  if (provider !== "comfyui") return null;
+  if (comfyForShot(shot, settings).workflow !== "wan-flf") return null;
+  if (shot.endImagePath) return null;
+  return { ok: false, status: 400, error: `Shot ${shot.position}: ${WAN_FLF_MISSING_END}` };
 }
 
 function keyFailure(provider: ProviderId): RenderFailure | null {
@@ -249,6 +257,8 @@ export function renderShot(
   }
   const plan = planChain(prepared.shot, new Set());
   if (!plan.ok) return { ok: false, status: 400, error: plan.error };
+  const missingEnd = flfEndFailure(prepared.shot, provider, settings);
+  if (missingEnd) return missingEnd;
   const ack = ackFailure(provider, opts?.acknowledgeModel);
   if (ack) return ack;
   const seconds = Number(prepared.shot.durationSec) || 0;
@@ -314,6 +324,11 @@ export function renderAll(
     } else {
       runnable.push({ shot, imagePath: plan.imagePath, awaitPreviousFrame: plan.awaitPreviousFrame });
     }
+  }
+
+  for (const item of runnable) {
+    const missingEnd = flfEndFailure(item.shot, provider, settings);
+    if (missingEnd) return missingEnd;
   }
 
   const seconds = runnable.reduce((sum, item) => sum + (Number(item.shot.durationSec) || 0), 0);
@@ -416,6 +431,10 @@ export function retryFromJob(
       };
   const ack = ackFailure(provider, opts?.acknowledgeModel);
   if (ack) return ack;
+  if (provider === "comfyui" && comfy.workflow === "wan-flf" && !source.endImagePath) {
+    const where = shot ? `Shot ${shot.position}: ` : "";
+    return { ok: false, status: 400, error: `${where}${WAN_FLF_MISSING_END}` };
+  }
   const seconds = source.kind === "preview" ? 0 : Number(source.durationSec) || 0;
   const short = insufficientFailure(provider, seconds);
   if (short) return short;

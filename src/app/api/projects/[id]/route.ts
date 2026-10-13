@@ -8,11 +8,11 @@ import {
   updateProject,
 } from "@/lib/storage";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
-import { ComfyWorkflowId, SeamMode, clampSeamFade, effectivePrompt } from "@/lib/types";
+import { ComfyWorkflowId, SeamMode, clampSeamFade, effectivePrompt, isComfyWorkflowId } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
-  if (value === "svd" || value === "wan" || value === "ltx") return value;
+  if (isComfyWorkflowId(value)) return value;
   return undefined;
 }
 

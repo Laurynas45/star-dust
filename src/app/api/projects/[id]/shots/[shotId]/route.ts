@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getProject, getShot, updateShot } from "@/lib/storage";
-import { ComfyWorkflowId, SeamMode, clampDuration, clampSeamFade, effectivePrompt, presetById } from "@/lib/types";
+import { ComfyWorkflowId, SeamMode, clampDuration, clampSeamFade, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
-  if (value === "svd" || value === "wan" || value === "ltx") return value;
+  if (isComfyWorkflowId(value)) return value;
   return undefined;
 }
 

@@ -4,7 +4,13 @@ export type SeamMode = "cut" | "crossfade";
 
 export type JobKind = "take" | "preview";
 
-export type ComfyWorkflowId = "svd" | "wan" | "ltx";
+export const COMFY_WORKFLOW_IDS = ["svd", "wan", "wan-flf", "ltx"] as const;
+
+export type ComfyWorkflowId = (typeof COMFY_WORKFLOW_IDS)[number];
+
+export function isComfyWorkflowId(value: unknown): value is ComfyWorkflowId {
+  return value === "svd" || value === "wan" || value === "wan-flf" || value === "ltx";
+}
 
 export type JobStatus =
   | "queued"
