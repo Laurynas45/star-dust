@@ -99,6 +99,12 @@ People making anything longer than one clip usually save the last frame of clip 
 
 Chaining helps continuity of pose and framing. Identity and details still drift over many chained shots. Star Dust does not lock characters, does not lip-sync, and does not turn the shot list into a long film. One clip is still the unit.
 
+**Chain depth** is the length of the unbroken run of "Start from previous shot's last frame" that ends on this shot. The option off is depth 0. Depth 1 means this shot is on and the previous shot is off, or this is the first shot, which cannot chain. Each earlier shot that also has the option on adds one. While the option is on, the studio shows that number on the shot.
+
+Pose and framing may continue along that run. Identity and details usually drift after several chained shots, and the studio says so from chain depth 4. The practice is to reload this shot's original still instead of chaining further. Star Dust does not break the chain for you. **Use original still** turns the option off for that shot, so the next take uses the original still again. It does not delete the still or the extracted last frame.
+
+Wan 2.2 TI2V-5B remains the shipped ComfyUI path with the ~8 GB VRAM note. MiniMax H3 and FreeVideo need custom nodes and are not shipped.
+
 ### Shared style / character text
 
 Last-frame chaining is one continuity lever. Shared wording is the other cheap one.
@@ -133,7 +139,7 @@ npm run build
 npm run test:providers
 ```
 
-`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan and LTX workflow injection against that stand-in, workflow selection, remote-URL and auth-header failures, out-of-memory and missing node or model failures, and a local stitch. It also renders a 3-shot Mock project with last-frame chaining and a crossfade, with no API key, and checks that the mp4 duration matches the clips minus the fades. It also checks that a project style base is joined onto Mock take and preview prompts, that an empty style base leaves the shot prompt unchanged, and that a joined prompt which is sexual content involving a minor is refused before a job is queued. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
+`test:providers` checks the minor-content refusal (the image is not stored), missing-key failures, a ComfyUI stand-in that queues, polls, and downloads, take skipping, take selection in the stitch, an unknown cost when no rate is set, a budget cap that blocks a paid Render all, Wan and LTX workflow injection against that stand-in, workflow selection, remote-URL and auth-header failures, out-of-memory and missing node or model failures, and a local stitch. It also renders a 3-shot Mock project with last-frame chaining and a crossfade, with no API key, and checks that the mp4 duration matches the clips minus the fades. It also checks chain depth for an unbroken last-frame run (0, 1, 3, and 5 or more) and that the depth note does not claim a lock or a fix. It also checks that a project style base is joined onto Mock take and preview prompts, that an empty style base leaves the shot prompt unchanged, and that a joined prompt which is sexual content involving a minor is refused before a job is queued. It also checks that Stripe and PayPal left unset stay on that same path, that a signed Stripe webhook and a mocked PayPal capture each grant a credit pack without calling those networks, that a low balance blocks a paid Render all, and that an unset license key still renders Mock. It does not call fal, Replicate, Stripe, PayPal, or a real ComfyUI server.
 
 ## Safety
 

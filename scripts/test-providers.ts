@@ -1544,6 +1544,50 @@ async function main() {
     delete process.env.FAL_KEY;
   }
 
+  const { chainDepth, chainDepthLabel, chainDepthNote, CHAIN_DEPTH_SOFT, CHAIN_DEPTH_WARN } = await import(
+    "../src/lib/chain-depth"
+  );
+  const link = (id: string, on: boolean) => ({ id, chainFromPrevious: on });
+  assert(chainDepth([link("a", false)], "a") === 0, "depth 0 when the option is off");
+  assert(chainDepth([link("a", false), link("b", true)], "b") === 1, "depth 1 when only this shot chains");
+  assert(chainDepth([link("a", false), link("b", true)], "a") === 0, "an earlier shot with the option off stays 0");
+  assert(chainDepth([link("a", true)], "a") === 1, "a first shot with the option on is depth 1 and still cannot chain");
+  assert(chainDepth([link("a", false)], "missing") === 0, "a shot that is not in the list is depth 0");
+  assert(chainDepth([], "a") === 0, "an empty list is depth 0");
+  const broken = [
+    link("a", true),
+    link("b", false),
+    link("c", true),
+    link("d", true),
+    link("e", true),
+  ];
+  assert(chainDepth(broken, "a") === 1, "an opening chain stops at the first shot");
+  assert(chainDepth(broken, "b") === 0, "a shot with the option off is depth 0 even between chains");
+  assert(chainDepth(broken, "c") === 1, "a chain restarts after a break");
+  assert(chainDepth(broken, "d") === 2, "depth 2 counts this shot and one previous link");
+  assert(chainDepth(broken, "e") === 3, "depth 3 is three unbroken links");
+  const longChain = ["a", "b", "c", "d", "e", "f", "g"].map((id, index) => link(id, index > 0));
+  assert(chainDepth(longChain, "a") === 0, "the unchained start of a long list is depth 0");
+  assert(chainDepth(longChain, "b") === 1, "the first real link is depth 1");
+  assert(chainDepth(longChain, "f") === 5, "depth 5");
+  assert(chainDepth(longChain, "g") === 6, "depth keeps growing past 5");
+  const allOn = ["a", "b", "c", "d", "e", "f"].map((id) => link(id, true));
+  assert(chainDepth(allOn, "f") === 6, "a first shot with the option on still counts in the run");
+  assert(chainDepthNote(0) === null && chainDepthNote(1) === null, "depth 0 and 1 have no extra note");
+  assert(chainDepthNote(2) === CHAIN_DEPTH_SOFT && chainDepthNote(3) === CHAIN_DEPTH_SOFT, "depth 2–3 uses the short note");
+  assert(chainDepthNote(4) === CHAIN_DEPTH_WARN && chainDepthNote(6) === CHAIN_DEPTH_WARN, "depth 4 and above warn");
+  assert(chainDepthNote(Number.NaN) === null && chainDepthNote(Number.POSITIVE_INFINITY) === null, "a bad depth has no note");
+  const notes = `${CHAIN_DEPTH_SOFT} ${CHAIN_DEPTH_WARN}`;
+  assert(/drift/i.test(notes), "depth notes say identity and details drift");
+  assert(/original still/i.test(CHAIN_DEPTH_WARN), "the warning points at the original still");
+  assert(/Start from previous shot's last frame/i.test(CHAIN_DEPTH_WARN), "the warning names the checkbox");
+  assert(
+    !/character lock|face lock|locks the|will fix|fixes identity|lip-sync/i.test(notes),
+    "depth notes do not claim a lock, a fix, or lip-sync"
+  );
+  assert(chainDepthLabel(4) === "Chain depth 4", "the depth label is plain");
+  assert(CHAIN_DEPTH_SOFT.length < 180 && CHAIN_DEPTH_WARN.length < 280, "depth copy stays short");
+
   storage.saveSettings({ provider: "mock" });
   const continuity = storage.createProject("Continuity");
   const red = storage.saveUpload(continuity.id, "red.png", solidPng(dataDir, "red.png", "red"));
@@ -1573,6 +1617,10 @@ async function main() {
     chainFromPrevious: true,
   });
   storage.updateProject(continuity.id, { seamMode: "crossfade", seamFadeSec: 0.5 });
+  const listed = storage.listShots(continuity.id);
+  assert(chainDepth(listed, shotA.id) === 0, "shot 1 of the mock chain is depth 0");
+  assert(chainDepth(listed, shotB.id) === 1, "shot 2 of the mock chain is depth 1");
+  assert(chainDepth(listed, shotC.id) === 2, "shot 3 of the mock chain is depth 2");
   assert(isRed(averageRgb(storage.resolveDataPath(red))), "red still is red");
   assert(isBlue(averageRgb(storage.resolveDataPath(blue))), "blue still is blue");
 
@@ -1657,6 +1705,14 @@ async function main() {
   assert(skippedChain.ok && skippedChain.jobs.length === 0, "a current chained take is skipped like any other match");
 
   storage.updateShot(shotB.id, { chainFromPrevious: false });
+  const afterOff = storage.listShots(continuity.id);
+  assert(chainDepth(afterOff, shotB.id) === 0, "turning chaining off sets that shot to depth 0");
+  assert(chainDepth(afterOff, shotC.id) === 1, "the next shot's depth stops at the break");
+  assert(storage.getShot(shotB.id)?.startImagePath === blue, "turning chaining off leaves the original still");
+  assert(
+    storage.getShot(shotB.id)?.chainedStartImagePath === keptB?.chainedStartImagePath,
+    "turning chaining off leaves the extracted frame"
+  );
   const unchained = render.renderShot(shotB.id, { force: true });
   assert(unchained.ok && unchained.jobs.length === 1, "turning chaining off queues the original still");
   assert(unchained.ok && unchained.jobs[0].imagePath === blue && !unchained.jobs[0].awaitPreviousFrame, "off uses the user's still");
