@@ -18,6 +18,7 @@ import {
   SAMPLE_PROJECT_ID,
   SeamMode,
   Shot,
+  clampChainFrameBack,
   clampSeamFade,
   presetById,
 } from "./types";
@@ -68,7 +69,8 @@ function openDatabase(): DB {
       comfy_low_memory INTEGER,
       seam_mode TEXT NOT NULL DEFAULT 'cut',
       seam_fade_sec REAL NOT NULL DEFAULT 0.5,
-      style_base TEXT NOT NULL DEFAULT ''
+      style_base TEXT NOT NULL DEFAULT '',
+      drop_duplicate_frame INTEGER NOT NULL DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -88,7 +90,11 @@ function openDatabase(): DB {
       chained_start_image_path TEXT,
       chained_from_job_id TEXT,
       seam_mode TEXT,
-      seam_fade_sec REAL
+      seam_fade_sec REAL,
+      chain_frame_back INTEGER NOT NULL DEFAULT 0,
+      chained_frame_back INTEGER,
+      chained_frame_request INTEGER,
+      drop_duplicate_frame INTEGER
     );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -233,6 +239,21 @@ function migrate(db: DB) {
   if (!hasColumn(db, "projects", "style_base")) {
     db.exec("ALTER TABLE projects ADD COLUMN style_base TEXT NOT NULL DEFAULT ''");
   }
+  if (!hasColumn(db, "projects", "drop_duplicate_frame")) {
+    db.exec("ALTER TABLE projects ADD COLUMN drop_duplicate_frame INTEGER NOT NULL DEFAULT 1");
+  }
+  if (!hasColumn(db, "shots", "chain_frame_back")) {
+    db.exec("ALTER TABLE shots ADD COLUMN chain_frame_back INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "shots", "chained_frame_back")) {
+    db.exec("ALTER TABLE shots ADD COLUMN chained_frame_back INTEGER");
+  }
+  if (!hasColumn(db, "shots", "chained_frame_request")) {
+    db.exec("ALTER TABLE shots ADD COLUMN chained_frame_request INTEGER");
+  }
+  if (!hasColumn(db, "shots", "drop_duplicate_frame")) {
+    db.exec("ALTER TABLE shots ADD COLUMN drop_duplicate_frame INTEGER");
+  }
 }
 
 function seedSample(db: DB) {
@@ -319,6 +340,7 @@ function mapProject(row: Record<string, unknown>): Project {
     seamFadeSec:
       row.seam_fade_sec == null ? DEFAULT_SEAM_FADE_SEC : clampSeamFade(Number(row.seam_fade_sec)),
     styleBase: String(row.style_base ?? ""),
+    dropDuplicateFrame: row.drop_duplicate_frame == null ? true : Number(row.drop_duplicate_frame) !== 0,
   };
 }
 
@@ -336,8 +358,16 @@ function mapShot(row: Record<string, unknown>): Shot {
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
     chainFromPrevious: Number(row.chain_from_previous) === 1,
+    chainFrameBack: clampChainFrameBack(row.chain_frame_back == null ? 0 : Number(row.chain_frame_back)),
     chainedStartImagePath: str(row.chained_start_image_path),
     chainedFromJobId: str(row.chained_from_job_id),
+    chainedFrameBack:
+      row.chained_frame_back == null ? undefined : clampChainFrameBack(Number(row.chained_frame_back)),
+    chainedFrameRequest:
+      row.chained_frame_request == null
+        ? undefined
+        : clampChainFrameBack(Number(row.chained_frame_request)),
+    dropDuplicateFrame: parseOptionalFlag(row.drop_duplicate_frame),
     seamMode: parseSeamMode(row.seam_mode),
     seamFadeSec: row.seam_fade_sec == null ? null : clampSeamFade(Number(row.seam_fade_sec)),
     createdAt: String(row.created_at),
@@ -421,6 +451,7 @@ export function createProject(name: string, description = ""): Project {
     seamMode: "cut",
     seamFadeSec: DEFAULT_SEAM_FADE_SEC,
     styleBase: "",
+    dropDuplicateFrame: true,
   };
   getDb()
     .prepare(
@@ -445,6 +476,7 @@ export function updateProject(
       | "seamMode"
       | "seamFadeSec"
       | "styleBase"
+      | "dropDuplicateFrame"
     >
   > & {
     characterSheetPath?: string | null;
@@ -468,6 +500,8 @@ export function updateProject(
     seamFadeSec:
       patch.seamFadeSec === undefined ? current.seamFadeSec : clampSeamFade(patch.seamFadeSec),
     styleBase: patch.styleBase === undefined ? current.styleBase : patch.styleBase.trim(),
+    dropDuplicateFrame:
+      patch.dropDuplicateFrame === undefined ? current.dropDuplicateFrame : patch.dropDuplicateFrame,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -475,7 +509,7 @@ export function updateProject(
       `UPDATE projects
        SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
            comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?,
-           style_base = ?
+           style_base = ?, drop_duplicate_frame = ?
        WHERE id = ?`
     )
     .run(
@@ -488,6 +522,7 @@ export function updateProject(
       next.seamMode,
       next.seamFadeSec,
       next.styleBase,
+      next.dropDuplicateFrame ? 1 : 0,
       id
     );
   return getProject(id);
@@ -542,6 +577,7 @@ export function createShot(input: {
   comfyuiWorkflow?: ComfyWorkflowId | null;
   comfyLowMemory?: boolean | null;
   chainFromPrevious?: boolean;
+  chainFrameBack?: number;
   id?: string;
 }): Shot {
   const now = new Date().toISOString();
@@ -560,6 +596,7 @@ export function createShot(input: {
     comfyuiWorkflow: input.comfyuiWorkflow ?? null,
     comfyLowMemory: input.comfyLowMemory ?? null,
     chainFromPrevious: Boolean(input.chainFromPrevious),
+    chainFrameBack: clampChainFrameBack(input.chainFrameBack ?? 0),
     createdAt: now,
     updatedAt: now,
   };
@@ -568,8 +605,8 @@ export function createShot(input: {
       `INSERT INTO shots (
         id, project_id, position, prompt, preset_id, duration_sec,
         start_image_path, end_image_path, created_at, updated_at,
-        comfyui_workflow, comfy_low_memory, chain_from_previous
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        comfyui_workflow, comfy_low_memory, chain_from_previous, chain_frame_back
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       shot.id,
@@ -584,7 +621,8 @@ export function createShot(input: {
       shot.updatedAt,
       shot.comfyuiWorkflow,
       shot.comfyLowMemory == null ? null : shot.comfyLowMemory ? 1 : 0,
-      shot.chainFromPrevious ? 1 : 0
+      shot.chainFromPrevious ? 1 : 0,
+      shot.chainFrameBack
     );
   touchProject(shot.projectId);
   return shot;
@@ -603,8 +641,12 @@ export function updateShot(
       | "comfyuiWorkflow"
       | "comfyLowMemory"
       | "chainFromPrevious"
+      | "chainFrameBack"
       | "chainedStartImagePath"
       | "chainedFromJobId"
+      | "chainedFrameBack"
+      | "chainedFrameRequest"
+      | "dropDuplicateFrame"
       | "seamMode"
       | "seamFadeSec"
     >
@@ -628,6 +670,10 @@ export function updateShot(
       patch.comfyLowMemory === undefined ? current.comfyLowMemory ?? null : patch.comfyLowMemory,
     chainFromPrevious:
       patch.chainFromPrevious === undefined ? current.chainFromPrevious : patch.chainFromPrevious,
+    chainFrameBack:
+      patch.chainFrameBack === undefined
+        ? current.chainFrameBack
+        : clampChainFrameBack(patch.chainFrameBack),
     chainedStartImagePath:
       patch.chainedStartImagePath !== undefined
         ? patch.chainedStartImagePath || null
@@ -636,6 +682,22 @@ export function updateShot(
       patch.chainedFromJobId !== undefined
         ? patch.chainedFromJobId || null
         : current.chainedFromJobId ?? null,
+    chainedFrameBack:
+      patch.chainedFrameBack === undefined
+        ? current.chainedFrameBack ?? null
+        : patch.chainedFrameBack == null
+          ? null
+          : clampChainFrameBack(patch.chainedFrameBack),
+    chainedFrameRequest:
+      patch.chainedFrameRequest === undefined
+        ? current.chainedFrameRequest ?? null
+        : patch.chainedFrameRequest == null
+          ? null
+          : clampChainFrameBack(patch.chainedFrameRequest),
+    dropDuplicateFrame:
+      patch.dropDuplicateFrame === undefined
+        ? current.dropDuplicateFrame ?? null
+        : patch.dropDuplicateFrame,
     seamMode: patch.seamMode === undefined ? current.seamMode ?? null : patch.seamMode,
     seamFadeSec:
       patch.seamFadeSec === undefined
@@ -651,7 +713,9 @@ export function updateShot(
        SET prompt = ?, preset_id = ?, duration_sec = ?, start_image_path = ?,
            end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?,
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
-           seam_mode = ?, seam_fade_sec = ?, updated_at = ?
+           seam_mode = ?, seam_fade_sec = ?, chain_frame_back = ?,
+           chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
+           updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -667,6 +731,10 @@ export function updateShot(
       next.chainedFromJobId,
       next.seamMode,
       next.seamFadeSec,
+      next.chainFrameBack,
+      next.chainedFrameBack,
+      next.chainedFrameRequest,
+      next.dropDuplicateFrame == null ? null : next.dropDuplicateFrame ? 1 : 0,
       next.updatedAt,
       id
     );

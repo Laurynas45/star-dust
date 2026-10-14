@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { createShot, getProject, listShots } from "@/lib/storage";
-import { ComfyWorkflowId, clampDuration, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
+import { ComfyWorkflowId, clampChainFrameBack, clampDuration, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
 
 function formWorkflow(value: FormDataEntryValue | null): ComfyWorkflowId | null {
   if (isComfyWorkflowId(value)) return value;
@@ -89,6 +89,7 @@ export async function POST(
     comfyuiWorkflow: formWorkflow(form.get("comfyuiWorkflow")),
     comfyLowMemory: formFlag(form.get("comfyLowMemory")),
     chainFromPrevious: hasPrevious && form.get("chainFromPrevious") === "1",
+    chainFrameBack: clampChainFrameBack(Number(form.get("chainFrameBack") || 0)),
   });
   return NextResponse.json(shot, { status: 201 });
 }

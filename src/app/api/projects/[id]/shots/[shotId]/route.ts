@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getProject, getShot, updateShot } from "@/lib/storage";
-import { ComfyWorkflowId, SeamMode, clampDuration, clampSeamFade, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
+import { ComfyWorkflowId, SeamMode, clampChainFrameBack, clampDuration, clampSeamFade, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
@@ -24,6 +24,12 @@ function seamField(value: unknown): SeamMode | null | undefined {
 function fadeField(value: unknown): number | null | undefined {
   if (value === null) return null;
   if (typeof value === "number") return clampSeamFade(value);
+  return undefined;
+}
+
+function optionalBool(value: unknown): boolean | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "boolean") return value;
   return undefined;
 }
 import { storeImageIfAllowed } from "@/lib/uploads";
@@ -67,6 +73,8 @@ export async function PATCH(
       comfyLowMemory: flagField(body.comfyLowMemory),
       chainFromPrevious:
         typeof body.chainFromPrevious === "boolean" ? body.chainFromPrevious : undefined,
+      chainFrameBack: typeof body.chainFrameBack === "number" ? clampChainFrameBack(body.chainFrameBack) : undefined,
+      dropDuplicateFrame: optionalBool(body.dropDuplicateFrame),
       seamMode: seamField(body.seamMode),
       seamFadeSec: fadeField(body.seamFadeSec),
     });

@@ -18,9 +18,11 @@ import {
 } from "@/lib/provider-info";
 import {
   AppSettings,
+  CHAIN_FRAME_BACK_CHOICES,
   CHAIN_HONESTY,
   ComfyWorkflowId,
   CostEstimate,
+  FRAME_BACK_HONESTY,
   Job,
   MAX_SHOT_SECONDS,
   MIN_SHOT_SECONDS,
@@ -28,10 +30,12 @@ import {
   Project,
   ProviderId,
   SEAM_FADE_CHOICES,
+  SEAM_FRAME_HONESTY,
   SEAM_HONESTY,
   STYLE_BASE_HONESTY,
   SeamMode,
   Shot,
+  chainFramePhrase,
   effectivePrompt,
   presetById,
   styleBaseText,
@@ -90,6 +94,7 @@ export default function ProjectStudioPage() {
   const [shotWorkflow, setShotWorkflow] = useState("");
   const [shotLowMemory, setShotLowMemory] = useState("");
   const [chainNew, setChainNew] = useState(false);
+  const [chainBackNew, setChainBackNew] = useState(0);
   const [preview, setPreview] = useState<string | null>(null);
   const [savingShot, setSavingShot] = useState(false);
   const [styleBaseDraft, setStyleBaseDraft] = useState<string | null>(null);
@@ -305,7 +310,10 @@ export default function ProjectStudioPage() {
       if (endImage) form.set("endImage", endImage);
       if (shotWorkflow) form.set("comfyuiWorkflow", shotWorkflow);
       if (shotLowMemory) form.set("comfyLowMemory", shotLowMemory);
-      if (chainNew) form.set("chainFromPrevious", "1");
+      if (chainNew) {
+        form.set("chainFromPrevious", "1");
+        form.set("chainFrameBack", String(chainBackNew));
+      }
       const res = await fetch(`/api/projects/${projectId}/shots`, { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not add the shot");
@@ -315,6 +323,7 @@ export default function ProjectStudioPage() {
       setShotWorkflow("");
       setShotLowMemory("");
       setChainNew(false);
+      setChainBackNew(0);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not add the shot");
@@ -425,6 +434,7 @@ export default function ProjectStudioPage() {
     comfyLowMemory?: boolean | null;
     seamMode?: SeamMode;
     seamFadeSec?: number;
+    dropDuplicateFrame?: boolean;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -445,6 +455,8 @@ export default function ProjectStudioPage() {
       comfyuiWorkflow?: ComfyWorkflowId | null;
       comfyLowMemory?: boolean | null;
       chainFromPrevious?: boolean;
+      chainFrameBack?: number;
+      dropDuplicateFrame?: boolean | null;
       seamMode?: SeamMode | null;
       seamFadeSec?: number | null;
     }
@@ -543,7 +555,8 @@ export default function ProjectStudioPage() {
           <p className="font-mono text-[11px] text-violet-300">03 · Export stitch</p>
           <h2 className="mt-1 text-lg font-medium text-white">One mp4, same editor</h2>
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
-            ffmpeg joins the take you chose. Hard cut, or a short crossfade. The stitch is not a new model.
+            ffmpeg joins the take you chose. Hard cut, or a short crossfade. A chained hard cut
+            drops one repeated frame. The stitch is not a new model.
           </p>
           <button
             type="button"
@@ -591,8 +604,21 @@ export default function ProjectStudioPage() {
             </select>
           </label>
         </div>
+        <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={project.dropDuplicateFrame}
+            onChange={(e) => void saveProjectPatch({ dropDuplicateFrame: e.target.checked })}
+          />
+          <span>
+            <span className="text-white">Drop the repeated frame on a chained hard cut.</span>{" "}
+            {SEAM_FRAME_HONESTY}
+          </span>
+        </label>
         <p className="text-[11px] leading-relaxed text-[var(--muted)]">
-          A shot can override the join that leads into it. The first shot has no join.
+          A shot can override the join that leads into it, and whether that join drops the repeated
+          frame. The first shot has no join.
         </p>
       </section>
 
@@ -602,8 +628,9 @@ export default function ProjectStudioPage() {
           <h2 className="mt-1 text-lg font-medium text-white">Watch the whole edit for $0</h2>
           <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
             Renders every shot with Mock and stitches them. Camera motion on your stills, not AI
-            motion. Last-frame chaining applies when you render a take, not in this preview.
-            Preview clips do not replace or count as the shot&apos;s takes.
+            motion. Last-frame chaining, and the repeated-frame drop, apply when you render a take
+            and export the stitch, not in this preview. Preview clips do not replace or count as
+            the shot&apos;s takes.
           </p>
         </div>
         <button
@@ -949,6 +976,23 @@ export default function ProjectStudioPage() {
               </span>
             </label>
           )}
+          {shots.length > 0 && chainNew && (
+            <label className="text-xs text-[var(--muted)]">
+              Start frame, counted back from the end
+              <select
+                className="input mt-1"
+                value={String(chainBackNew)}
+                onChange={(e) => setChainBackNew(Number(e.target.value))}
+              >
+                {CHAIN_FRAME_BACK_CHOICES.map((frames) => (
+                  <option key={frames} value={frames}>
+                    {frames === 0 ? "0 — last frame" : `${frames} ${frames === 1 ? "frame" : "frames"} before the end`}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block leading-relaxed">{FRAME_BACK_HONESTY}</span>
+            </label>
+          )}
           <button type="submit" className="btn-primary w-full" disabled={savingShot}>
               {savingShot ? "Adding…" : "Add shot"}
             </button>
@@ -975,15 +1019,24 @@ export default function ProjectStudioPage() {
               const showChained = Boolean(shot.chainFromPrevious && shot.chainedStartImagePath);
               const depth = chainDepth(shots, shot.id);
               const depthNote = shot.chainFromPrevious ? chainDepthNote(depth) : null;
+              const chosenBack = shot.chainFrameBack ?? 0;
+              const frameWord = chainFramePhrase(chosenBack);
+              const frameStale =
+                Boolean(shot.chainedStartImagePath) && (shot.chainedFrameRequest ?? 0) !== chosenBack;
+              const joinMode = shot.seamMode ?? project.seamMode;
+              const dropOn =
+                shot.dropDuplicateFrame == null ? project.dropDuplicateFrame : shot.dropDuplicateFrame;
               const chainLine = !shot.chainFromPrevious || !prev
                 ? null
-                : prevBusy
-                  ? `Waits for shot ${prev.position}'s take, then uses its last frame. Your still is not used.`
-                  : prevTakes.length === 0
-                    ? `Needs shot ${prev.position}'s finished take first. Your still is not used.`
-                    : shot.chainedFromJobId && stitchChoice(prev, prevTakes) !== shot.chainedFromJobId
-                      ? "The previous shot's chosen take changed. Render this shot again to use its new last frame."
-                      : "The next render starts from the previous shot's last frame.";
+                : frameStale
+                  ? `Frame choice changed. Render this shot again to start from the ${frameWord}. The take you have still uses the earlier frame.`
+                  : prevBusy
+                    ? `Waits for shot ${prev.position}'s take, then uses its ${frameWord}. Your still is not used.`
+                    : prevTakes.length === 0
+                      ? `Needs shot ${prev.position}'s finished take first. Your still is not used.`
+                      : shot.chainedFromJobId && stitchChoice(prev, prevTakes) !== shot.chainedFromJobId
+                        ? `The previous shot's chosen take changed. Render this shot again to use its new ${frameWord}.`
+                        : `The next render starts from the ${frameWord} of the previous shot.`;
               return (
                 <li key={shot.id} className="panel grid gap-4 p-4 sm:grid-cols-[140px_1fr]">
                   <div className="space-y-2">
@@ -992,7 +1045,11 @@ export default function ProjectStudioPage() {
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
                           src={`/api/media/${shot.chainedStartImagePath}`}
-                          alt="Last frame from the previous shot"
+                          alt={
+                            chosenBack === 0
+                              ? "Last frame from the previous shot"
+                              : "Frame from near the end of the previous shot"
+                          }
                           className="aspect-video w-full object-cover"
                         />
                       ) : shot.startImagePath ? (
@@ -1067,6 +1124,31 @@ export default function ProjectStudioPage() {
                                 {depthNote}
                               </p>
                             )}
+                            <label className="block text-[11px] text-[var(--muted)]">
+                              Start frame, counted back from the end
+                              <select
+                                className="input mt-1"
+                                value={String(chosenBack)}
+                                onChange={(e) =>
+                                  void saveShotPatch(shot.id, { chainFrameBack: Number(e.target.value) })
+                                }
+                              >
+                                {CHAIN_FRAME_BACK_CHOICES.map((frames) => (
+                                  <option key={frames} value={frames}>
+                                    {frames === 0
+                                      ? "0 — last frame"
+                                      : `${frames} ${frames === 1 ? "frame" : "frames"} before the end`}
+                                  </option>
+                                ))}
+                              </select>
+                              <span className="mt-1 block leading-relaxed">{FRAME_BACK_HONESTY}</span>
+                            </label>
+                            {chosenBack > 0 && joinMode !== "crossfade" && dropOn && (
+                              <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+                                This shot starts before the last frame, so the hard cut does not drop a
+                                frame. The previous take still plays to the end.
+                              </p>
+                            )}
                             <div className="flex flex-wrap items-center gap-2">
                               <button
                                 type="button"
@@ -1126,6 +1208,31 @@ export default function ProjectStudioPage() {
                               </select>
                             </label>
                           )}
+                          <label className="text-[11px] text-[var(--muted)]">
+                            Repeated frame on this hard cut
+                            <select
+                              className="input mt-1"
+                              value={
+                                shot.dropDuplicateFrame == null ? "" : shot.dropDuplicateFrame ? "1" : "0"
+                              }
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                void saveShotPatch(shot.id, {
+                                  dropDuplicateFrame: value === "" ? null : value === "1",
+                                });
+                              }}
+                            >
+                              <option value="">
+                                Project default ({project.dropDuplicateFrame ? "drop it" : "keep both"})
+                              </option>
+                              <option value="1">Drop the repeated frame</option>
+                              <option value="0">Keep both frames</option>
+                            </select>
+                            <span className="mt-1 block leading-relaxed">
+                              Only a chained hard cut that starts on the exact last frame. A crossfade
+                              is unchanged.
+                            </span>
+                          </label>
                         </div>
                       </div>
                     )}

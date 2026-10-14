@@ -69,6 +69,7 @@ export async function PATCH(
     seamMode: seamModeField(body.seamMode),
     seamFadeSec: typeof body.seamFadeSec === "number" ? clampSeamFade(body.seamFadeSec) : undefined,
     styleBase,
+    dropDuplicateFrame: typeof body.dropDuplicateFrame === "boolean" ? body.dropDuplicateFrame : undefined,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

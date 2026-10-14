@@ -35,6 +35,37 @@ export function probeDurationSec(file: string): number {
   return value;
 }
 
+export function probeVideoFrames(file: string): number {
+  const probe = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-count_frames",
+      "-show_entries",
+      "stream=nb_read_frames",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      file,
+    ],
+    { encoding: "utf8" }
+  );
+  if (probe.error) {
+    const code = (probe.error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new Error("ffprobe is not on PATH. Install ffmpeg and try again.");
+    }
+    throw probe.error;
+  }
+  const value = Number(String(probe.stdout).trim());
+  if (probe.status !== 0 || !Number.isFinite(value) || value < 0) {
+    throw new Error(probe.stderr || "Could not count video frames");
+  }
+  return Math.floor(value);
+}
+
 export function runFfmpeg(args: string[], opts?: { jobId?: string }): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
