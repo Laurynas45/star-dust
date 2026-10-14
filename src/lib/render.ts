@@ -197,7 +197,7 @@ function queueJob(
     comfy: provider === "comfyui" ? comfyForShot(shot, settings) : undefined,
   });
   const providerNote = chain
-    ? `${described.providerNote} ${chainProviderNote(chain.awaitPreviousFrame)}`
+    ? `${described.providerNote} ${chainProviderNote(chain.awaitPreviousFrame, shot.chainFrameBack)}`
     : described.providerNote;
   return createJob({
     projectId: shot.projectId,
@@ -464,7 +464,7 @@ export function retryFromJob(
     characterNote: described.characterNote,
     providerNote:
       chainPlan && chainPlan.ok
-        ? `${described.providerNote} ${chainProviderNote(chainPlan.awaitPreviousFrame)}`
+        ? `${described.providerNote} ${chainProviderNote(chainPlan.awaitPreviousFrame, shotForChain?.chainFrameBack ?? 0)}`
         : described.providerNote,
     modelName: described.modelName,
     durationSec: source.durationSec,

@@ -39,6 +39,11 @@ export interface Project {
   /** Crossfade length when seamMode is crossfade. Ignored for a hard cut. */
   seamFadeSec: number;
   /**
+   * On a chained hard cut, drop the one frame that the next shot repeats.
+   * Default on. A shot can override it. Crossfades and unchained shots ignore it.
+   */
+  dropDuplicateFrame: boolean;
+  /**
    * Shared style / character text. Empty by default.
    * Prefixed onto each shot prompt when a take or preview job is created.
    * Text only — not a character lock.
@@ -61,12 +66,28 @@ export interface Shot {
   comfyuiWorkflow?: ComfyWorkflowId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
-  /** When true, the next take starts from the previous shot's last frame. */
+  /** When true, the next take starts from a frame near the end of the previous shot. */
   chainFromPrevious: boolean;
-  /** Extracted last frame, stored like any other still. The user's start image stays put. */
+  /**
+   * How many frames before the end of the previous take to use as the start still.
+   * 0 is the last frame. Bounded, because the very last frame is often soft.
+   */
+  chainFrameBack: number;
+  /** Extracted still, stored like any other image. The user's start image stays put. */
   chainedStartImagePath?: string;
   /** Take id the chained still was extracted from. */
   chainedFromJobId?: string;
+  /**
+   * Frames back that the stored still actually is. 0 means it is the exact last frame.
+   * Null until a still has been extracted. Older rows are null and were the last frame.
+   */
+  chainedFrameBack?: number;
+  /** The chainFrameBack setting used when that still was extracted. */
+  chainedFrameRequest?: number;
+  /**
+   * Null inherits the project. When false, a chained hard cut keeps the repeated frame.
+   */
+  dropDuplicateFrame?: boolean | null;
   /** Join into this shot. Null inherits the project seam. */
   seamMode?: SeamMode | null;
   /** Null inherits the project crossfade length. */
@@ -243,11 +264,27 @@ export const MAX_SEAM_FADE_SEC = 1;
 export const DEFAULT_SEAM_FADE_SEC = 0.5;
 export const SEAM_FADE_CHOICES = [0.25, 0.5, 0.75, 1] as const;
 
+/** 0 is the last frame. Twelve is about half a second at 24 fps. */
+export const MAX_CHAIN_FRAME_BACK = 12;
+export const CHAIN_FRAME_BACK_CHOICES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
+
 export const CHAIN_HONESTY =
   "Starting from the previous shot's last frame helps continuity of pose and framing. Identity and details still drift over many chained shots. Star Dust does not lock characters.";
 
 export const SEAM_HONESTY =
   "Hard cut is the default. A short crossfade blends the pixels at the join. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
+
+export const SEAM_FRAME_HONESTY =
+  "When the next shot started from the previous shot's exact last frame, a hard cut shows that repeated frame twice. Dropping it removes that one-frame freeze. It does not fix identity or detail drift between chained shots. A crossfade is left as-is, and a shot that is not chained is left as-is. Star Dust does not lock a character, lip-sync, or build a long film.";
+
+export const FRAME_BACK_HONESTY =
+  "0 is the last frame. A few frames earlier skips a soft or blurred ending frame. The repeated-frame drop runs only for that exact last frame, because only then do the two frames at the cut match. Stepping back leaves the previous take whole, so the join can step backward by those frames. It does not fix identity or detail drift.";
+
+export const DROPPED_FRAME_NOTE =
+  "Dropped the repeated frame at this hard cut. That does not fix identity or detail drift.";
+
+export const FRAME_BACK_SEAM_NOTE =
+  "Started before the last frame, so the frames at the cut differ and nothing was dropped.";
 
 export const STYLE_BASE_HONESTY =
   "Text only — not a character lock. These words are added in front of every shot when a take or preview is queued. Identity can still drift across shots. Star Dust does not lock a face, lip-sync, or build a long film.";
@@ -273,6 +310,36 @@ export function clampSeamFade(value: number, fallback = DEFAULT_SEAM_FADE_SEC): 
   if (!Number.isFinite(value)) return fallback;
   const rounded = Math.round(value * 1000) / 1000;
   return Math.min(MAX_SEAM_FADE_SEC, Math.max(MIN_SEAM_FADE_SEC, rounded));
+}
+
+export function clampChainFrameBack(value: number, fallback = 0): number {
+  if (!Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value);
+  if (!Number.isFinite(rounded)) return fallback;
+  return Math.min(MAX_CHAIN_FRAME_BACK, Math.max(0, rounded));
+}
+
+/** Plain words for the frame a chained shot starts from. 0 is the last frame. */
+export function chainFramePhrase(framesBack: number): string {
+  const n = clampChainFrameBack(framesBack);
+  if (n === 0) return "last frame";
+  if (n === 1) return "frame 1 before the end";
+  return `frame ${n} before the end`;
+}
+
+/**
+ * Index of the still to extract. `appliedBack` is 0 only when that still is the
+ * exact last frame, including when a short clip cannot step back as far as asked.
+ */
+export function frameIndexFromEnd(
+  frameCount: number,
+  framesBack: number
+): { index: number; appliedBack: number } {
+  const requested = clampChainFrameBack(framesBack);
+  const count = Number.isFinite(frameCount) ? Math.floor(frameCount) : 0;
+  if (count < 1) return { index: 0, appliedBack: 0 };
+  const index = Math.max(0, count - 1 - requested);
+  return { index, appliedBack: count - 1 - index };
 }
 
 export function clampDuration(value: number, fallback: number): number {

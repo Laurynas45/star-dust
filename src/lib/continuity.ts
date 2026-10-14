@@ -1,9 +1,9 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { runFfmpeg } from "./ffmpeg";
+import { probeVideoFrames, runFfmpeg } from "./ffmpeg";
 import { getJob, getProject, getShot, listJobs, listShots, resolveDataPath, updateJob, updateShot } from "./storage";
-import { Job, Shot, effectivePrompt } from "./types";
+import { Job, Shot, chainFramePhrase, clampChainFrameBack, effectivePrompt, frameIndexFromEnd } from "./types";
 import { storeImageIfAllowed } from "./uploads";
 
 /** Placeholder image path. It is not the user's still, and it is not a file. */
@@ -14,14 +14,31 @@ export function chainIsFirstMessage(shot: Shot): string {
 }
 
 export function chainNeedsPreviousMessage(shot: Shot, prev: Shot): string {
-  return `Shot ${shot.position} needs shot ${prev.position}'s finished take before it can start from the last frame. Render shot ${prev.position} first. Your still was not used.`;
+  const frame = chainFramePhrase(shot.chainFrameBack ?? 0);
+  return `Shot ${shot.position} needs shot ${prev.position}'s finished take before it can start from the ${frame}. Render shot ${prev.position} first. Your still was not used.`;
 }
 
-export function chainProviderNote(waiting: boolean): string {
+export function chainProviderNote(waiting: boolean, framesBack = 0): string {
+  const back = clampChainFrameBack(framesBack);
+  const frame = chainFramePhrase(back);
   if (waiting) {
-    return "This shot waits for the previous shot's finished take, then uses that clip's last frame. Your still is not used.";
+    if (back === 0) {
+      return "This shot waits for the previous shot's finished take, then uses that clip's last frame. Your still is not used.";
+    }
+    return `This shot waits for the previous shot's finished take, then uses the ${frame}. Your still is not used. The ending frame is often soft. Identity and details still drift.`;
   }
-  return "The start still is the last frame of the previous shot. Pose and framing can continue from that frame. Identity and details drift across chained shots. The face is not held fixed.";
+  if (back === 0) {
+    return "The start still is the last frame of the previous shot. Pose and framing can continue from that frame. Identity and details drift across chained shots. The face is not held fixed.";
+  }
+  return `The start still is the ${frame} of the previous shot. The ending frame is often soft. Pose and framing can continue from that frame. Identity and details drift across chained shots. The face is not held fixed.`;
+}
+
+/** True when the stored still came from this take at the shot's current frame choice. */
+export function chainedStillIsCurrent(shot: Shot, takeId: string): boolean {
+  if (!shot.chainedStartImagePath || shot.chainedFromJobId !== takeId) return false;
+  const requested = clampChainFrameBack(shot.chainFrameBack ?? 0);
+  const used = shot.chainedFrameRequest ?? 0;
+  return used === requested;
 }
 
 export type ChainPlan =
@@ -64,8 +81,8 @@ export function startImageForMatch(shot: Shot): string {
   if (!shot.chainFromPrevious) return shot.startImagePath ?? "";
   const prev = previousShot(shot);
   const take = prev ? finishedTake(prev) : undefined;
-  if (!take || !shot.chainedStartImagePath || shot.chainedFromJobId !== take.id) return "";
-  return shot.chainedStartImagePath;
+  if (!take || !chainedStillIsCurrent(shot, take.id)) return "";
+  return shot.chainedStartImagePath ?? "";
 }
 
 /**
@@ -99,7 +116,34 @@ function failChain(jobId: string, error: string): false {
   return false;
 }
 
-/** Extracts the previous shot's last frame and stores it as a still. Does not replace the user's image. */
+/**
+ * Reads one frame near the end of a clip. framesBack 0 is the last frame.
+ * The returned appliedBack is 0 only when the still is that exact last frame.
+ */
+export async function extractVideoFrame(
+  videoAbs: string,
+  framesBack: number,
+  dest: string
+): Promise<{ index: number; appliedBack: number; frameCount: number }> {
+  const frameCount = probeVideoFrames(videoAbs);
+  if (frameCount < 1) throw new Error("The clip has no video frames.");
+  const picked = frameIndexFromEnd(frameCount, framesBack);
+  await runFfmpeg([
+    "-y",
+    "-i",
+    videoAbs,
+    "-vf",
+    `select=eq(n\\,${picked.index})`,
+    "-frames:v",
+    "1",
+    "-f",
+    "image2",
+    dest,
+  ]);
+  return { frameCount, index: picked.index, appliedBack: picked.appliedBack };
+}
+
+/** Extracts a frame near the end of the previous shot and stores it as a still. Does not replace the user's image. */
 export async function resolveJobChain(jobId: string): Promise<boolean> {
   const job = getJob(jobId);
   if (!job || job.status !== "queued") return false;
@@ -124,22 +168,28 @@ export async function resolveJobChain(jobId: string): Promise<boolean> {
   if (!fs.existsSync(videoAbs)) {
     return failChain(
       jobId,
-      `Shot ${prev.position}'s clip file is missing, so shot ${shot.position} cannot start from its last frame. Your still was not used.`
+      `Shot ${prev.position}'s clip file is missing, so shot ${shot.position} cannot start from its ${chainFramePhrase(shot.chainFrameBack ?? 0)}. Your still was not used.`
     );
   }
-  const temp = path.join(os.tmpdir(), `star-dust-last-${shot.id}-${take.id}.png`);
+  const requested = clampChainFrameBack(shot.chainFrameBack ?? 0);
+  const temp = path.join(os.tmpdir(), `star-dust-frame-${shot.id}-${take.id}.png`);
   try {
-    await runFfmpeg(["-y", "-i", videoAbs, "-map", "0:v:0", "-update", "1", "-f", "image2", temp]);
+    const picked = await extractVideoFrame(videoAbs, requested, temp);
     if (getJob(jobId)?.status !== "queued") return false;
     const buffer = fs.readFileSync(temp);
     const stored = storeImageIfAllowed({
       projectId: shot.projectId,
       prompt: effectivePrompt(getProject(shot.projectId)?.styleBase, shot.prompt),
-      filename: "last-frame.png",
+      filename: requested === 0 ? "last-frame.png" : `frame-back-${picked.appliedBack}.png`,
       buffer,
     });
     if (!stored.ok) return failChain(jobId, stored.error);
-    updateShot(shot.id, { chainedStartImagePath: stored.path, chainedFromJobId: take.id });
+    updateShot(shot.id, {
+      chainedStartImagePath: stored.path,
+      chainedFromJobId: take.id,
+      chainedFrameBack: picked.appliedBack,
+      chainedFrameRequest: requested,
+    });
     if (getJob(jobId)?.status !== "queued") return false;
     updateJob(jobId, { imagePath: stored.path, awaitPreviousFrame: false });
     return true;
@@ -148,7 +198,7 @@ export async function resolveJobChain(jobId: string): Promise<boolean> {
     const message = err instanceof Error ? err.message : String(err);
     return failChain(
       jobId,
-      `Could not read the last frame of shot ${prev.position}. Your still was not used. ${message}`
+      `Could not read the ${chainFramePhrase(requested)} of shot ${prev.position}. Your still was not used. ${message}`
     );
   } finally {
     fs.rmSync(temp, { force: true });

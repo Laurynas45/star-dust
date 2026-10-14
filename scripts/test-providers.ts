@@ -77,6 +77,91 @@ function mediaDuration(file: string): number {
   return value;
 }
 
+let probeSeq = 0;
+
+function runFfmpegSync(args: string[]) {
+  const made = spawnSync("ffmpeg", args, { encoding: "utf8" });
+  if (made.status !== 0) throw new Error(made.stderr || "ffmpeg failed");
+}
+
+function frameCountOf(file: string): number {
+  const probe = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-count_frames",
+      "-show_entries",
+      "stream=nb_read_frames",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      file,
+    ],
+    { encoding: "utf8" }
+  );
+  const value = Number(String(probe.stdout).trim());
+  if (probe.status !== 0 || !Number.isFinite(value)) {
+    throw new Error(probe.stderr || "frame count failed");
+  }
+  return value;
+}
+
+function frameRgbAt(file: string, index: number): { r: number; g: number; b: number } {
+  const png = path.join(dataDir, `probe-${process.pid}-${probeSeq++}.png`);
+  runFfmpegSync(["-y", "-i", file, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", png]);
+  try {
+    return averageRgb(png);
+  } finally {
+    fs.rmSync(png, { force: true });
+  }
+}
+
+function concatColors(file: string, parts: { color: string; frames: number }[]) {
+  const dir = fs.mkdtempSync(path.join(dataDir, "segs-"));
+  const list = path.join(dir, "list.txt");
+  const lines = parts.map((part, index) => {
+    const seg = path.join(dir, `seg-${index}.mp4`);
+    runFfmpegSync([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=${part.color}:s=160x90:r=24`,
+      "-frames:v",
+      String(part.frames),
+      "-c:v",
+      "libx264",
+      "-qp",
+      "0",
+      "-pix_fmt",
+      "yuv420p",
+      seg,
+    ]);
+    return `file '${seg.replace(/'/g, "'\\''")}'`;
+  });
+  fs.writeFileSync(list, lines.join("\n"));
+  runFfmpegSync([
+    "-y",
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    list,
+    "-c:v",
+    "libx264",
+    "-qp",
+    "0",
+    "-pix_fmt",
+    "yuv420p",
+    "-r",
+    "24",
+    file,
+  ]);
+}
+
 function firstFrameRgb(file: string): { r: number; g: number; b: number } {
   const png = path.join(path.dirname(file), `frame-${process.pid}-${Date.now()}.png`);
   const made = spawnSync("ffmpeg", ["-y", "-i", file, "-frames:v", "1", png], { encoding: "utf8" });
@@ -1869,6 +1954,7 @@ async function main() {
   const fadedAbs = storage.resolveDataPath(faded.outputPath);
   assert(fs.statSync(fadedAbs).size > 1000, "crossfade stitch is a real mp4");
   assert(faded.seams.length === 2 && faded.seams.every((seam) => seam.mode === "crossfade" && seam.fadeSec === 0.5), "both joins crossfade 0.5s");
+  assert(faded.seams.every((seam) => seam.droppedFrames === 0), "a crossfade does not drop a frame");
   const fadedDur = mediaDuration(fadedAbs);
   assert(Math.abs(faded.durationSec - fadedDur) < 0.05, "reported stitch duration matches ffprobe");
   assert(
@@ -1880,6 +1966,7 @@ async function main() {
   storage.updateShot(shotC.id, { seamMode: "crossfade", seamFadeSec: 0.5 });
   const oneJoin = await stitch.stitchProject(continuity.id);
   assert(oneJoin.seams[0]?.mode === "cut" && oneJoin.seams[1]?.mode === "crossfade", "per-join override");
+  assert(oneJoin.seams[0]?.droppedFrames === 1 && oneJoin.seams[1]?.droppedFrames === 0, "only the chained hard cut drops a frame");
   assert(
     Math.abs(oneJoin.durationSec - (clipSum - 0.5)) <= 0.4,
     `one crossfade duration ${oneJoin.durationSec} should be about ${clipSum - 0.5}`
@@ -1887,8 +1974,11 @@ async function main() {
 
   storage.updateShot(shotC.id, { seamMode: null, seamFadeSec: null });
   const hardCut = await stitch.stitchProject(continuity.id);
-  assert(hardCut.seams.every((seam) => seam.mode === "cut"), "project hard cut");
-  assert(Math.abs(hardCut.durationSec - clipSum) <= 0.4, `hard cut duration ${hardCut.durationSec} should be about ${clipSum}`);
+  assert(hardCut.seams.every((seam) => seam.mode === "cut" && seam.droppedFrames === 1), "chained hard cuts drop the repeated frame");
+  assert(
+    hardCut.durationSec < clipSum - 0.05 && hardCut.durationSec > clipSum - 0.2,
+    `hard cut duration ${hardCut.durationSec} should be about two frames shorter than ${clipSum}`
+  );
   assert(hardCut.durationSec > faded.durationSec + 0.6, "hard cut is longer than the two crossfades");
 
   const skippedChain = render.renderAll(continuity.id);
@@ -2030,6 +2120,333 @@ async function main() {
   const refusedStylePreview = render.previewAll(styled.id);
   assert(!refusedStylePreview.ok && refusedStylePreview.refused, "preview refuses the joined prompt before queue");
   assert(storage.listJobs(styled.id).length === jobsBeforeStyleRefusal, "refused style base stored no job");
+
+  const {
+    clampChainFrameBack,
+    frameIndexFromEnd,
+    chainFramePhrase,
+    SEAM_FRAME_HONESTY,
+    FRAME_BACK_HONESTY,
+    DROPPED_FRAME_NOTE,
+    FRAME_BACK_SEAM_NOTE,
+  } = await import("../src/lib/types");
+  assert(clampChainFrameBack(0) === 0, "0 stays the last frame");
+  assert(clampChainFrameBack(-4) === 0, "negative frame back clamps to 0");
+  assert(clampChainFrameBack(12) === 12, "12 is the far end of the range");
+  assert(clampChainFrameBack(13) === 12 && clampChainFrameBack(40) === 12, "past 12 clamps to 12");
+  assert(clampChainFrameBack(1.6) === 2, "frame back rounds to the nearest frame");
+  assert(clampChainFrameBack(Number.NaN) === 0, "NaN frame back falls back to 0");
+  assert(clampChainFrameBack(Number.POSITIVE_INFINITY) === 0, "infinite frame back falls back to 0");
+  assert(
+    frameIndexFromEnd(48, 0).index === 47 && frameIndexFromEnd(48, 0).appliedBack === 0,
+    "0 selects the last index"
+  );
+  assert(
+    frameIndexFromEnd(48, 12).index === 35 && frameIndexFromEnd(48, 12).appliedBack === 12,
+    "12 steps back twelve frames"
+  );
+  assert(
+    frameIndexFromEnd(5, 12).index === 0 && frameIndexFromEnd(5, 12).appliedBack === 4,
+    "a short clip cannot step past its first frame"
+  );
+  assert(frameIndexFromEnd(1, 3).appliedBack === 0, "a one-frame clip is the exact last frame");
+  assert(frameIndexFromEnd(0, 0).appliedBack === 0, "an empty count does not invent a frame");
+  assert(chainFramePhrase(0) === "last frame" && chainFramePhrase(4) === "frame 4 before the end", "frame phrases");
+
+  const exactJoin = {
+    seamMode: "cut" as const,
+    chainFromPrevious: true,
+    dropEnabled: true,
+    previousJobId: "prev",
+    chainedFromJobId: "prev",
+    chainedFrameBack: 0 as number | null,
+    takeUsedChainedStill: true,
+  };
+  assert(stitch.dropStartFramesForJoin(exactJoin) === 1, "chained exact hard cut drops one frame");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, seamMode: "crossfade" }) === 0, "crossfade does not drop");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainFromPrevious: false }) === 0, "unchained does not drop");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, dropEnabled: false }) === 0, "turning the drop off keeps both frames");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainedFrameBack: 4 }) === 0, "frame back 4 is not an exact duplicate");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainedFrameBack: null }) === 1, "an older last-frame extract still drops");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainedFromJobId: "other" }) === 0, "a different previous take is not dropped");
+  assert(
+    stitch.dropStartFramesForJoin({ ...exactJoin, takeUsedChainedStill: false }) === 0,
+    "a take that did not use the chained still is not dropped"
+  );
+  assert(stitch.applyDropLimit(1, 1) === 0, "a single frame is not dropped");
+  assert(stitch.applyDropLimit(1, 2) === 1, "two frames can lose the first");
+  assert(
+    stitch.duplicateFrameDropEnabled({ dropDuplicateFrame: true }, { dropDuplicateFrame: null }) === true,
+    "a shot with no override inherits the project drop"
+  );
+  assert(
+    stitch.duplicateFrameDropEnabled({ dropDuplicateFrame: true }, { dropDuplicateFrame: false }) === false,
+    "a shot can turn the drop off"
+  );
+  assert(
+    stitch.duplicateFrameDropEnabled({ dropDuplicateFrame: false }, { dropDuplicateFrame: true }) === true,
+    "a shot can turn the drop on"
+  );
+  assert(
+    stitch.duplicateFrameDropEnabled({ dropDuplicateFrame: false }, {}) === false,
+    "a shot inherits the project when the drop is off"
+  );
+
+  const plainFilter = stitch.hardCutFilterComplex([0, 0]);
+  assert(!plainFilter.includes("trim="), "unchained hard cut filter has no trim");
+  assert(plainFilter.includes("concat=n=2:v=1:a=0[v]"), "unchained concat stays a plain concat");
+  const dropFilter = stitch.hardCutFilterComplex([0, 1, 0]);
+  assert(!dropFilter.split("[v0]")[0].includes("trim="), "the leading clip stays whole");
+  assert(dropFilter.split("[v1]")[0].includes("trim=start_frame=1"), "the chained clip drops its first frame");
+  assert(!dropFilter.split("[v2]")[0].split("[v1]")[1]?.includes("trim="), "an unchained later clip is not trimmed");
+  const ffmpegArgs = stitch.hardCutArgs(["a.mp4", "b.mp4"], "out.mp4", [0, 1]);
+  assert(ffmpegArgs[0] === "-y" && ffmpegArgs.includes("a.mp4") && ffmpegArgs.includes("b.mp4"), "ffmpeg args name the clips");
+  assert(ffmpegArgs[ffmpegArgs.indexOf("-filter_complex") + 1] === stitch.hardCutFilterComplex([0, 1]), "ffmpeg args carry the drop filter");
+  assert(stitch.pairCutFilter(0) === "[0:v][1:v]concat=n=2:v=1:a=0[v]", "a cut with the drop off matches the old concat");
+  assert(
+    stitch.pairCutFilter(1) === "[1:v]trim=start_frame=1,setpts=PTS-STARTPTS[b];[0:v][b]concat=n=2:v=1:a=0[v]",
+    "a mixed stitch trims only the incoming clip"
+  );
+  const fadeArgs = stitch.crossfadeFilter(0.5, 1.5);
+  assert(
+    fadeArgs === "[0:v][1:v]xfade=transition=fade:duration=0.500:offset=1.500,format=yuv420p[v]",
+    "crossfade args are unchanged"
+  );
+  assert(!fadeArgs.includes("trim="), "crossfade filter does not drop a frame");
+
+  assert(/repeated frame/i.test(SEAM_FRAME_HONESTY), "copy says this removes a repeated frame");
+  assert(/does not fix identity or detail drift/i.test(SEAM_FRAME_HONESTY), "copy says drift is not fixed");
+  assert(/crossfade/i.test(SEAM_FRAME_HONESTY), "copy says a crossfade is left as-is");
+  assert(/not chained/i.test(SEAM_FRAME_HONESTY), "copy says an unchained shot is left as-is");
+  assert(/lip-sync/i.test(SEAM_FRAME_HONESTY) && /long film/i.test(SEAM_FRAME_HONESTY), "copy names lip-sync and a long film as out of scope");
+  assert(
+    !/character lock|will fix|fixes identity/i.test(`${SEAM_FRAME_HONESTY} ${FRAME_BACK_HONESTY} ${DROPPED_FRAME_NOTE}`),
+    "copy does not claim a lock or a fix"
+  );
+  assert(/exact last frame/i.test(FRAME_BACK_HONESTY), "frame-back copy says the drop is only for the exact last frame");
+  assert(/leaves the previous take whole/i.test(FRAME_BACK_HONESTY), "frame-back copy says the previous take is not trimmed");
+  assert(/nothing was dropped/i.test(FRAME_BACK_SEAM_NOTE), "the seam note says a stepped-back join drops nothing");
+
+  const seamProject = storage.createProject("Seam frames");
+  assert(storage.getProject(seamProject.id)?.dropDuplicateFrame === true, "a new project drops the repeated frame");
+  const still = storage.saveUpload(seamProject.id, "still.png", solidPng(dataDir, "seam-still.png", "gray"));
+  const shotPrev = storage.createShot({
+    projectId: seamProject.id,
+    prompt: "Opening shot.",
+    presetId: "slow-zoom-in",
+    durationSec: 1,
+    startImagePath: still,
+  });
+  const shotNext = storage.createShot({
+    projectId: seamProject.id,
+    prompt: "Chained shot.",
+    presetId: "slow-zoom-in",
+    durationSec: 1,
+    startImagePath: still,
+    chainFromPrevious: true,
+  });
+  assert(storage.getShot(shotNext.id)?.chainFrameBack === 0, "frame back defaults to 0");
+  storage.updateShot(shotNext.id, { chainFrameBack: 99 });
+  assert(storage.getShot(shotNext.id)?.chainFrameBack === 12, "stored frame back clamps to 12");
+  storage.updateShot(shotNext.id, { chainFrameBack: -3 });
+  assert(storage.getShot(shotNext.id)?.chainFrameBack === 0, "stored negative frame back clamps to 0");
+  storage.updateProject(seamProject.id, { dropDuplicateFrame: false });
+  assert(storage.getProject(seamProject.id)?.dropDuplicateFrame === false, "the project can keep both frames");
+  storage.updateShot(shotNext.id, { dropDuplicateFrame: false });
+  assert(storage.getShot(shotNext.id)?.dropDuplicateFrame === false, "a shot can keep both frames");
+  storage.updateShot(shotNext.id, { dropDuplicateFrame: null });
+  assert(storage.getShot(shotNext.id)?.dropDuplicateFrame == null, "a shot can inherit the project again");
+  storage.updateProject(seamProject.id, { dropDuplicateFrame: true, seamMode: "cut" });
+
+  const clipA = storage.absoluteOutputPath(seamProject.id, "clip-a.mp4");
+  concatColors(clipA.abs, [
+    { color: "black", frames: 8 },
+    { color: "blue", frames: 1 },
+    { color: "black", frames: 2 },
+    { color: "red", frames: 1 },
+  ]);
+  assert(frameCountOf(clipA.abs) === 12, `clip A should be 12 frames, got ${frameCountOf(clipA.abs)}`);
+  assert(isRed(frameRgbAt(clipA.abs, 11)), "the last frame of clip A is red");
+  assert(isBlue(frameRgbAt(clipA.abs, 8)), "the frame three back from the end of clip A is blue");
+  const jobA = storage.createJob({
+    projectId: seamProject.id,
+    shotId: shotPrev.id,
+    prompt: "Opening shot.",
+    presetId: "slow-zoom-in",
+    provider: "mock",
+    status: "completed",
+    imagePath: still,
+    durationSec: 1,
+  });
+  storage.updateJob(jobA.id, { status: "completed", outputPath: clipA.rel, progress: 100 });
+
+  const continuityLib = await import("../src/lib/continuity");
+  const queueExtract = () =>
+    storage.createJob({
+      projectId: seamProject.id,
+      shotId: shotNext.id,
+      prompt: "Chained shot.",
+      presetId: "slow-zoom-in",
+      provider: "mock",
+      status: "queued",
+      imagePath: continuityLib.CHAIN_PENDING_IMAGE,
+      awaitPreviousFrame: true,
+      durationSec: 1,
+    });
+  storage.updateShot(shotNext.id, { chainFrameBack: 0, chainFromPrevious: true });
+  const exactJob = queueExtract();
+  assert(await continuityLib.resolveJobChain(exactJob.id), "extract of the last frame succeeded with no API key");
+  const exactShot = storage.getShot(shotNext.id);
+  const exactStill = exactShot?.chainedStartImagePath;
+  assert(exactShot?.chainedFrameBack === 0 && exactShot.chainedFrameRequest === 0, "exact extract records 0 frames back");
+  assert(exactStill && isRed(averageRgb(storage.resolveDataPath(exactStill))), "the stored still is the red last frame");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "frame extract did not need a provider key");
+  storage.updateJob(exactJob.id, { status: "cancelled" });
+
+  storage.updateShot(shotNext.id, { chainFrameBack: 3 });
+  assert(continuityLib.startImageForMatch(storage.getShot(shotNext.id)!) === "", "a new frame-back does not reuse the old still");
+  const noted = render.renderShot(shotNext.id);
+  assert(noted.ok && noted.jobs.length === 1 && noted.jobs[0].provider === "mock", "frame back still renders on Mock with no API key");
+  assert(noted.ok && noted.jobs[0].awaitPreviousFrame, "the new frame is extracted before the provider runs");
+  assert(
+    noted.ok && /frame 3 before the end/i.test(noted.jobs[0].providerNote || ""),
+    "the note names the earlier frame"
+  );
+  assert(
+    noted.ok && /drift/i.test(noted.jobs[0].providerNote || "") && !/start still is the last frame/i.test(noted.jobs[0].providerNote || ""),
+    "the note does not pretend an earlier frame is the last frame"
+  );
+  const backJob = noted.ok ? noted.jobs[0] : queueExtract();
+  assert(await continuityLib.resolveJobChain(backJob.id), "extract three frames back succeeded");
+  const backShot = storage.getShot(shotNext.id);
+  const blueStill = backShot?.chainedStartImagePath;
+  assert(backShot?.chainedFrameBack === 3 && backShot.chainedFrameRequest === 3, "three frames back is what was stored");
+  assert(blueStill && isBlue(averageRgb(storage.resolveDataPath(blueStill))), "the still is the blue frame, not the red last frame");
+  assert(blueStill !== exactStill, "a different frame is a different still");
+  storage.updateJob(backJob.id, { status: "cancelled" });
+
+  storage.updateShot(shotNext.id, { chainFrameBack: 12 });
+  const farJob = queueExtract();
+  assert(await continuityLib.resolveJobChain(farJob.id), "extract twelve frames back succeeded");
+  const farShot = storage.getShot(shotNext.id);
+  assert(
+    farShot?.chainedFrameRequest === 12 && farShot.chainedFrameBack === 11,
+    `twelve frames back on a 12-frame clip lands on the first frame, got request ${farShot?.chainedFrameRequest} applied ${farShot?.chainedFrameBack}`
+  );
+  assert(
+    stitch.dropStartFramesForJoin({
+      seamMode: "cut",
+      chainFromPrevious: true,
+      dropEnabled: true,
+      previousJobId: jobA.id,
+      chainedFromJobId: farShot?.chainedFromJobId,
+      chainedFrameBack: farShot?.chainedFrameBack,
+      takeUsedChainedStill: true,
+    }) === 0,
+    "stepping back means the seam frames are not the same, so nothing is dropped"
+  );
+
+  const clipRed = storage.absoluteOutputPath(seamProject.id, "clip-b-red.mp4");
+  const clipBlue = storage.absoluteOutputPath(seamProject.id, "clip-b-blue.mp4");
+  concatColors(clipRed.abs, [
+    { color: "red", frames: 1 },
+    { color: "green", frames: 11 },
+  ]);
+  concatColors(clipBlue.abs, [
+    { color: "blue", frames: 1 },
+    { color: "green", frames: 11 },
+  ]);
+  const jobB = storage.createJob({
+    projectId: seamProject.id,
+    shotId: shotNext.id,
+    prompt: "Chained shot.",
+    presetId: "slow-zoom-in",
+    provider: "mock",
+    status: "completed",
+    imagePath: exactStill!,
+    durationSec: 1,
+  });
+  storage.updateJob(jobB.id, { status: "completed", outputPath: clipRed.rel, progress: 100, imagePath: exactStill });
+  storage.selectTake(shotNext.id, jobB.id);
+  storage.updateShot(shotNext.id, {
+    chainFromPrevious: true,
+    chainFrameBack: 0,
+    chainedStartImagePath: exactStill,
+    chainedFromJobId: jobA.id,
+    chainedFrameBack: 0,
+    chainedFrameRequest: 0,
+    dropDuplicateFrame: null,
+    seamMode: null,
+  });
+
+  const droppedCut = await stitch.stitchProject(seamProject.id);
+  assert(fs.statSync(storage.resolveDataPath(droppedCut.outputPath)).size > 1000, "chained hard cut stitch is an mp4");
+  assert(droppedCut.seams.length === 1 && droppedCut.seams[0].mode === "cut" && droppedCut.seams[0].droppedFrames === 1, "the chained cut drops one frame");
+  assert(droppedCut.seams[0].note === DROPPED_FRAME_NOTE, "the seam note says the repeated frame was dropped and drift is not fixed");
+  const droppedAbs = storage.resolveDataPath(droppedCut.outputPath);
+  assert(frameCountOf(droppedAbs) === 23, `dropped stitch should be 23 frames, got ${frameCountOf(droppedAbs)}`);
+  const around = [10, 11, 12, 13].map((index) => ({ index, ...frameRgbAt(droppedAbs, index) }));
+  const greenish = (color: { r: number; g: number; b: number }) => color.g > 100 && color.r < 40 && color.b < 40;
+  assert(
+    isRed(around[1]),
+    `the shared frame still plays once, as the end of the first clip; nearby ${JSON.stringify(around)}`
+  );
+  assert(
+    greenish(around[2]) && !isRed(around[2]),
+    `the next frame is the second frame of the next clip, not a second red; nearby ${JSON.stringify(around)}`
+  );
+
+  storage.updateProject(seamProject.id, { dropDuplicateFrame: false });
+  const keptCut = await stitch.stitchProject(seamProject.id);
+  assert(keptCut.seams[0]?.droppedFrames === 0 && keptCut.seams[0]?.mode === "cut", "the project can keep the repeated frame");
+  const keptAbs = storage.resolveDataPath(keptCut.outputPath);
+  assert(frameCountOf(keptAbs) === 24, `keeping both frames should be 24 frames, got ${frameCountOf(keptAbs)}`);
+  assert(isRed(frameRgbAt(keptAbs, 11)) && isRed(frameRgbAt(keptAbs, 12)), "with the drop off the red frame plays twice");
+
+  storage.updateProject(seamProject.id, { dropDuplicateFrame: false });
+  storage.updateShot(shotNext.id, { dropDuplicateFrame: true });
+  const shotOverride = await stitch.stitchProject(seamProject.id);
+  assert(shotOverride.seams[0]?.droppedFrames === 1, "a shot can turn the drop back on");
+
+  storage.updateProject(seamProject.id, { dropDuplicateFrame: true, seamMode: "cut" });
+  storage.updateShot(shotNext.id, {
+    dropDuplicateFrame: null,
+    chainFrameBack: 3,
+    chainedFrameBack: 3,
+    chainedFrameRequest: 3,
+    chainedStartImagePath: blueStill,
+    chainedFromJobId: jobA.id,
+    chainFromPrevious: true,
+  });
+  storage.updateJob(jobB.id, { imagePath: blueStill, outputPath: clipBlue.rel });
+  const offsetCut = await stitch.stitchProject(seamProject.id);
+  assert(offsetCut.seams[0]?.mode === "cut" && offsetCut.seams[0]?.droppedFrames === 0, "frame back does not drop a frame");
+  assert(offsetCut.seams[0]?.note === FRAME_BACK_SEAM_NOTE, "the seam says the frames differ so nothing was dropped");
+  const offsetAbs = storage.resolveDataPath(offsetCut.outputPath);
+  assert(frameCountOf(offsetAbs) === 24, `a stepped-back cut should keep 24 frames, got ${frameCountOf(offsetAbs)}`);
+  assert(isRed(frameRgbAt(offsetAbs, 11)), "the previous take still ends on its last frame");
+  assert(isBlue(frameRgbAt(offsetAbs, 12)), "the next take starts on the earlier frame, which is not a copy of that last frame");
+
+  storage.updateProject(seamProject.id, { seamMode: "crossfade", seamFadeSec: 0.25 });
+  const offsetFade = await stitch.stitchProject(seamProject.id);
+  assert(
+    offsetFade.seams[0]?.mode === "crossfade" &&
+      offsetFade.seams[0]?.droppedFrames === 0 &&
+      offsetFade.seams[0]?.fadeSec === 0.25,
+    `a crossfade of a chained shot is unchanged, got ${offsetFade.seams[0]?.mode} drop ${offsetFade.seams[0]?.droppedFrames} fade ${offsetFade.seams[0]?.fadeSec} note ${offsetFade.seams[0]?.note ?? ""}`
+  );
+
+  storage.updateProject(seamProject.id, { seamMode: "cut", dropDuplicateFrame: true });
+  storage.updateShot(shotNext.id, { chainFromPrevious: false, seamMode: null });
+  storage.updateJob(jobB.id, { imagePath: exactStill, outputPath: clipRed.rel });
+  const unchainedCut = await stitch.stitchProject(seamProject.id);
+  assert(unchainedCut.seams[0]?.mode === "cut" && unchainedCut.seams[0]?.droppedFrames === 0, "an unchained hard cut does not drop a frame");
+  const unchainedAbs = storage.resolveDataPath(unchainedCut.outputPath);
+  assert(frameCountOf(unchainedAbs) === 24, `an unchained cut should keep 24 frames, got ${frameCountOf(unchainedAbs)}`);
+  assert(
+    isRed(frameRgbAt(unchainedAbs, 11)) && isRed(frameRgbAt(unchainedAbs, 12)),
+    "matching pixels are not enough; an unchained join keeps both frames"
+  );
 
   console.log("provider checks ok");
   console.log(dataDir);
