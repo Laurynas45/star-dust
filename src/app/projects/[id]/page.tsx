@@ -20,6 +20,7 @@ import {
   AppSettings,
   CHAIN_FRAME_BACK_CHOICES,
   CHAIN_HONESTY,
+  CHAIN_TRIM_START_CHOICES,
   ComfyWorkflowId,
   CostEstimate,
   FRAME_BACK_HONESTY,
@@ -36,6 +37,7 @@ import {
   SeamMode,
   Shot,
   chainFramePhrase,
+  chainTrimChoiceLabel,
   effectivePrompt,
   presetById,
   styleBaseText,
@@ -434,6 +436,7 @@ export default function ProjectStudioPage() {
     comfyLowMemory?: boolean | null;
     seamMode?: SeamMode;
     seamFadeSec?: number;
+    chainTrimStartFrames?: number;
     dropDuplicateFrame?: boolean;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
@@ -456,6 +459,7 @@ export default function ProjectStudioPage() {
       comfyLowMemory?: boolean | null;
       chainFromPrevious?: boolean;
       chainFrameBack?: number;
+      chainTrimStartFrames?: number | null;
       dropDuplicateFrame?: boolean | null;
       seamMode?: SeamMode | null;
       seamFadeSec?: number | null;
@@ -556,7 +560,7 @@ export default function ProjectStudioPage() {
           <h2 className="mt-1 text-lg font-medium text-white">One mp4, same editor</h2>
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
             ffmpeg joins the take you chose. Hard cut, or a short crossfade. A chained hard cut
-            drops one repeated frame. The stitch is not a new model.
+            can trim a few start frames of the next clip. The stitch is not a new model.
           </p>
           <button
             type="button"
@@ -604,21 +608,24 @@ export default function ProjectStudioPage() {
             </select>
           </label>
         </div>
-        <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
-          <input
-            type="checkbox"
-            className="mt-0.5"
-            checked={project.dropDuplicateFrame}
-            onChange={(e) => void saveProjectPatch({ dropDuplicateFrame: e.target.checked })}
-          />
-          <span>
-            <span className="text-white">Drop the repeated frame on a chained hard cut.</span>{" "}
-            {SEAM_FRAME_HONESTY}
-          </span>
+        <label className="block max-w-md text-xs text-[var(--muted)]">
+          Start frames trimmed on a chained hard cut
+          <select
+            className="input mt-1"
+            value={String(project.chainTrimStartFrames)}
+            onChange={(e) => void saveProjectPatch({ chainTrimStartFrames: Number(e.target.value) })}
+          >
+            {CHAIN_TRIM_START_CHOICES.map((frames) => (
+              <option key={frames} value={frames}>
+                {chainTrimChoiceLabel(frames)}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1 block leading-relaxed">{SEAM_FRAME_HONESTY}</span>
         </label>
         <p className="text-[11px] leading-relaxed text-[var(--muted)]">
-          A shot can override the join that leads into it, and whether that join drops the repeated
-          frame. The first shot has no join.
+          A shot can override the join that leads into it, and how many start frames that chained
+          hard cut trims. The first shot has no join.
         </p>
       </section>
 
@@ -628,7 +635,7 @@ export default function ProjectStudioPage() {
           <h2 className="mt-1 text-lg font-medium text-white">Watch the whole edit for $0</h2>
           <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
             Renders every shot with Mock and stitches them. Camera motion on your stills, not AI
-            motion. Last-frame chaining, and the repeated-frame drop, apply when you render a take
+            motion. Last-frame chaining, and the start-frame trim, apply when you render a take
             and export the stitch, not in this preview. Preview clips do not replace or count as
             the shot&apos;s takes.
           </p>
@@ -1024,8 +1031,10 @@ export default function ProjectStudioPage() {
               const frameStale =
                 Boolean(shot.chainedStartImagePath) && (shot.chainedFrameRequest ?? 0) !== chosenBack;
               const joinMode = shot.seamMode ?? project.seamMode;
-              const dropOn =
-                shot.dropDuplicateFrame == null ? project.dropDuplicateFrame : shot.dropDuplicateFrame;
+              const trimFrames =
+                shot.chainTrimStartFrames == null
+                  ? project.chainTrimStartFrames
+                  : shot.chainTrimStartFrames;
               const chainLine = !shot.chainFromPrevious || !prev
                 ? null
                 : frameStale
@@ -1143,10 +1152,10 @@ export default function ProjectStudioPage() {
                               </select>
                               <span className="mt-1 block leading-relaxed">{FRAME_BACK_HONESTY}</span>
                             </label>
-                            {chosenBack > 0 && joinMode !== "crossfade" && dropOn && (
+                            {chosenBack > 0 && joinMode !== "crossfade" && trimFrames > 0 && (
                               <p className="text-[11px] leading-relaxed text-[var(--muted)]">
-                                This shot starts before the last frame, so the hard cut does not drop a
-                                frame. The previous take still plays to the end.
+                                This shot starts before the last frame, so this hard cut trims nothing.
+                                The previous take still plays to the end.
                               </p>
                             )}
                             <div className="flex flex-wrap items-center gap-2">
@@ -1209,28 +1218,32 @@ export default function ProjectStudioPage() {
                             </label>
                           )}
                           <label className="text-[11px] text-[var(--muted)]">
-                            Repeated frame on this hard cut
+                            Start frames trimmed on this hard cut
                             <select
                               className="input mt-1"
                               value={
-                                shot.dropDuplicateFrame == null ? "" : shot.dropDuplicateFrame ? "1" : "0"
+                                shot.chainTrimStartFrames == null ? "" : String(shot.chainTrimStartFrames)
                               }
                               onChange={(e) => {
                                 const value = e.target.value;
                                 void saveShotPatch(shot.id, {
-                                  dropDuplicateFrame: value === "" ? null : value === "1",
+                                  chainTrimStartFrames: value === "" ? null : Number(value),
                                 });
                               }}
                             >
                               <option value="">
-                                Project default ({project.dropDuplicateFrame ? "drop it" : "keep both"})
+                                Project default ({chainTrimChoiceLabel(project.chainTrimStartFrames)})
                               </option>
-                              <option value="1">Drop the repeated frame</option>
-                              <option value="0">Keep both frames</option>
+                              {CHAIN_TRIM_START_CHOICES.map((frames) => (
+                                <option key={frames} value={frames}>
+                                  {chainTrimChoiceLabel(frames)}
+                                </option>
+                              ))}
                             </select>
                             <span className="mt-1 block leading-relaxed">
-                              Only a chained hard cut that starts on the exact last frame. A crossfade
-                              is unchanged.
+                              Only a chained hard cut that starts on the exact last frame. A crossfade,
+                              an unchained shot, and a stepped-back start are unchanged. This softens a
+                              re-enacted freeze. It does not lock a character or keep identity continuous.
                             </span>
                           </label>
                         </div>

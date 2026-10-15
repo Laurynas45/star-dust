@@ -2129,6 +2129,11 @@ async function main() {
     FRAME_BACK_HONESTY,
     DROPPED_FRAME_NOTE,
     FRAME_BACK_SEAM_NOTE,
+    clampChainTrimStartFrames,
+    chainTrimFromDropDuplicate,
+    projectChainTrimFromStored,
+    shotChainTrimFromStored,
+    startFrameTrimNote,
   } = await import("../src/lib/types");
   assert(clampChainFrameBack(0) === 0, "0 stays the last frame");
   assert(clampChainFrameBack(-4) === 0, "negative frame back clamps to 0");
@@ -2163,10 +2168,31 @@ async function main() {
     takeUsedChainedStill: true,
   };
   assert(stitch.dropStartFramesForJoin(exactJoin) === 1, "chained exact hard cut drops one frame");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 1 }) === 1, "default trim 1 drops one start frame");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 3 }) === 3, "trim 3 drops 3 start frames");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 0 }) === 0, "trim 0 keeps every frame");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 4 }) === 4, "trim 4 is the far end of the range");
+  assert(stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 9 }) === 4, "trim past 4 clamps to 4");
   assert(stitch.dropStartFramesForJoin({ ...exactJoin, seamMode: "crossfade" }) === 0, "crossfade does not drop");
+  assert(
+    stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 3, seamMode: "crossfade" }) === 0,
+    "crossfade ignores trim"
+  );
   assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainFromPrevious: false }) === 0, "unchained does not drop");
+  assert(
+    stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 3, chainFromPrevious: false }) === 0,
+    "unchained ignores trim"
+  );
   assert(stitch.dropStartFramesForJoin({ ...exactJoin, dropEnabled: false }) === 0, "turning the drop off keeps both frames");
+  assert(
+    stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 3, dropEnabled: false }) === 3,
+    "a numeric trim wins over the old boolean"
+  );
   assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainedFrameBack: 4 }) === 0, "frame back 4 is not an exact duplicate");
+  assert(
+    stitch.dropStartFramesForJoin({ ...exactJoin, trimFrames: 3, chainedFrameBack: 2 }) === 0,
+    "a stepped-back chain ignores trim"
+  );
   assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainedFrameBack: null }) === 1, "an older last-frame extract still drops");
   assert(stitch.dropStartFramesForJoin({ ...exactJoin, chainedFromJobId: "other" }) === 0, "a different previous take is not dropped");
   assert(
@@ -2175,6 +2201,10 @@ async function main() {
   );
   assert(stitch.applyDropLimit(1, 1) === 0, "a single frame is not dropped");
   assert(stitch.applyDropLimit(1, 2) === 1, "two frames can lose the first");
+  assert(stitch.applyDropLimit(3, 3) === 0, "trim cannot empty a 3-frame clip");
+  assert(stitch.applyDropLimit(3, 4) === 3, "a 4-frame clip can lose 3 start frames");
+  assert(stitch.applyDropLimit(4, 12) === 4, "trim of 4 stays 4 when the clip is longer");
+  assert(stitch.applyDropLimit(0, 12) === 0, "trim 0 keeps the clip");
   assert(
     stitch.duplicateFrameDropEnabled({ dropDuplicateFrame: true }, { dropDuplicateFrame: null }) === true,
     "a shot with no override inherits the project drop"
@@ -2191,6 +2221,47 @@ async function main() {
     stitch.duplicateFrameDropEnabled({ dropDuplicateFrame: false }, {}) === false,
     "a shot inherits the project when the drop is off"
   );
+  assert(
+    stitch.resolveChainTrimStartFrames({ dropDuplicateFrame: true }, {}) === 1,
+    "old project true migrates to trim 1"
+  );
+  assert(
+    stitch.resolveChainTrimStartFrames({ dropDuplicateFrame: false }, {}) === 0,
+    "old project false migrates to trim 0"
+  );
+  assert(
+    stitch.resolveChainTrimStartFrames({ chainTrimStartFrames: 3 }, { chainTrimStartFrames: null }) === 3,
+    "a shot with no override inherits trim 3"
+  );
+  assert(
+    stitch.resolveChainTrimStartFrames({ chainTrimStartFrames: 3 }, { chainTrimStartFrames: 0 }) === 0,
+    "a shot can keep every frame"
+  );
+  assert(
+    stitch.resolveChainTrimStartFrames({ chainTrimStartFrames: 0 }, { dropDuplicateFrame: true }) === 1,
+    "an old shot boolean true still means trim 1"
+  );
+  assert(
+    stitch.resolveChainTrimStartFrames({ chainTrimStartFrames: 1 }, { dropDuplicateFrame: false }) === 0,
+    "an old shot boolean false still means trim 0"
+  );
+  assert(
+    stitch.resolveChainTrimStartFrames({ dropDuplicateFrame: false, chainTrimStartFrames: 4 }, {}) === 4,
+    "numeric project trim wins over the old boolean"
+  );
+  assert(chainTrimFromDropDuplicate(true) === 1 && chainTrimFromDropDuplicate(false) === 0, "boolean migration is 1 or 0");
+  assert(projectChainTrimFromStored(null, 0) === 0, "a project row with only drop false reads as trim 0");
+  assert(projectChainTrimFromStored(null, 1) === 1, "a project row with only drop true reads as trim 1");
+  assert(projectChainTrimFromStored(undefined, false) === 0, "a false boolean still reads when the trim column is missing");
+  assert(projectChainTrimFromStored(3, 0) === 3, "a stored trim of 3 wins over the old boolean");
+  assert(shotChainTrimFromStored(null, null) == null, "a shot row with both empty inherits");
+  assert(
+    shotChainTrimFromStored(null, 0) === 0 && shotChainTrimFromStored(null, 1) === 1,
+    "a shot row still reads the old boolean"
+  );
+  assert(shotChainTrimFromStored(2, 0) === 2, "a stored shot trim wins over the old boolean");
+  assert(clampChainTrimStartFrames(5) === 4 && clampChainTrimStartFrames(-2) === 0, "trim clamps to 0–4");
+  assert(clampChainTrimStartFrames(Number.NaN) === 1, "a bad trim falls back to 1");
 
   const plainFilter = stitch.hardCutFilterComplex([0, 0]);
   assert(!plainFilter.includes("trim="), "unchained hard cut filter has no trim");
@@ -2202,6 +2273,8 @@ async function main() {
   const ffmpegArgs = stitch.hardCutArgs(["a.mp4", "b.mp4"], "out.mp4", [0, 1]);
   assert(ffmpegArgs[0] === "-y" && ffmpegArgs.includes("a.mp4") && ffmpegArgs.includes("b.mp4"), "ffmpeg args name the clips");
   assert(ffmpegArgs[ffmpegArgs.indexOf("-filter_complex") + 1] === stitch.hardCutFilterComplex([0, 1]), "ffmpeg args carry the drop filter");
+  assert(stitch.hardCutFilterComplex([0, 3]).includes("trim=start_frame=3"), "a trim of 3 names start_frame=3");
+  assert(stitch.pairCutFilter(3).includes("trim=start_frame=3"), "a pair cut can trim three start frames");
   assert(stitch.pairCutFilter(0) === "[0:v][1:v]concat=n=2:v=1:a=0[v]", "a cut with the drop off matches the old concat");
   assert(
     stitch.pairCutFilter(1) === "[1:v]trim=start_frame=1,setpts=PTS-STARTPTS[b];[0:v][b]concat=n=2:v=1:a=0[v]",
@@ -2226,9 +2299,21 @@ async function main() {
   assert(/exact last frame/i.test(FRAME_BACK_HONESTY), "frame-back copy says the drop is only for the exact last frame");
   assert(/leaves the previous take whole/i.test(FRAME_BACK_HONESTY), "frame-back copy says the previous take is not trimmed");
   assert(/nothing was dropped/i.test(FRAME_BACK_SEAM_NOTE), "the seam note says a stepped-back join drops nothing");
+  assert(/trim 0.4 frames/i.test(SEAM_FRAME_HONESTY), "copy names the 0–4 trim");
+  assert(/default is 1/i.test(SEAM_FRAME_HONESTY), "copy says the default trim is 1");
+  assert(/re-enact/i.test(SEAM_FRAME_HONESTY), "copy says the trim softens a re-enacted freeze");
+  assert(/identity continuous/i.test(SEAM_FRAME_HONESTY), "copy says identity is not kept continuous");
+  assert(/stepping back/i.test(SEAM_FRAME_HONESTY), "copy says a stepped-back start is left as-is");
+  assert(startFrameTrimNote(1) === DROPPED_FRAME_NOTE, "a one-frame trim keeps the repeated-frame note");
+  assert(/Trimmed 3 start frames/i.test(startFrameTrimNote(3)), "a trim of 3 is named in the seam note");
+  assert(
+    !/character lock|will fix|fixes identity/i.test(startFrameTrimNote(3)),
+    "the longer trim note does not claim a lock or a fix"
+  );
 
   const seamProject = storage.createProject("Seam frames");
   assert(storage.getProject(seamProject.id)?.dropDuplicateFrame === true, "a new project drops the repeated frame");
+  assert(storage.getProject(seamProject.id)?.chainTrimStartFrames === 1, "a new project trims 1 start frame");
   const still = storage.saveUpload(seamProject.id, "still.png", solidPng(dataDir, "seam-still.png", "gray"));
   const shotPrev = storage.createShot({
     projectId: seamProject.id,
@@ -2252,11 +2337,24 @@ async function main() {
   assert(storage.getShot(shotNext.id)?.chainFrameBack === 0, "stored negative frame back clamps to 0");
   storage.updateProject(seamProject.id, { dropDuplicateFrame: false });
   assert(storage.getProject(seamProject.id)?.dropDuplicateFrame === false, "the project can keep both frames");
+  assert(storage.getProject(seamProject.id)?.chainTrimStartFrames === 0, "writing the old false boolean stores trim 0");
   storage.updateShot(shotNext.id, { dropDuplicateFrame: false });
   assert(storage.getShot(shotNext.id)?.dropDuplicateFrame === false, "a shot can keep both frames");
+  assert(storage.getShot(shotNext.id)?.chainTrimStartFrames === 0, "writing the old shot false boolean stores trim 0");
   storage.updateShot(shotNext.id, { dropDuplicateFrame: null });
   assert(storage.getShot(shotNext.id)?.dropDuplicateFrame == null, "a shot can inherit the project again");
+  assert(storage.getShot(shotNext.id)?.chainTrimStartFrames == null, "clearing the old shot boolean inherits again");
+  storage.updateProject(seamProject.id, { chainTrimStartFrames: 3 });
+  assert(storage.getProject(seamProject.id)?.chainTrimStartFrames === 3, "the project can trim 3 start frames");
+  assert(storage.getProject(seamProject.id)?.dropDuplicateFrame === true, "trim above 0 still reads as the old drop-on flag");
+  storage.updateProject(seamProject.id, { chainTrimStartFrames: 9 });
+  assert(storage.getProject(seamProject.id)?.chainTrimStartFrames === 4, "stored project trim clamps to 4");
+  storage.updateShot(shotNext.id, { chainTrimStartFrames: 2 });
+  assert(storage.getShot(shotNext.id)?.chainTrimStartFrames === 2, "a shot can trim 2 start frames");
+  storage.updateShot(shotNext.id, { chainTrimStartFrames: null });
+  assert(storage.getShot(shotNext.id)?.chainTrimStartFrames == null, "a shot can inherit the project trim again");
   storage.updateProject(seamProject.id, { dropDuplicateFrame: true, seamMode: "cut" });
+  assert(storage.getProject(seamProject.id)?.chainTrimStartFrames === 1, "writing the old true boolean stores trim 1");
 
   const clipA = storage.absoluteOutputPath(seamProject.id, "clip-a.mp4");
   concatColors(clipA.abs, [
@@ -2337,7 +2435,7 @@ async function main() {
     stitch.dropStartFramesForJoin({
       seamMode: "cut",
       chainFromPrevious: true,
-      dropEnabled: true,
+      trimFrames: 4,
       previousJobId: jobA.id,
       chainedFromJobId: farShot?.chainedFromJobId,
       chainedFrameBack: farShot?.chainedFrameBack,
@@ -2396,6 +2494,23 @@ async function main() {
     `the next frame is the second frame of the next clip, not a second red; nearby ${JSON.stringify(around)}`
   );
 
+  storage.updateProject(seamProject.id, { chainTrimStartFrames: 3 });
+  const trim3Cut = await stitch.stitchProject(seamProject.id);
+  assert(trim3Cut.seams[0]?.mode === "cut" && trim3Cut.seams[0]?.droppedFrames === 3, "trim 3 drops 3 start frames");
+  assert(trim3Cut.seams[0]?.note === startFrameTrimNote(3), "the seam note names the three-frame trim");
+  const trim3Abs = storage.resolveDataPath(trim3Cut.outputPath);
+  assert(frameCountOf(trim3Abs) === 21, `trim 3 should leave 21 frames, got ${frameCountOf(trim3Abs)}`);
+  assert(isRed(frameRgbAt(trim3Abs, 11)), "trim 3 still keeps the previous take's last frame");
+  assert(
+    greenish(frameRgbAt(trim3Abs, 12)) && !isRed(frameRgbAt(trim3Abs, 12)),
+    "trim 3 removes the re-enacted red frame and the next two frames"
+  );
+
+  storage.updateProject(seamProject.id, { chainTrimStartFrames: 0 });
+  const trim0Cut = await stitch.stitchProject(seamProject.id);
+  assert(trim0Cut.seams[0]?.droppedFrames === 0 && trim0Cut.seams[0]?.mode === "cut", "trim 0 keeps every frame");
+  assert(frameCountOf(storage.resolveDataPath(trim0Cut.outputPath)) === 24, "trim 0 stitch keeps 24 frames");
+
   storage.updateProject(seamProject.id, { dropDuplicateFrame: false });
   const keptCut = await stitch.stitchProject(seamProject.id);
   assert(keptCut.seams[0]?.droppedFrames === 0 && keptCut.seams[0]?.mode === "cut", "the project can keep the repeated frame");
@@ -2403,12 +2518,16 @@ async function main() {
   assert(frameCountOf(keptAbs) === 24, `keeping both frames should be 24 frames, got ${frameCountOf(keptAbs)}`);
   assert(isRed(frameRgbAt(keptAbs, 11)) && isRed(frameRgbAt(keptAbs, 12)), "with the drop off the red frame plays twice");
 
-  storage.updateProject(seamProject.id, { dropDuplicateFrame: false });
-  storage.updateShot(shotNext.id, { dropDuplicateFrame: true });
+  storage.updateProject(seamProject.id, { chainTrimStartFrames: 0 });
+  storage.updateShot(shotNext.id, { chainTrimStartFrames: 3 });
   const shotOverride = await stitch.stitchProject(seamProject.id);
-  assert(shotOverride.seams[0]?.droppedFrames === 1, "a shot can turn the drop back on");
+  assert(shotOverride.seams[0]?.droppedFrames === 3, "a shot can override the project and trim 3");
+  assert(
+    frameCountOf(storage.resolveDataPath(shotOverride.outputPath)) === 21,
+    "a shot trim of 3 leaves 21 frames"
+  );
 
-  storage.updateProject(seamProject.id, { dropDuplicateFrame: true, seamMode: "cut" });
+  storage.updateProject(seamProject.id, { chainTrimStartFrames: 3, seamMode: "cut" });
   storage.updateShot(shotNext.id, {
     dropDuplicateFrame: null,
     chainFrameBack: 3,
@@ -2436,8 +2555,8 @@ async function main() {
     `a crossfade of a chained shot is unchanged, got ${offsetFade.seams[0]?.mode} drop ${offsetFade.seams[0]?.droppedFrames} fade ${offsetFade.seams[0]?.fadeSec} note ${offsetFade.seams[0]?.note ?? ""}`
   );
 
-  storage.updateProject(seamProject.id, { seamMode: "cut", dropDuplicateFrame: true });
-  storage.updateShot(shotNext.id, { chainFromPrevious: false, seamMode: null });
+  storage.updateProject(seamProject.id, { seamMode: "cut", chainTrimStartFrames: 4 });
+  storage.updateShot(shotNext.id, { chainFromPrevious: false, seamMode: null, chainTrimStartFrames: null });
   storage.updateJob(jobB.id, { imagePath: exactStill, outputPath: clipRed.rel });
   const unchainedCut = await stitch.stitchProject(seamProject.id);
   assert(unchainedCut.seams[0]?.mode === "cut" && unchainedCut.seams[0]?.droppedFrames === 0, "an unchained hard cut does not drop a frame");
@@ -2447,6 +2566,113 @@ async function main() {
     isRed(frameRgbAt(unchainedAbs, 11)) && isRed(frameRgbAt(unchainedAbs, 12)),
     "matching pixels are not enough; an unchained join keeps both frames"
   );
+
+  storage.updateProject(seamProject.id, { seamMode: "crossfade", seamFadeSec: 0.25, chainTrimStartFrames: 4 });
+  storage.updateShot(shotNext.id, {
+    chainFromPrevious: true,
+    seamMode: null,
+    chainFrameBack: 0,
+    chainedFrameBack: 0,
+    chainedFrameRequest: 0,
+    chainedStartImagePath: exactStill,
+    chainedFromJobId: jobA.id,
+    chainTrimStartFrames: null,
+  });
+  storage.updateJob(jobB.id, { imagePath: exactStill, outputPath: clipRed.rel });
+  const fadeIgnoresTrim = await stitch.stitchProject(seamProject.id);
+  assert(
+    fadeIgnoresTrim.seams[0]?.mode === "crossfade" && fadeIgnoresTrim.seams[0]?.droppedFrames === 0,
+    `a crossfade ignores a trim of 4, got ${fadeIgnoresTrim.seams[0]?.mode} drop ${fadeIgnoresTrim.seams[0]?.droppedFrames}`
+  );
+
+  const clipShort = storage.absoluteOutputPath(seamProject.id, "clip-short.mp4");
+  concatColors(clipShort.abs, [
+    { color: "red", frames: 1 },
+    { color: "green", frames: 1 },
+  ]);
+  storage.updateProject(seamProject.id, { seamMode: "cut", chainTrimStartFrames: 4 });
+  storage.updateJob(jobB.id, { imagePath: exactStill, outputPath: clipShort.rel });
+  const cappedTrim = await stitch.stitchProject(seamProject.id);
+  assert(cappedTrim.seams[0]?.mode === "cut" && cappedTrim.seams[0]?.droppedFrames === 0, "trim is capped so a short clip is not emptied");
+  assert(/too short/i.test(cappedTrim.seams[0]?.note || ""), "the seam says the clip was too short to trim");
+  const cappedAbs = storage.resolveDataPath(cappedTrim.outputPath);
+  assert(frameCountOf(cappedAbs) === 14, `a capped trim should keep 14 frames, got ${frameCountOf(cappedAbs)}`);
+
+  const liveDb = storage.getDb();
+  liveDb.prepare("UPDATE shots SET chain_trim_start_frames = NULL, drop_duplicate_frame = 0 WHERE id = ?").run(shotNext.id);
+  assert(storage.getShot(shotNext.id)?.chainTrimStartFrames === 0, "a null trim column still reads drop false as 0");
+  liveDb.prepare("UPDATE shots SET chain_trim_start_frames = NULL, drop_duplicate_frame = 1 WHERE id = ?").run(shotNext.id);
+  assert(storage.getShot(shotNext.id)?.chainTrimStartFrames === 1, "a null trim column still reads drop true as 1");
+  liveDb.prepare("UPDATE shots SET chain_trim_start_frames = NULL, drop_duplicate_frame = NULL WHERE id = ?").run(shotNext.id);
+  assert(storage.getShot(shotNext.id)?.chainTrimStartFrames == null, "both empty columns still inherit");
+
+  const savedData = process.env.STAR_DUST_DATA;
+  const holder = globalThis as typeof globalThis & { starDustDb?: { close: () => void } };
+  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), "star-dust-legacy-"));
+  try {
+    holder.starDustDb?.close();
+    delete holder.starDustDb;
+    const Database = (await import("better-sqlite3")).default;
+    const legacy = new Database(path.join(legacyDir, "star-dust.sqlite"));
+    legacy.exec(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        character_sheet_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        seam_mode TEXT NOT NULL DEFAULT 'cut',
+        seam_fade_sec REAL NOT NULL DEFAULT 0.5,
+        style_base TEXT NOT NULL DEFAULT '',
+        drop_duplicate_frame INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE shots (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        prompt TEXT NOT NULL,
+        preset_id TEXT NOT NULL,
+        duration_sec REAL NOT NULL,
+        start_image_path TEXT,
+        end_image_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        chain_from_previous INTEGER NOT NULL DEFAULT 0,
+        drop_duplicate_frame INTEGER
+      );
+    `);
+    const stamp = "2020-01-01T00:00:00.000Z";
+    legacy.prepare(
+      `INSERT INTO projects (id, name, description, created_at, updated_at, drop_duplicate_frame)
+       VALUES (?, ?, '', ?, ?, ?)`
+    ).run("legacy-off", "Legacy off", stamp, stamp, 0);
+    legacy.prepare(
+      `INSERT INTO projects (id, name, description, created_at, updated_at, drop_duplicate_frame)
+       VALUES (?, ?, '', ?, ?, ?)`
+    ).run("legacy-on", "Legacy on", stamp, stamp, 1);
+    const insertShot = legacy.prepare(
+      `INSERT INTO shots (
+         id, project_id, position, prompt, preset_id, duration_sec, created_at, updated_at, drop_duplicate_frame
+       ) VALUES (?, 'legacy-off', ?, ?, 'slow-zoom-in', 1, ?, ?, ?)`
+    );
+    insertShot.run("shot-off", 1, "Keep.", stamp, stamp, 0);
+    insertShot.run("shot-on", 2, "Drop.", stamp, stamp, 1);
+    insertShot.run("shot-inherit", 3, "Inherit.", stamp, stamp, null);
+    legacy.close();
+    process.env.STAR_DUST_DATA = legacyDir;
+    const off = storage.getProject("legacy-off");
+    const on = storage.getProject("legacy-on");
+    assert(off?.chainTrimStartFrames === 0 && off.dropDuplicateFrame === false, "migrating drop false stores trim 0");
+    assert(on?.chainTrimStartFrames === 1 && on.dropDuplicateFrame === true, "migrating drop true stores trim 1");
+    assert(storage.getShot("shot-off")?.chainTrimStartFrames === 0, "migrating a shot drop false stores trim 0");
+    assert(storage.getShot("shot-on")?.chainTrimStartFrames === 1, "migrating a shot drop true stores trim 1");
+    assert(storage.getShot("shot-inherit")?.chainTrimStartFrames == null, "migrating a null shot flag still inherits");
+  } finally {
+    holder.starDustDb?.close();
+    delete holder.starDustDb;
+    process.env.STAR_DUST_DATA = savedData;
+  }
 
   console.log("provider checks ok");
   console.log(dataDir);

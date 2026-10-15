@@ -18,9 +18,14 @@ import {
   SAMPLE_PROJECT_ID,
   SeamMode,
   Shot,
+  chainTrimFromDropDuplicate,
   clampChainFrameBack,
+  clampChainTrimStartFrames,
   clampSeamFade,
+  DEFAULT_CHAIN_TRIM_START_FRAMES,
   presetById,
+  projectChainTrimFromStored,
+  shotChainTrimFromStored,
 } from "./types";
 
 type DB = Database.Database;
@@ -70,7 +75,8 @@ function openDatabase(): DB {
       seam_mode TEXT NOT NULL DEFAULT 'cut',
       seam_fade_sec REAL NOT NULL DEFAULT 0.5,
       style_base TEXT NOT NULL DEFAULT '',
-      drop_duplicate_frame INTEGER NOT NULL DEFAULT 1
+      drop_duplicate_frame INTEGER NOT NULL DEFAULT 1,
+      chain_trim_start_frames INTEGER NOT NULL DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -94,7 +100,8 @@ function openDatabase(): DB {
       chain_frame_back INTEGER NOT NULL DEFAULT 0,
       chained_frame_back INTEGER,
       chained_frame_request INTEGER,
-      drop_duplicate_frame INTEGER
+      drop_duplicate_frame INTEGER,
+      chain_trim_start_frames INTEGER
     );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -254,6 +261,22 @@ function migrate(db: DB) {
   if (!hasColumn(db, "shots", "drop_duplicate_frame")) {
     db.exec("ALTER TABLE shots ADD COLUMN drop_duplicate_frame INTEGER");
   }
+  if (!hasColumn(db, "projects", "chain_trim_start_frames")) {
+    db.exec("ALTER TABLE projects ADD COLUMN chain_trim_start_frames INTEGER NOT NULL DEFAULT 1");
+    db.exec(
+      "UPDATE projects SET chain_trim_start_frames = CASE WHEN drop_duplicate_frame = 0 THEN 0 ELSE 1 END"
+    );
+  }
+  if (!hasColumn(db, "shots", "chain_trim_start_frames")) {
+    db.exec("ALTER TABLE shots ADD COLUMN chain_trim_start_frames INTEGER");
+    db.exec(
+      `UPDATE shots SET chain_trim_start_frames = CASE
+         WHEN drop_duplicate_frame IS NULL THEN NULL
+         WHEN drop_duplicate_frame = 0 THEN 0
+         ELSE 1
+       END`
+    );
+  }
 }
 
 function seedSample(db: DB) {
@@ -340,8 +363,51 @@ function mapProject(row: Record<string, unknown>): Project {
     seamFadeSec:
       row.seam_fade_sec == null ? DEFAULT_SEAM_FADE_SEC : clampSeamFade(Number(row.seam_fade_sec)),
     styleBase: String(row.style_base ?? ""),
-    dropDuplicateFrame: row.drop_duplicate_frame == null ? true : Number(row.drop_duplicate_frame) !== 0,
+    ...trimFields(
+      projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
+    ),
   };
+}
+
+function trimFields(trim: number): { chainTrimStartFrames: number; dropDuplicateFrame: boolean };
+function trimFields(trim: number | null): {
+  chainTrimStartFrames: number | null;
+  dropDuplicateFrame: boolean | null;
+};
+function trimFields(trim: number | null): {
+  chainTrimStartFrames: number | null;
+  dropDuplicateFrame: boolean | null;
+} {
+  return {
+    chainTrimStartFrames: trim,
+    dropDuplicateFrame: trim == null ? null : trim > 0,
+  };
+}
+
+function nextProjectTrim(
+  current: Project,
+  patch: { chainTrimStartFrames?: number; dropDuplicateFrame?: boolean }
+): number {
+  if (patch.chainTrimStartFrames !== undefined) {
+    return clampChainTrimStartFrames(patch.chainTrimStartFrames);
+  }
+  if (patch.dropDuplicateFrame !== undefined) return chainTrimFromDropDuplicate(patch.dropDuplicateFrame);
+  return current.chainTrimStartFrames;
+}
+
+function nextShotTrim(
+  current: Shot,
+  patch: { chainTrimStartFrames?: number | null; dropDuplicateFrame?: boolean | null }
+): number | null {
+  if (patch.chainTrimStartFrames !== undefined) {
+    return patch.chainTrimStartFrames == null
+      ? null
+      : clampChainTrimStartFrames(patch.chainTrimStartFrames);
+  }
+  if (patch.dropDuplicateFrame !== undefined) {
+    return patch.dropDuplicateFrame == null ? null : chainTrimFromDropDuplicate(patch.dropDuplicateFrame);
+  }
+  return current.chainTrimStartFrames ?? null;
 }
 
 function mapShot(row: Record<string, unknown>): Shot {
@@ -367,7 +433,7 @@ function mapShot(row: Record<string, unknown>): Shot {
       row.chained_frame_request == null
         ? undefined
         : clampChainFrameBack(Number(row.chained_frame_request)),
-    dropDuplicateFrame: parseOptionalFlag(row.drop_duplicate_frame),
+    ...trimFields(shotChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)),
     seamMode: parseSeamMode(row.seam_mode),
     seamFadeSec: row.seam_fade_sec == null ? null : clampSeamFade(Number(row.seam_fade_sec)),
     createdAt: String(row.created_at),
@@ -451,6 +517,7 @@ export function createProject(name: string, description = ""): Project {
     seamMode: "cut",
     seamFadeSec: DEFAULT_SEAM_FADE_SEC,
     styleBase: "",
+    chainTrimStartFrames: DEFAULT_CHAIN_TRIM_START_FRAMES,
     dropDuplicateFrame: true,
   };
   getDb()
@@ -476,6 +543,7 @@ export function updateProject(
       | "seamMode"
       | "seamFadeSec"
       | "styleBase"
+      | "chainTrimStartFrames"
       | "dropDuplicateFrame"
     >
   > & {
@@ -500,8 +568,7 @@ export function updateProject(
     seamFadeSec:
       patch.seamFadeSec === undefined ? current.seamFadeSec : clampSeamFade(patch.seamFadeSec),
     styleBase: patch.styleBase === undefined ? current.styleBase : patch.styleBase.trim(),
-    dropDuplicateFrame:
-      patch.dropDuplicateFrame === undefined ? current.dropDuplicateFrame : patch.dropDuplicateFrame,
+    chainTrimStartFrames: nextProjectTrim(current, patch),
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -509,7 +576,7 @@ export function updateProject(
       `UPDATE projects
        SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
            comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?,
-           style_base = ?, drop_duplicate_frame = ?
+           style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?
        WHERE id = ?`
     )
     .run(
@@ -522,7 +589,8 @@ export function updateProject(
       next.seamMode,
       next.seamFadeSec,
       next.styleBase,
-      next.dropDuplicateFrame ? 1 : 0,
+      next.chainTrimStartFrames > 0 ? 1 : 0,
+      next.chainTrimStartFrames,
       id
     );
   return getProject(id);
@@ -646,6 +714,7 @@ export function updateShot(
       | "chainedFromJobId"
       | "chainedFrameBack"
       | "chainedFrameRequest"
+      | "chainTrimStartFrames"
       | "dropDuplicateFrame"
       | "seamMode"
       | "seamFadeSec"
@@ -694,10 +763,7 @@ export function updateShot(
         : patch.chainedFrameRequest == null
           ? null
           : clampChainFrameBack(patch.chainedFrameRequest),
-    dropDuplicateFrame:
-      patch.dropDuplicateFrame === undefined
-        ? current.dropDuplicateFrame ?? null
-        : patch.dropDuplicateFrame,
+    chainTrimStartFrames: nextShotTrim(current, patch),
     seamMode: patch.seamMode === undefined ? current.seamMode ?? null : patch.seamMode,
     seamFadeSec:
       patch.seamFadeSec === undefined
@@ -715,7 +781,7 @@ export function updateShot(
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
            seam_mode = ?, seam_fade_sec = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
-           updated_at = ?
+           chain_trim_start_frames = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -734,7 +800,8 @@ export function updateShot(
       next.chainFrameBack,
       next.chainedFrameBack,
       next.chainedFrameRequest,
-      next.dropDuplicateFrame == null ? null : next.dropDuplicateFrame ? 1 : 0,
+      next.chainTrimStartFrames == null ? null : next.chainTrimStartFrames > 0 ? 1 : 0,
+      next.chainTrimStartFrames,
       next.updatedAt,
       id
     );

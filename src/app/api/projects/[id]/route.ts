@@ -8,7 +8,14 @@ import {
   updateProject,
 } from "@/lib/storage";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
-import { ComfyWorkflowId, SeamMode, clampSeamFade, effectivePrompt, isComfyWorkflowId } from "@/lib/types";
+import {
+  ComfyWorkflowId,
+  SeamMode,
+  clampChainTrimStartFrames,
+  clampSeamFade,
+  effectivePrompt,
+  isComfyWorkflowId,
+} from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
@@ -69,6 +76,10 @@ export async function PATCH(
     seamMode: seamModeField(body.seamMode),
     seamFadeSec: typeof body.seamFadeSec === "number" ? clampSeamFade(body.seamFadeSec) : undefined,
     styleBase,
+    chainTrimStartFrames:
+      typeof body.chainTrimStartFrames === "number" && Number.isFinite(body.chainTrimStartFrames)
+        ? clampChainTrimStartFrames(body.chainTrimStartFrames)
+        : undefined,
     dropDuplicateFrame: typeof body.dropDuplicateFrame === "boolean" ? body.dropDuplicateFrame : undefined,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
