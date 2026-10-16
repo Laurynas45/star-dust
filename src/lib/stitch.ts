@@ -12,7 +12,9 @@ import {
   Project,
   SeamMode,
   Shot,
+  clampChainTrimStartFrames,
   clampSeamFade,
+  startFrameTrimNote,
 } from "./types";
 
 export interface StitchSeam {
@@ -21,7 +23,7 @@ export interface StitchSeam {
   fadeSec: number;
   /** Set when a requested crossfade could not be applied, or when a repeated frame was dropped. */
   note?: string;
-  /** 1 when this hard cut drops the incoming clip's first frame. Otherwise 0. */
+  /** Start frames removed from the incoming clip. 0 when this join is unchanged. */
   droppedFrames: number;
 }
 
@@ -54,7 +56,10 @@ const NORMALIZE =
 export interface DuplicateDropInput {
   seamMode: SeamMode;
   chainFromPrevious: boolean;
-  dropEnabled: boolean;
+  /** 0–4 start frames to trim when this join qualifies. Wins over dropEnabled. */
+  trimFrames?: number;
+  /** Legacy. True means trim 1, false means trim 0, when trimFrames is omitted. */
+  dropEnabled?: boolean;
   previousJobId: string;
   chainedFromJobId?: string;
   /** Applied frames back. Null means an older extract, which was the last frame. */
@@ -62,37 +67,58 @@ export interface DuplicateDropInput {
   takeUsedChainedStill: boolean;
 }
 
+function requestedTrimFrames(input: DuplicateDropInput): number {
+  if (typeof input.trimFrames === "number") return clampChainTrimStartFrames(input.trimFrames, 0);
+  return input.dropEnabled ? 1 : 0;
+}
+
 /**
- * A chained hard cut repeats a frame only when clip N+1's first frame is clip N's
- * last frame. That is true when this take was rendered from the previous take's
- * exact last frame (applied frames back = 0).
+ * A chained hard cut can trim the incoming clip only when clip N+1 started from
+ * clip N's exact last frame (applied frames back = 0). Trim 1 drops that
+ * repeated frame. Trim 2–4 also drops the early frames a model often re-enacts.
  *
  * When the start still is earlier than the last frame, the frames that meet at
- * the cut are different. Dropping one would remove a frame that is not a copy.
- * Verified against a clip whose last frame and frame-back still are different
- * colours: the offset join is red then that earlier colour, so nothing is trimmed.
- * Crossfades and unchained shots are left unchanged.
+ * the cut are different. Trimming would remove frames that are not a copy of
+ * that ending. Verified against a clip whose last frame and frame-back still
+ * are different colours: the offset join is red then that earlier colour, so
+ * nothing is trimmed. Crossfades and unchained shots are left unchanged.
  */
 export function dropStartFramesForJoin(input: DuplicateDropInput): number {
   if (input.seamMode !== "cut") return 0;
-  if (!input.dropEnabled) return 0;
+  const requested = requestedTrimFrames(input);
+  if (requested <= 0) return 0;
   if (!input.chainFromPrevious) return 0;
   if (!input.takeUsedChainedStill) return 0;
   if (!input.chainedFromJobId || input.chainedFromJobId !== input.previousJobId) return 0;
   const applied = input.chainedFrameBack == null ? 0 : input.chainedFrameBack;
   if (applied !== 0) return 0;
+  return requested;
+}
+
+export function resolveChainTrimStartFrames(
+  project: { chainTrimStartFrames?: number | null; dropDuplicateFrame?: boolean | null },
+  shot: { chainTrimStartFrames?: number | null; dropDuplicateFrame?: boolean | null }
+): number {
+  if (shot.chainTrimStartFrames != null && Number.isFinite(shot.chainTrimStartFrames)) {
+    return clampChainTrimStartFrames(shot.chainTrimStartFrames);
+  }
+  if (typeof shot.dropDuplicateFrame === "boolean") return shot.dropDuplicateFrame ? 1 : 0;
+  if (project.chainTrimStartFrames != null && Number.isFinite(project.chainTrimStartFrames)) {
+    return clampChainTrimStartFrames(project.chainTrimStartFrames);
+  }
+  if (typeof project.dropDuplicateFrame === "boolean") return project.dropDuplicateFrame ? 1 : 0;
   return 1;
 }
 
+/** True when the resolved trim removes at least one start frame. */
 export function duplicateFrameDropEnabled(
-  project: { dropDuplicateFrame?: boolean },
-  shot: { dropDuplicateFrame?: boolean | null }
+  project: { chainTrimStartFrames?: number | null; dropDuplicateFrame?: boolean | null },
+  shot: { chainTrimStartFrames?: number | null; dropDuplicateFrame?: boolean | null }
 ): boolean {
-  if (shot.dropDuplicateFrame != null) return shot.dropDuplicateFrame;
-  return project.dropDuplicateFrame !== false;
+  return resolveChainTrimStartFrames(project, shot) > 0;
 }
 
-/** A one-frame clip cannot lose its only frame. */
+/** Never trim a clip down to zero frames. */
 export function applyDropLimit(requested: number, frameCount: number): number {
   if (requested <= 0) return 0;
   if (!Number.isFinite(frameCount) || frameCount <= requested) return 0;
@@ -183,11 +209,11 @@ function annotateSeam(
   const seam = resolveSeam(project, next.shot, durPrev, durNext);
   const takeUsedChainedStill =
     Boolean(next.shot.chainedStartImagePath) && next.imagePath === next.shot.chainedStartImagePath;
-  const dropEnabled = duplicateFrameDropEnabled(project, next.shot);
+  const trimFrames = resolveChainTrimStartFrames(project, next.shot);
   const requested = dropStartFramesForJoin({
     seamMode: seam.mode,
     chainFromPrevious: next.shot.chainFromPrevious,
-    dropEnabled,
+    trimFrames,
     previousJobId: previous.jobId,
     chainedFromJobId: next.shot.chainedFromJobId,
     chainedFrameBack: next.shot.chainedFrameBack,
@@ -196,11 +222,11 @@ function annotateSeam(
   const dropped = applyDropLimit(requested, next.frameCount);
   let note = seam.note;
   if (dropped > 0) {
-    note = DROPPED_FRAME_NOTE;
+    note = dropped === 1 ? DROPPED_FRAME_NOTE : startFrameTrimNote(dropped);
   } else if (
     !note &&
     seam.mode === "cut" &&
-    dropEnabled &&
+    trimFrames > 0 &&
     next.shot.chainFromPrevious &&
     takeUsedChainedStill &&
     next.shot.chainedFromJobId === previous.jobId &&
@@ -208,7 +234,10 @@ function annotateSeam(
   ) {
     note = FRAME_BACK_SEAM_NOTE;
   } else if (!note && requested > 0 && dropped === 0) {
-    note = "This clip is a single frame, so the repeated frame was kept.";
+    note =
+      next.frameCount <= 1
+        ? "This clip is a single frame, so the repeated frame was kept."
+        : "This clip is too short to trim those start frames, so they were kept.";
   }
   return { ...seam, droppedFrames: dropped, note };
 }

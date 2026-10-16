@@ -39,8 +39,16 @@ export interface Project {
   /** Crossfade length when seamMode is crossfade. Ignored for a hard cut. */
   seamFadeSec: number;
   /**
-   * On a chained hard cut, drop the one frame that the next shot repeats.
-   * Default on. A shot can override it. Crossfades and unchained shots ignore it.
+   * Start frames trimmed from the next clip on a chained hard cut that used the
+   * exact last frame. 0 keeps every frame. 1 matches the old one-frame drop.
+   * 2–4 also trims early frames a model often re-enacts. Default 1.
+   * A shot can override it. Crossfades, unchained shots, and stepped-back
+   * chains ignore it.
+   */
+  chainTrimStartFrames: number;
+  /**
+   * Legacy mirror of chainTrimStartFrames > 0. Older rows and clients still
+   * send this boolean: true means trim 1, false means trim 0.
    */
   dropDuplicateFrame: boolean;
   /**
@@ -85,7 +93,13 @@ export interface Shot {
   /** The chainFrameBack setting used when that still was extracted. */
   chainedFrameRequest?: number;
   /**
-   * Null inherits the project. When false, a chained hard cut keeps the repeated frame.
+   * Null inherits the project. 0–4 trims that many start frames on a chained
+   * hard cut that used the exact last frame.
+   */
+  chainTrimStartFrames?: number | null;
+  /**
+   * Legacy. Null inherits. Older rows: true means trim 1, false means trim 0.
+   * Prefer chainTrimStartFrames.
    */
   dropDuplicateFrame?: boolean | null;
   /** Join into this shot. Null inherits the project seam. */
@@ -268,6 +282,12 @@ export const SEAM_FADE_CHOICES = [0.25, 0.5, 0.75, 1] as const;
 export const MAX_CHAIN_FRAME_BACK = 12;
 export const CHAIN_FRAME_BACK_CHOICES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const;
 
+/** Incoming start frames removed on a qualifying chained hard cut. */
+export const MIN_CHAIN_TRIM_START_FRAMES = 0;
+export const MAX_CHAIN_TRIM_START_FRAMES = 4;
+export const DEFAULT_CHAIN_TRIM_START_FRAMES = 1;
+export const CHAIN_TRIM_START_CHOICES = [0, 1, 2, 3, 4] as const;
+
 export const CHAIN_HONESTY =
   "Starting from the previous shot's last frame helps continuity of pose and framing. Identity and details still drift over many chained shots. Star Dust does not lock characters.";
 
@@ -275,16 +295,22 @@ export const SEAM_HONESTY =
   "Hard cut is the default. A short crossfade blends the pixels at the join. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
 
 export const SEAM_FRAME_HONESTY =
-  "When the next shot started from the previous shot's exact last frame, a hard cut shows that repeated frame twice. Dropping it removes that one-frame freeze. It does not fix identity or detail drift between chained shots. A crossfade is left as-is, and a shot that is not chained is left as-is. Star Dust does not lock a character, lip-sync, or build a long film.";
+  "On a chained hard cut from the previous shot's exact last frame, trim 0–4 frames from the start of the next clip. The default is 1, which drops that repeated frame. 2–4 also trims early frames a model often re-enacts, which softens that freeze at the seam. It does not fix identity or detail drift, and it does not keep identity continuous. A crossfade is left as-is, a shot that is not chained is left as-is, and stepping back from the last frame is left as-is. Star Dust does not lock a character, lip-sync, or build a long film.";
 
 export const FRAME_BACK_HONESTY =
-  "0 is the last frame. A few frames earlier skips a soft or blurred ending frame. The repeated-frame drop runs only for that exact last frame, because only then do the two frames at the cut match. Stepping back leaves the previous take whole, so the join can step backward by those frames. It does not fix identity or detail drift.";
+  "0 is the last frame. A few frames earlier skips a soft or blurred ending frame. The start-frame trim runs only for that exact last frame, because only then is the next clip starting on the same moment. Stepping back leaves the previous take whole, so the join can step backward by those frames. It does not fix identity or detail drift.";
 
 export const DROPPED_FRAME_NOTE =
   "Dropped the repeated frame at this hard cut. That does not fix identity or detail drift.";
 
 export const FRAME_BACK_SEAM_NOTE =
   "Started before the last frame, so the frames at the cut differ and nothing was dropped.";
+
+/** Seam note for a trim of more than one start frame. One frame keeps DROPPED_FRAME_NOTE. */
+export function startFrameTrimNote(count: number): string {
+  if (count <= 1) return DROPPED_FRAME_NOTE;
+  return `Trimmed ${count} start frames at this hard cut. That softens a re-enacted freeze at the seam. It does not fix identity or detail drift.`;
+}
 
 export const STYLE_BASE_HONESTY =
   "Text only — not a character lock. These words are added in front of every shot when a take or preview is queued. Identity can still drift across shots. Star Dust does not lock a face, lip-sync, or build a long film.";
@@ -317,6 +343,62 @@ export function clampChainFrameBack(value: number, fallback = 0): number {
   const rounded = Math.round(value);
   if (!Number.isFinite(rounded)) return fallback;
   return Math.min(MAX_CHAIN_FRAME_BACK, Math.max(0, rounded));
+}
+
+export function clampChainTrimStartFrames(
+  value: number,
+  fallback = DEFAULT_CHAIN_TRIM_START_FRAMES
+): number {
+  if (!Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value);
+  if (!Number.isFinite(rounded)) return fallback;
+  return Math.min(MAX_CHAIN_TRIM_START_FRAMES, Math.max(MIN_CHAIN_TRIM_START_FRAMES, rounded));
+}
+
+/** Older boolean: on dropped one frame, off kept every frame. */
+export function chainTrimFromDropDuplicate(dropDuplicateFrame: boolean): number {
+  return dropDuplicateFrame ? 1 : 0;
+}
+
+/**
+ * Project trim from a stored row. A numeric value wins. When it is missing,
+ * the old boolean still applies: true → 1, false → 0. Missing both is the default 1.
+ */
+export function projectChainTrimFromStored(
+  chainTrimStartFrames: unknown,
+  dropDuplicateFrame: unknown
+): number {
+  if (chainTrimStartFrames != null && chainTrimStartFrames !== "") {
+    const numeric = Number(chainTrimStartFrames);
+    if (Number.isFinite(numeric)) return clampChainTrimStartFrames(numeric);
+  }
+  if (dropDuplicateFrame == null || dropDuplicateFrame === "") return DEFAULT_CHAIN_TRIM_START_FRAMES;
+  if (dropDuplicateFrame === false || Number(dropDuplicateFrame) === 0) return 0;
+  return 1;
+}
+
+/**
+ * Shot trim from a stored row. Null means inherit. A numeric value wins.
+ * When it is missing, the old boolean still applies: true → 1, false → 0.
+ */
+export function shotChainTrimFromStored(
+  chainTrimStartFrames: unknown,
+  dropDuplicateFrame: unknown
+): number | null {
+  if (chainTrimStartFrames != null && chainTrimStartFrames !== "") {
+    const numeric = Number(chainTrimStartFrames);
+    if (Number.isFinite(numeric)) return clampChainTrimStartFrames(numeric);
+  }
+  if (dropDuplicateFrame == null || dropDuplicateFrame === "") return null;
+  if (dropDuplicateFrame === false || Number(dropDuplicateFrame) === 0) return 0;
+  return 1;
+}
+
+export function chainTrimChoiceLabel(frames: number): string {
+  const n = clampChainTrimStartFrames(frames);
+  if (n === 0) return "0 — keep every frame";
+  if (n === 1) return "1 — drop the repeated frame";
+  return `${n} — trim ${n} start frames`;
 }
 
 /** Plain words for the frame a chained shot starts from. 0 is the last frame. */
