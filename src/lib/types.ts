@@ -291,6 +291,15 @@ export const CHAIN_TRIM_START_CHOICES = [0, 1, 2, 3, 4] as const;
 export const CHAIN_HONESTY =
   "Starting from the previous shot's last frame helps continuity of pose and framing. Identity and details still drift over many chained shots. Star Dust does not lock characters.";
 
+export const CHAIN_STALE_NOTE =
+  "Out of date. The previous shot's take changed since this one was rendered.";
+
+/** Tail of the previous take, and head of the next, in a seam preview. */
+export const SEAM_PREVIEW_SEC = 1.5;
+
+export const SEAM_PREVIEW_HONESTY =
+  "Preview seam plays about the last 1.5 seconds of the previous take and the first 1.5 seconds of this one, using the same join as the stitch. It helps you spot the seam. It does not fix drift, lock a character, or guarantee continuity. It does not replace any take.";
+
 export const SEAM_HONESTY =
   "Hard cut is the default. A short crossfade blends the pixels at the join. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
 

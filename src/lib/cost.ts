@@ -1,7 +1,8 @@
+import { resolveComfyChoice } from "./comfy-choice";
 import { creditEstimate } from "./credits";
 import { isPaidProvider, modelNameFor } from "./provider-info";
-import { classifyShot } from "./takes";
-import { getSettings, listJobs, listShots } from "./storage";
+import { projectRenderPlan } from "./takes";
+import { getProject, getSettings, listJobs, listShots } from "./storage";
 import { AppSettings, CostEstimate, ProviderId } from "./types";
 
 function round4(value: number): number {
@@ -107,11 +108,23 @@ export function estimateRenderAll(projectId: string): CostEstimate {
   const provider = settings.provider;
   const modelName = modelNameFor(provider, settings);
   const jobs = listJobs(projectId);
+  const project = getProject(projectId);
   let seconds = 0;
-  if (isPaidProvider(provider)) {
-    for (const shot of listShots(projectId)) {
-      const decision = classifyShot(shot, jobs, provider, modelName);
-      if (decision.action === "run") seconds += Number(shot.durationSec) || 0;
+  if (isPaidProvider(provider) && project) {
+    const plan = projectRenderPlan(
+      listShots(projectId),
+      jobs,
+      provider,
+      (shot) =>
+        modelNameFor(
+          provider,
+          settings,
+          provider === "comfyui" ? resolveComfyChoice({ settings, project, shot }) : undefined
+        ),
+      project.styleBase
+    );
+    for (const item of plan) {
+      if (item.action === "run") seconds += Number(item.shot.durationSec) || 0;
     }
   }
   return withCredits(buildEstimate({ provider, modelName, seconds, settings }), provider, seconds);

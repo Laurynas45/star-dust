@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
+import { chainStaleShotIds } from "@/lib/chain-stale";
 import { resolveComfyChoice } from "@/lib/comfy-choice";
 import {
   CAPABILITY,
@@ -20,6 +21,7 @@ import {
   AppSettings,
   CHAIN_FRAME_BACK_CHOICES,
   CHAIN_HONESTY,
+  CHAIN_STALE_NOTE,
   CHAIN_TRIM_START_CHOICES,
   ComfyWorkflowId,
   CostEstimate,
@@ -33,6 +35,7 @@ import {
   SEAM_FADE_CHOICES,
   SEAM_FRAME_HONESTY,
   SEAM_HONESTY,
+  SEAM_PREVIEW_HONESTY,
   STYLE_BASE_HONESTY,
   SeamMode,
   Shot,
@@ -87,6 +90,10 @@ export default function ProjectStudioPage() {
   const [exporting, setExporting] = useState(false);
   const [stitch, setStitch] = useState<StitchResponse | null>(null);
   const [previewCut, setPreviewCut] = useState<StitchResponse | null>(null);
+  const [seamBusyId, setSeamBusyId] = useState<string | null>(null);
+  const [seamClips, setSeamClips] = useState<
+    Record<string, { outputPath: string; durationSec: number; note?: string; label: string }>
+  >({});
 
   const [prompt, setPrompt] = useState("");
   const [presetId, setPresetId] = useState(MOTION_PRESETS[0].id);
@@ -131,6 +138,27 @@ export default function ProjectStudioPage() {
 
   const jobs = useMemo(() => detail?.jobs ?? [], [detail]);
   const shots = useMemo(() => detail?.shots ?? [], [detail]);
+  const staleShotIds = useMemo(() => {
+    if (!detail || !settings) return new Set<string>();
+    return new Set(
+      chainStaleShotIds({
+        shots: detail.shots,
+        jobs: detail.jobs,
+        provider: settings.provider,
+        styleBase: detail.project.styleBase,
+        modelNameForShot: (shot) => {
+          const full = detail.shots.find((item) => item.id === shot.id) ?? shot;
+          return modelNameFor(
+            settings.provider,
+            settings,
+            settings.provider === "comfyui"
+              ? resolveComfyChoice({ settings, project: detail.project, shot: full })
+              : undefined
+          );
+        },
+      })
+    );
+  }, [detail, settings]);
   const hasActive = jobs.some((job) => job.status === "queued" || job.status === "running");
 
   useEffect(() => {
@@ -414,6 +442,32 @@ export default function ProjectStudioPage() {
     }
   }
 
+  async function onPreviewSeam(shotId: string) {
+    setSeamBusyId(shotId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/shots/${shotId}/seam`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Seam preview failed");
+      const seam = data.seam as { mode?: string; fadeSec?: number; note?: string } | null;
+      const label =
+        seam?.mode === "crossfade" ? `crossfade ${seam.fadeSec ?? ""}s` : "hard cut";
+      setSeamClips((current) => ({
+        ...current,
+        [shotId]: {
+          outputPath: data.outputPath,
+          durationSec: Number(data.durationSec) || 0,
+          note: seam?.note,
+          label,
+        },
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Seam preview failed");
+    } finally {
+      setSeamBusyId(null);
+    }
+  }
+
   async function onSheet(file: File | null) {
     if (!file) return;
     setError(null);
@@ -544,7 +598,7 @@ export default function ProjectStudioPage() {
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
             {shots.length === 0
               ? "Add a shot, then run the list."
-              : "Skips a shot that already has a matching completed take, and any shot already queued or running."}
+              : "Skips a shot that already has a matching completed take, and any shot already queued or running. A chained shot is rendered again when an earlier take in that chain changed."}
           </p>
           <button
             type="button"
@@ -1035,17 +1089,20 @@ export default function ProjectStudioPage() {
                 shot.chainTrimStartFrames == null
                   ? project.chainTrimStartFrames
                   : shot.chainTrimStartFrames;
+              const outOfDate = staleShotIds.has(shot.id);
+              const prevChosen = prev ? stitchChoice(prev, prevTakes) : undefined;
               const chainLine = !shot.chainFromPrevious || !prev
                 ? null
-                : frameStale
-                  ? `Frame choice changed. Render this shot again to start from the ${frameWord}. The take you have still uses the earlier frame.`
-                  : prevBusy
-                    ? `Waits for shot ${prev.position}'s take, then uses its ${frameWord}. Your still is not used.`
-                    : prevTakes.length === 0
-                      ? `Needs shot ${prev.position}'s finished take first. Your still is not used.`
-                      : shot.chainedFromJobId && stitchChoice(prev, prevTakes) !== shot.chainedFromJobId
-                        ? `The previous shot's chosen take changed. Render this shot again to use its new ${frameWord}.`
+                : outOfDate
+                  ? CHAIN_STALE_NOTE
+                  : frameStale
+                    ? `Frame choice changed. Render this shot again to start from the ${frameWord}. The take you have still uses the earlier frame.`
+                    : prevBusy
+                      ? `Waits for shot ${prev.position}'s take, then uses its ${frameWord}. Your still is not used.`
+                      : prevTakes.length === 0
+                        ? `Needs shot ${prev.position}'s finished take first. Your still is not used.`
                         : `The next render starts from the ${frameWord} of the previous shot.`;
+              const seamClip = seamClips[shot.id];
               return (
                 <li key={shot.id} className="panel grid gap-4 p-4 sm:grid-cols-[140px_1fr]">
                   <div className="space-y-2">
@@ -1098,6 +1155,11 @@ export default function ProjectStudioPage() {
                         {shot.endImagePath ? " · end still" : ""}
                       </span>
                       {job && <StatusBadge status={job.status} />}
+                      {outOfDate && (
+                        <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
+                          Out of date
+                        </span>
+                      )}
                     </div>
                     <p className="mt-2 text-sm text-white">{shot.prompt}</p>
                     {styleBaseText(project.styleBase) && (
@@ -1175,6 +1237,31 @@ export default function ProjectStudioPage() {
                           </div>
                         )}
                         {chainLine && <p className="text-[11px] leading-relaxed text-amber-100/80">{chainLine}</p>}
+                        <div className="space-y-2">
+                          <button
+                            type="button"
+                            className="btn-ghost !px-3 !py-1.5 text-xs"
+                            disabled={seamBusyId === shot.id || !chosen || !prevChosen}
+                            onClick={() => void onPreviewSeam(shot.id)}
+                          >
+                            {seamBusyId === shot.id ? "Previewing seam…" : "Preview seam"}
+                          </button>
+                          <p className="text-[11px] leading-relaxed text-[var(--muted)]">{SEAM_PREVIEW_HONESTY}</p>
+                          {seamClip && (
+                            <div className="space-y-2">
+                              <video
+                                className="aspect-video w-full rounded-lg bg-black"
+                                src={`/api/media/${seamClip.outputPath}`}
+                                controls
+                                playsInline
+                              />
+                              <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+                                {seamClip.durationSec.toFixed(2)}s · {seamClip.label}
+                                {seamClip.note ? ` · ${seamClip.note}` : ""}. This is not a take.
+                              </p>
+                            </div>
+                          )}
+                        </div>
                         <div className="grid gap-2 sm:grid-cols-2">
                           <label className="text-[11px] text-[var(--muted)]">
                             Join from the previous shot

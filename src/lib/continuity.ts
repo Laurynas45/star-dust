@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { chainedStillMatchesTake, completedTakesFor, cutIsPinned, cutTake } from "./chain-stale";
 import { probeVideoFrames, runFfmpeg } from "./ffmpeg";
 import { getJob, getProject, getShot, listJobs, listShots, resolveDataPath, updateJob, updateShot } from "./storage";
 import { Job, Shot, chainFramePhrase, clampChainFrameBack, effectivePrompt, frameIndexFromEnd } from "./types";
@@ -35,10 +36,7 @@ export function chainProviderNote(waiting: boolean, framesBack = 0): string {
 
 /** True when the stored still came from this take at the shot's current frame choice. */
 export function chainedStillIsCurrent(shot: Shot, takeId: string): boolean {
-  if (!shot.chainedStartImagePath || shot.chainedFromJobId !== takeId) return false;
-  const requested = clampChainFrameBack(shot.chainFrameBack ?? 0);
-  const used = shot.chainedFrameRequest ?? 0;
-  return used === requested;
+  return chainedStillMatchesTake(shot, takeId);
 }
 
 export type ChainPlan =
@@ -53,18 +51,13 @@ export function previousShot(shot: Shot): Shot | undefined {
 }
 
 export function finishedTake(shot: Shot): Job | undefined {
-  const takes = listJobs(shot.projectId).filter(
-    (job) =>
-      job.shotId === shot.id &&
-      job.kind !== "preview" &&
-      job.status === "completed" &&
-      job.outputPath
-  );
-  if (shot.selectedJobId) {
-    const chosen = takes.find((job) => job.id === shot.selectedJobId);
-    if (chosen) return chosen;
-  }
-  return [...takes].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const takes = completedTakesFor(listJobs(shot.projectId), shot.id);
+  return cutTake(shot.selectedJobId, takes);
+}
+
+/** True when the stitch is pinned to a chosen take, so a newer render does not replace it. */
+export function cutTakeIsPinned(shot: Shot): boolean {
+  return cutIsPinned(shot.selectedJobId, completedTakesFor(listJobs(shot.projectId), shot.id));
 }
 
 export function inflightTake(shot: Shot): Job | undefined {
@@ -89,6 +82,8 @@ export function startImageForMatch(shot: Shot): string {
  * Decides the start still for a take.
  * A chained shot never receives the user's still unless the option is off.
  * When the previous take is not ready yet, the job waits and the provider does not start.
+ * When this batch will replace the previous shot's take, the job also waits, even if a
+ * still from the take that is about to leave the cut is already on disk.
  */
 export function planChain(shot: Shot, batchShotIds: ReadonlySet<string>): ChainPlan {
   if (!shot.chainFromPrevious) {
@@ -99,11 +94,16 @@ export function planChain(shot: Shot, batchShotIds: ReadonlySet<string>): ChainP
   }
   const prev = previousShot(shot);
   if (!prev) return { ok: false, error: chainIsFirstMessage(shot) };
+  const inflight = inflightTake(prev);
+  const prevWillReplace =
+    batchShotIds.has(prev.id) || (Boolean(inflight) && !cutTakeIsPinned(prev));
+  if (prevWillReplace) {
+    return { ok: true, imagePath: CHAIN_PENDING_IMAGE, awaitPreviousFrame: true };
+  }
   const ready = startImageForMatch(shot);
   if (ready) return { ok: true, imagePath: ready, awaitPreviousFrame: false };
   const take = finishedTake(prev);
-  const inflight = inflightTake(prev);
-  if (take || inflight || batchShotIds.has(prev.id)) {
+  if (take || inflight) {
     return { ok: true, imagePath: CHAIN_PENDING_IMAGE, awaitPreviousFrame: true };
   }
   return { ok: false, error: chainNeedsPreviousMessage(shot, prev) };

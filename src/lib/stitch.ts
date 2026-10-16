@@ -7,6 +7,7 @@ import {
   DEFAULT_SEAM_FADE_SEC,
   DROPPED_FRAME_NOTE,
   FRAME_BACK_SEAM_NOTE,
+  SEAM_PREVIEW_SEC,
   Job,
   MIN_SEAM_FADE_SEC,
   Project,
@@ -52,6 +53,20 @@ type Included = {
 
 const NORMALIZE =
   "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p";
+
+/** Same rate the stitch normalizes to, so a 1.5s window is a fixed frame count. */
+export const SEAM_PREVIEW_FPS = 24;
+
+/** Frame span kept from one clip. A short clip keeps every frame. */
+export function seamPreviewSpan(
+  frameCount: number,
+  edge: "head" | "tail"
+): { start: number; frames: number } {
+  const total = Number.isFinite(frameCount) ? Math.max(0, Math.floor(frameCount)) : 0;
+  const frames = Math.min(Math.round(SEAM_PREVIEW_SEC * SEAM_PREVIEW_FPS), total);
+  const start = edge === "head" ? 0 : Math.max(0, total - frames);
+  return { start, frames };
+}
 
 export interface DuplicateDropInput {
   seamMode: SeamMode;
@@ -473,4 +488,81 @@ async function joinPair(a: string, b: string, out: string, seam: StitchSeam): Pr
     "+faststart",
     out,
   ]);
+}
+
+async function trimWindow(src: string, dest: string, edge: "head" | "tail"): Promise<void> {
+  const total = probeVideoFrames(src);
+  const span = seamPreviewSpan(total, edge);
+  if (span.frames < 1) throw new Error("The clip has no video frames.");
+  const end = span.start + span.frames;
+  await runFfmpeg([
+    "-y",
+    "-i",
+    src,
+    "-vf",
+    `trim=start_frame=${span.start}:end_frame=${end},setpts=PTS-STARTPTS`,
+    "-an",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    dest,
+  ]);
+}
+
+/**
+ * A short local mp4 of one join: about the last 1.5s of the previous take
+ * and the first 1.5s of the next, with the same hard cut or crossfade the
+ * full stitch uses. ffmpeg only. Does not create or replace a take.
+ */
+export async function previewSeam(projectId: string, shotId: string): Promise<StitchResult> {
+  const project = getProject(projectId);
+  if (!project) throw new Error("Project not found");
+  const shots = listShots(projectId);
+  const index = shots.findIndex((shot) => shot.id === shotId);
+  if (index < 0) throw new Error("Shot not found");
+  if (index === 0) throw new Error("The first shot has no join to preview.");
+  const prev = shots[index - 1];
+  const next = shots[index];
+  const prevTake = finishedTake(prev);
+  const nextTake = finishedTake(next);
+  if (!prevTake?.outputPath || !nextTake?.outputPath) {
+    throw new Error("Both shots need a finished take before this join can be previewed.");
+  }
+  const prevAbs = resolveDataPath(prevTake.outputPath);
+  const nextAbs = resolveDataPath(nextTake.outputPath);
+  if (!fs.existsSync(prevAbs) || !fs.existsSync(nextAbs)) {
+    throw new Error("A clip file is missing, so this join cannot be previewed.");
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const prevTrim = absoluteOutputPath(projectId, `seam-preview-src-${stamp}-prev.mp4`);
+  const nextTrim = absoluteOutputPath(projectId, `seam-preview-src-${stamp}-next.mp4`);
+  try {
+    await trimWindow(prevAbs, prevTrim.abs, "tail");
+    await trimWindow(nextAbs, nextTrim.abs, "head");
+    const included: Included[] = [
+      {
+        shotId: prev.id,
+        jobId: prevTake.id,
+        abs: prevTrim.abs,
+        shot: prev,
+        imagePath: prevTake.imagePath,
+        frameCount: 0,
+      },
+      {
+        shotId: next.id,
+        jobId: nextTake.id,
+        abs: nextTrim.abs,
+        shot: next,
+        imagePath: nextTake.imagePath,
+        frameCount: 0,
+      },
+    ];
+    return await concatClips(projectId, "seam-preview", "takes", included, []);
+  } finally {
+    fs.rmSync(prevTrim.abs, { force: true });
+    fs.rmSync(nextTrim.abs, { force: true });
+  }
 }

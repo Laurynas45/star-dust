@@ -1088,6 +1088,17 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
   return next;
 }
 
+/** Drops the pinned take so the newest completed take is the one in the cut. */
+export function clearTakeSelection(shotId: string): void {
+  const shot = getShot(shotId);
+  if (!shot?.selectedJobId) return;
+  const now = new Date().toISOString();
+  getDb()
+    .prepare("UPDATE shots SET selected_job_id = NULL, updated_at = ? WHERE id = ?")
+    .run(now, shotId);
+  touchProject(shot.projectId);
+}
+
 export function selectTake(shotId: string, jobId: string): Shot | undefined {
   const shot = getShot(shotId);
   const job = getJob(jobId);
