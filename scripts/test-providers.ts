@@ -2673,6 +2673,324 @@ async function main() {
     delete holder.starDustDb;
     process.env.STAR_DUST_DATA = savedData;
   }
+  const { CHAIN_STALE_NOTE, SEAM_PREVIEW_HONESTY, SEAM_PREVIEW_SEC } = await import("../src/lib/types");
+  const chainStale = await import("../src/lib/chain-stale");
+  assert(SEAM_PREVIEW_SEC === 1.5, "a seam preview is about 1.5 seconds on each side");
+  assert(/previous shot's take changed since this one was rendered/i.test(CHAIN_STALE_NOTE), "the out-of-date line names the previous take");
+  assert(/spot the seam/i.test(SEAM_PREVIEW_HONESTY), "seam preview says it helps you spot the seam");
+  assert(/does not fix drift/i.test(SEAM_PREVIEW_HONESTY), "seam preview does not claim to fix drift");
+  assert(/lock a character/i.test(SEAM_PREVIEW_HONESTY), "seam preview does not claim a character lock");
+  assert(/guarantee continuity/i.test(SEAM_PREVIEW_HONESTY), "seam preview does not guarantee continuity");
+  assert(/does not replace any take/i.test(SEAM_PREVIEW_HONESTY), "seam preview does not replace a take");
+  assert(
+    stitch.seamPreviewSpan(72, "tail").start === 36 && stitch.seamPreviewSpan(72, "tail").frames === 36,
+    "1.5s at 24fps keeps 36 frames from the tail"
+  );
+  assert(
+    stitch.seamPreviewSpan(72, "head").start === 0 && stitch.seamPreviewSpan(72, "head").frames === 36,
+    "the head window starts at the first frame"
+  );
+  assert(
+    stitch.seamPreviewSpan(10, "tail").start === 0 && stitch.seamPreviewSpan(10, "tail").frames === 10,
+    "a clip shorter than 1.5s is kept whole"
+  );
+
+  const mockModel = "ffmpeg Ken Burns (mock)";
+  const staleOf = (projectId: string) => {
+    const project = storage.getProject(projectId);
+    return chainStale.chainStaleShotIds({
+      shots: storage.listShots(projectId),
+      jobs: storage.listJobs(projectId),
+      provider: "mock",
+      styleBase: project?.styleBase ?? "",
+      modelNameForShot: () => mockModel,
+    });
+  };
+
+  storage.saveSettings({ provider: "mock" });
+  const staleProject = storage.createProject("Stale chain");
+  const shotP = storage.createShot({
+    projectId: staleProject.id,
+    prompt: "Pier before the edit.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: red,
+  });
+  const shotUp = storage.createShot({
+    projectId: staleProject.id,
+    prompt: "Opening lanterns.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: blue,
+  });
+  const shotChild = storage.createShot({
+    projectId: staleProject.id,
+    prompt: "Continue from the previous frame.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: green,
+    chainFromPrevious: true,
+  });
+  const shotGrand = storage.createShot({
+    projectId: staleProject.id,
+    prompt: "Continue again along the pier.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: red,
+    chainFromPrevious: true,
+  });
+  const shotFree = storage.createShot({
+    projectId: staleProject.id,
+    prompt: "A separate unchained shot.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: blue,
+  });
+  const staleFirst = render.renderAll(staleProject.id);
+  assert(staleFirst.ok && staleFirst.jobs.length === 5, "the stale-chain project queues five shots");
+  for (const job of staleFirst.ok ? staleFirst.jobs : []) await providers.startJob(job.id);
+  const completedTake = (shotId: string) =>
+    storage
+      .listJobs(staleProject.id)
+      .filter((job) => job.shotId === shotId && job.kind !== "preview" && job.status === "completed" && job.outputPath)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const upFirst = completedTake(shotUp.id)[0];
+  const childFirst = completedTake(shotChild.id)[0];
+  assert(upFirst?.outputPath && childFirst?.outputPath, "upstream and child takes rendered on Mock");
+  assert(storage.getShot(shotGrand.id)?.chainedFromJobId === childFirst?.id, "the grandchild was rendered from the child take");
+  assert(staleOf(staleProject.id).length === 0, "a fresh chain is not out of date");
+  const keptPaths = {
+    before: completedTake(shotP.id)[0]?.outputPath,
+    free: completedTake(shotFree.id)[0]?.outputPath,
+    up: upFirst?.outputPath,
+  };
+
+  const upAgain = render.renderShot(shotUp.id, { force: true });
+  assert(upAgain.ok && upAgain.jobs.length === 1 && upAgain.jobs[0].provider === "mock", "re-render stays on Mock");
+  await providers.startJob(upAgain.ok ? upAgain.jobs[0].id : "");
+  const upSecond = storage.getJob(upAgain.ok ? upAgain.jobs[0].id : "");
+  assert(upSecond?.status === "completed" && upSecond.outputPath, "the new upstream take is an mp4");
+  assert(
+    fs.statSync(storage.resolveDataPath(upSecond!.outputPath!)).size > 1000,
+    "the new Mock take is a real file"
+  );
+  let staleIds = staleOf(staleProject.id);
+  assert(staleIds.includes(shotChild.id) && staleIds.includes(shotGrand.id), "the child and the grandchild are out of date");
+  assert(
+    !staleIds.includes(shotP.id) && !staleIds.includes(shotUp.id) && !staleIds.includes(shotFree.id),
+    "the shot before the edit, the edited shot, and the unchained shot are not out of date"
+  );
+  assert(
+    storage.getShot(shotGrand.id)?.chainedFromJobId === childFirst?.id,
+    "the grandchild still points at the child take that is currently in the cut"
+  );
+
+  storage.selectTake(shotUp.id, upFirst!.id);
+  assert(staleOf(staleProject.id).length === 0, "choosing the original upstream take clears the chain");
+  const restored = render.renderAll(staleProject.id);
+  assert(restored.ok && restored.jobs.length === 0, "a restored take is reused, including the chain");
+
+  storage.selectTake(shotUp.id, upSecond!.id);
+  staleIds = staleOf(staleProject.id);
+  assert(
+    staleIds.includes(shotChild.id) && staleIds.includes(shotGrand.id) && staleIds.length === 2,
+    "swapping to the newer upstream take marks only the chained descendants"
+  );
+  const refresh = render.renderAll(staleProject.id);
+  assert(refresh.ok, "render all accepts the stale chain");
+  const refreshIds = (refresh.ok ? refresh.jobs : []).map((job) => job.shotId).sort();
+  assert(
+    JSON.stringify(refreshIds) === JSON.stringify([shotChild.id, shotGrand.id].sort()),
+    `render all re-renders the chain and skips the rest, got ${refreshIds.join(",")}`
+  );
+  assert(
+    refresh.ok && refresh.jobs.every((job) => job.provider === "mock" && job.awaitPreviousFrame),
+    "the chain waits for the new frame instead of reusing the old still"
+  );
+  assert(
+    refresh.ok &&
+      refresh.skipped.some((item) => item.shotId === shotP.id) &&
+      refresh.skipped.some((item) => item.shotId === shotFree.id) &&
+      refresh.skipped.some((item) => item.shotId === shotUp.id),
+    "the shot before, the unchained shot, and the upstream shot are skipped"
+  );
+  const grandJob = refresh.ok ? refresh.jobs.find((job) => job.shotId === shotGrand.id) : undefined;
+  await providers.startJob(grandJob?.id ?? "");
+  assert(storage.getJob(grandJob?.id ?? "")?.status === "completed", "the grandchild re-rendered from the new chain");
+  const childJob = refresh.ok ? refresh.jobs.find((job) => job.shotId === shotChild.id) : undefined;
+  assert(storage.getJob(childJob?.id ?? "")?.status === "completed" && storage.getJob(childJob?.id ?? "")?.outputPath, "the child re-rendered");
+  assert(storage.getShot(shotGrand.id)?.chainedFromJobId === childJob?.id, "the grandchild now points at the new child take");
+  assert(staleOf(staleProject.id).length === 0, "the refreshed chain is current");
+  assert(completedTake(shotP.id)[0]?.outputPath === keptPaths.before, "the shot before the edit kept its take");
+  assert(completedTake(shotFree.id)[0]?.outputPath === keptPaths.free, "the unchained shot kept its take");
+  assert(storage.getShot(shotUp.id)?.selectedJobId === upSecond?.id, "the upstream pin stayed on the take that changed");
+  const reused = render.renderAll(staleProject.id);
+  assert(reused.ok && reused.jobs.length === 0, "the next render all reuses the refreshed chain");
+
+  const seamOnMock = await stitch.previewSeam(staleProject.id, shotChild.id);
+  const seamOnMockAbs = storage.resolveDataPath(seamOnMock.outputPath);
+  assert(fs.statSync(seamOnMockAbs).size > 1000, "Mock seam preview is an mp4 with no API key");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "seam preview did not need a provider key");
+  assert(
+    seamOnMock.seams[0]?.mode === "cut" && seamOnMock.seams[0]?.droppedFrames === 1,
+    "the Mock seam preview uses the default start-frame trim of 1"
+  );
+  assert(
+    seamOnMock.durationSec > 2.5 && seamOnMock.durationSec < 3.3,
+    `seam preview should be about 3s of a 4s join, got ${seamOnMock.durationSec}`
+  );
+  const jobsAfterSeam = storage.listJobs(staleProject.id).length;
+  const seamAgain = await stitch.previewSeam(staleProject.id, shotChild.id);
+  assert(storage.listJobs(staleProject.id).length === jobsAfterSeam, "seam preview does not add a take");
+  assert(seamAgain.outputPath !== childJob?.outputPath, "seam preview is not the take file");
+  assert(completedTake(shotFree.id)[0]?.outputPath === keptPaths.free, "seam preview left the unchained take in place");
+
+  storage.clearTakeSelection(shotUp.id);
+  storage.updateShot(shotUp.id, { prompt: "Opening lanterns, a little later." });
+  staleIds = staleOf(staleProject.id);
+  assert(
+    staleIds.includes(shotChild.id) && staleIds.includes(shotGrand.id) && !staleIds.includes(shotFree.id) && !staleIds.includes(shotP.id),
+    "editing the upstream shot marks the chain before the new take exists"
+  );
+  const edited = render.renderAll(staleProject.id);
+  const editedIds = (edited.ok ? edited.jobs : []).map((job) => job.shotId);
+  assert(edited.ok && editedIds.includes(shotUp.id) && editedIds.includes(shotChild.id) && editedIds.includes(shotGrand.id), "render all reruns the edited shot and its chain");
+  assert(edited.ok && !editedIds.includes(shotP.id) && !editedIds.includes(shotFree.id), "shots outside the chain stay reused");
+  assert(
+    edited.ok && edited.jobs.filter((job) => job.shotId !== shotUp.id).every((job) => job.awaitPreviousFrame),
+    "descendants wait for the edited shot's new take"
+  );
+  const editedGrand = edited.ok ? edited.jobs.find((job) => job.shotId === shotGrand.id) : undefined;
+  await providers.startJob(editedGrand?.id ?? "");
+  assert(storage.getJob(editedGrand?.id ?? "")?.status === "completed", "the edited chain finished on Mock");
+  assert(staleOf(staleProject.id).length === 0, "the edited chain is current after render all");
+  const editedDone = render.renderAll(staleProject.id);
+  assert(editedDone.ok && editedDone.jobs.length === 0, "a current chain is skipped again");
+
+  const seamProjectColors = storage.createProject("Seam preview");
+  const colorStill = storage.saveUpload(seamProjectColors.id, "still.png", solidPng(dataDir, "seam-preview-still.png", "gray"));
+  const colorPrev = storage.createShot({
+    projectId: seamProjectColors.id,
+    prompt: "Previous color.",
+    presetId: "slow-zoom-in",
+    durationSec: 3,
+    startImagePath: colorStill,
+  });
+  const colorNext = storage.createShot({
+    projectId: seamProjectColors.id,
+    prompt: "Next color.",
+    presetId: "slow-zoom-in",
+    durationSec: 3,
+    startImagePath: colorStill,
+    chainFromPrevious: true,
+  });
+  const prevClip = storage.absoluteOutputPath(seamProjectColors.id, "preview-prev.mp4");
+  const nextClip = storage.absoluteOutputPath(seamProjectColors.id, "preview-next.mp4");
+  concatColors(prevClip.abs, [{ color: "red", frames: 72 }]);
+  concatColors(nextClip.abs, [
+    { color: "red", frames: 1 },
+    { color: "green", frames: 71 },
+  ]);
+  assert(frameCountOf(prevClip.abs) === 72 && frameCountOf(nextClip.abs) === 72, "seam preview sources are 72 frames");
+  const colorJobPrev = storage.createJob({
+    projectId: seamProjectColors.id,
+    shotId: colorPrev.id,
+    prompt: "Previous color.",
+    presetId: "slow-zoom-in",
+    provider: "mock",
+    status: "completed",
+    imagePath: colorStill,
+    durationSec: 3,
+    modelName: mockModel,
+  });
+  storage.updateJob(colorJobPrev.id, { status: "completed", outputPath: prevClip.rel, progress: 100 });
+  const colorJobNext = storage.createJob({
+    projectId: seamProjectColors.id,
+    shotId: colorNext.id,
+    prompt: "Next color.",
+    presetId: "slow-zoom-in",
+    provider: "mock",
+    status: "completed",
+    imagePath: colorStill,
+    durationSec: 3,
+    modelName: mockModel,
+  });
+  storage.updateJob(colorJobNext.id, { status: "completed", outputPath: nextClip.rel, progress: 100, imagePath: colorStill });
+  storage.updateShot(colorNext.id, {
+    chainFromPrevious: true,
+    chainFrameBack: 0,
+    chainedStartImagePath: colorStill,
+    chainedFromJobId: colorJobPrev.id,
+    chainedFrameBack: 0,
+    chainedFrameRequest: 0,
+  });
+  storage.updateProject(seamProjectColors.id, { seamMode: "cut", dropDuplicateFrame: true });
+  const colorJobsBefore = storage.listJobs(seamProjectColors.id).length;
+  const hardPreview = await stitch.previewSeam(seamProjectColors.id, colorNext.id);
+  const hardAbs = storage.resolveDataPath(hardPreview.outputPath);
+  assert(fs.statSync(hardAbs).size > 1000, "hard-cut seam preview is an mp4");
+  assert(hardPreview.seams[0]?.mode === "cut" && hardPreview.seams[0]?.droppedFrames === 1, "hard-cut preview drops the repeated frame");
+  assert(frameCountOf(hardAbs) === 71, `hard-cut preview should be 36+36-1 frames, got ${frameCountOf(hardAbs)}`);
+  assert(isRed(frameRgbAt(hardAbs, 35)), "the preview still ends the previous clip on its last frame");
+  const afterDrop = frameRgbAt(hardAbs, 36);
+  assert(
+    afterDrop.g > 100 && afterDrop.r < 40 && afterDrop.b < 40 && !isRed(afterDrop),
+    `the repeated first frame of the next clip is gone, got ${JSON.stringify(afterDrop)}`
+  );
+  assert(storage.listJobs(seamProjectColors.id).length === colorJobsBefore, "the color preview added no take");
+  assert(storage.getJob(colorJobNext.id)?.outputPath === nextClip.rel, "the next take file was not replaced");
+
+  storage.updateProject(seamProjectColors.id, { seamMode: "cut", chainTrimStartFrames: 3 });
+  const trim3Seam = await stitch.previewSeam(seamProjectColors.id, colorNext.id);
+  const trim3SeamAbs = storage.resolveDataPath(trim3Seam.outputPath);
+  assert(
+    trim3Seam.seams[0]?.mode === "cut" && trim3Seam.seams[0]?.droppedFrames === 3,
+    `seam preview trims 3 start frames, got drop ${trim3Seam.seams[0]?.droppedFrames}`
+  );
+  assert(frameCountOf(trim3SeamAbs) === 69, `a trim of 3 should leave 36+36-3 frames, got ${frameCountOf(trim3SeamAbs)}`);
+  assert(isRed(frameRgbAt(trim3SeamAbs, 35)), "the preview still ends the previous clip on its last frame");
+  const afterTrim3 = frameRgbAt(trim3SeamAbs, 36);
+  assert(
+    afterTrim3.g > 100 && afterTrim3.r < 40 && afterTrim3.b < 40 && !isRed(afterTrim3),
+    `trim 3 skips the repeated frame and the next two, got ${JSON.stringify(afterTrim3)}`
+  );
+
+  storage.updateProject(seamProjectColors.id, { dropDuplicateFrame: false });
+  const keptPreview = await stitch.previewSeam(seamProjectColors.id, colorNext.id);
+  const keptPreviewAbs = storage.resolveDataPath(keptPreview.outputPath);
+  assert(keptPreview.seams[0]?.mode === "cut" && keptPreview.seams[0]?.droppedFrames === 0, "turning the drop off keeps both frames in the preview");
+  assert(frameCountOf(keptPreviewAbs) === 72, `keeping the repeated frame should be 72 frames, got ${frameCountOf(keptPreviewAbs)}`);
+  assert(isRed(frameRgbAt(keptPreviewAbs, 35)) && isRed(frameRgbAt(keptPreviewAbs, 36)), "with the drop off the red frame plays twice");
+
+  storage.updateProject(seamProjectColors.id, { seamMode: "crossfade", seamFadeSec: 0.5, dropDuplicateFrame: true });
+  const fadePreview = await stitch.previewSeam(seamProjectColors.id, colorNext.id);
+  assert(
+    fadePreview.seams[0]?.mode === "crossfade" &&
+      fadePreview.seams[0]?.droppedFrames === 0 &&
+      fadePreview.seams[0]?.fadeSec === 0.5,
+    `crossfade preview keeps the fade and does not drop, got ${fadePreview.seams[0]?.mode} ${fadePreview.seams[0]?.fadeSec} drop ${fadePreview.seams[0]?.droppedFrames}`
+  );
+  assert(
+    fadePreview.durationSec > 2.3 && fadePreview.durationSec < 2.7,
+    `crossfade preview should be about 2.5s, got ${fadePreview.durationSec}`
+  );
+  assert(fadePreview.durationSec < hardPreview.durationSec - 0.2, "the crossfade preview is shorter than the hard cut");
+
+  storage.updateProject(seamProjectColors.id, { seamMode: "cut", dropDuplicateFrame: true });
+  storage.updateShot(colorNext.id, { chainFromPrevious: false });
+  const freePreview = await stitch.previewSeam(seamProjectColors.id, colorNext.id);
+  const freeAbs = storage.resolveDataPath(freePreview.outputPath);
+  assert(freePreview.seams[0]?.mode === "cut" && freePreview.seams[0]?.droppedFrames === 0, "an unchained preview does not drop a frame");
+  assert(frameCountOf(freeAbs) === 72, `an unchained preview should keep 72 frames, got ${frameCountOf(freeAbs)}`);
+  assert(isRed(frameRgbAt(freeAbs, 35)) && isRed(frameRgbAt(freeAbs, 36)), "an unchained preview keeps both frames at the join");
+  let missingPrev = false;
+  try {
+    await stitch.previewSeam(seamProjectColors.id, colorPrev.id);
+  } catch (err) {
+    missingPrev = err instanceof Error && /no join/i.test(err.message);
+  }
+  assert(missingPrev, "the first shot has no seam to preview");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "color seam previews stayed on ffmpeg");
 
   console.log("provider checks ok");
   console.log(dataDir);

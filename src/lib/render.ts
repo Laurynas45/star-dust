@@ -1,4 +1,5 @@
 import { resolveComfyChoice } from "./comfy-choice";
+import { chainStaleMarks } from "./chain-stale";
 import { chainProviderNote, planChain } from "./continuity";
 import { creditEstimate, deductCredits } from "./credits";
 import { buildEstimate, withCredits } from "./cost";
@@ -13,8 +14,16 @@ import {
   modelNameFor,
 } from "./provider-info";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "./safety";
-import { createJob, getProject, getSettings, getShot, listJobs, listShots } from "./storage";
-import { classifyShot, skipReasonText } from "./takes";
+import {
+  clearTakeSelection,
+  createJob,
+  getProject,
+  getSettings,
+  getShot,
+  listJobs,
+  listShots,
+} from "./storage";
+import { PlannedShot, classifyShot, projectRenderPlan, skipReasonText } from "./takes";
 import { imageExists } from "./uploads";
 import {
   AppSettings,
@@ -180,6 +189,14 @@ function comfyForShot(shot: Shot, settings: AppSettings) {
   });
 }
 
+function modelForShot(shot: Shot, provider: ProviderId, settings: AppSettings): string {
+  return modelNameFor(
+    provider,
+    settings,
+    provider === "comfyui" ? comfyForShot(shot, settings) : undefined
+  );
+}
+
 function queueJob(
   shot: Shot,
   provider: ProviderId,
@@ -232,12 +249,8 @@ export function renderShot(
     settings,
     provider === "comfyui" ? comfyForShot(prepared.shot, settings) : undefined
   );
-  const decision = classifyShot(
-    prepared.shot,
-    listJobs(prepared.shot.projectId),
-    provider,
-    modelName
-  );
+  const existing = listJobs(prepared.shot.projectId);
+  const decision = classifyShot(prepared.shot, existing, provider, modelName);
   if (decision.action === "skip" && (decision.reason === "inflight" || !opts?.force)) {
     if (decision.reason === "inflight") {
       return { ok: false, status: 409, error: skipReasonText("inflight") };
@@ -268,6 +281,14 @@ export function renderShot(
   if (key) return key;
   const charged = chargeCredits(provider, seconds, `shot ${prepared.shot.id}`);
   if (charged) return charged;
+  const mark = chainStaleMarks({
+    shots: listShots(prepared.shot.projectId),
+    jobs: existing,
+    provider,
+    styleBase: getProject(prepared.shot.projectId)?.styleBase ?? "",
+    modelNameForShot: (shot) => modelForShot(shot, provider, settings),
+  }).find((item) => item.id === prepared.shot.id);
+  if (mark?.immediate) clearTakeSelection(prepared.shot.id);
   const chain = prepared.shot.chainFromPrevious ? plan : undefined;
   return {
     ok: true,
@@ -295,34 +316,35 @@ export function renderAll(
   const provider = settings.provider;
   const modelName = modelNameFor(provider, settings);
   const existing = listJobs(projectId);
+  const plan = projectRenderPlan(shots, existing, provider, (shot) => modelForShot(shot, provider, settings), project.styleBase);
   const skipped: SkippedShot[] = [];
-  const pending: Shot[] = [];
-  for (const shot of shots) {
-    const shotModel =
-      provider === "comfyui"
-        ? modelNameFor(provider, settings, comfyForShot(shot, settings))
-        : modelName;
-    const decision = classifyShot(shot, existing, provider, shotModel);
-    if (decision.action === "skip") {
+  const pending: PlannedShot[] = [];
+  for (const item of plan) {
+    if (item.action === "skip") {
       skipped.push({
-        shotId: shot.id,
-        position: shot.position,
-        reason: skipReasonText(decision.reason),
-        jobId: decision.jobId,
+        shotId: item.shot.id,
+        position: item.shot.position,
+        reason: skipReasonText(item.reason ?? "match"),
+        jobId: item.jobId,
       });
     } else {
-      pending.push(shot);
+      pending.push(item);
     }
   }
 
-  const batchIds = new Set(pending.map((shot) => shot.id));
-  const runnable: { shot: Shot; imagePath: string; awaitPreviousFrame: boolean }[] = [];
-  for (const shot of pending) {
-    const plan = planChain(shot, batchIds);
-    if (!plan.ok) {
-      skipped.push({ shotId: shot.id, position: shot.position, reason: plan.error });
+  const refreshIds = new Set(pending.filter((item) => item.refreshesCut).map((item) => item.shot.id));
+  const runnable: { shot: Shot; imagePath: string; awaitPreviousFrame: boolean; stale: boolean }[] = [];
+  for (const item of pending) {
+    const chain = planChain(item.shot, refreshIds);
+    if (!chain.ok) {
+      skipped.push({ shotId: item.shot.id, position: item.shot.position, reason: chain.error });
     } else {
-      runnable.push({ shot, imagePath: plan.imagePath, awaitPreviousFrame: plan.awaitPreviousFrame });
+      runnable.push({
+        shot: item.shot,
+        imagePath: chain.imagePath,
+        awaitPreviousFrame: chain.awaitPreviousFrame,
+        stale: item.stale,
+      });
     }
   }
 
@@ -363,8 +385,9 @@ export function renderAll(
   if (charged) return charged;
 
   const base = Date.now();
-  const jobs = runnable.map((item, index) =>
-    queueJob(
+  const jobs = runnable.map((item, index) => {
+    if (item.stale) clearTakeSelection(item.shot.id);
+    return queueJob(
       item.shot,
       provider,
       "take",
@@ -372,8 +395,8 @@ export function renderAll(
       item.shot.chainFromPrevious
         ? { imagePath: item.imagePath, awaitPreviousFrame: item.awaitPreviousFrame }
         : undefined
-    )
-  );
+    );
+  });
   return { ok: true, jobs, skipped, cost };
 }
 
