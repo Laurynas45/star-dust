@@ -341,6 +341,12 @@ export function patchLtxWorkflow(
   return next;
 }
 
+/** Uses the clip's stored seed so a reused key would send the same seed. */
+export function providerSeed(seed: number | undefined): number {
+  if (seed != null && Number.isFinite(seed)) return Math.floor(Math.abs(seed)) % 1_000_000_000;
+  return Math.floor(Math.random() * 1_000_000_000);
+}
+
 async function uploadComfyImage(
   base: string,
   jobId: string,
@@ -443,7 +449,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const endImageName =
     plan.workflow === "wan-flf" && endAbs ? await uploadComfyImage(base, jobId, endAbs, "end image") : null;
 
-  const seed = Math.floor(Math.random() * 1_000_000_000);
+  const seed = providerSeed(job.seed);
   let workflow: Workflow;
   if (plan.workflow === "ltx") {
     const pixels = imagePixelSize(bytes);

@@ -91,12 +91,24 @@ export function cutIsPinned(selectedJobId: string | undefined, takes: readonly {
 
 type MatchJob = Pick<
   Job,
-  "kind" | "provider" | "modelName" | "imagePath" | "endImagePath" | "prompt" | "presetId" | "durationSec"
+  | "kind"
+  | "provider"
+  | "modelName"
+  | "imagePath"
+  | "endImagePath"
+  | "prompt"
+  | "presetId"
+  | "durationSec"
+  | "seed"
 >;
 
-type MatchShot = Pick<Shot, "endImagePath" | "prompt" | "presetId" | "durationSec">;
+type MatchShot = Pick<Shot, "endImagePath" | "prompt" | "presetId" | "durationSec" | "seed">;
 
-/** Same provider, model, image(s), prompt, duration, and preset. Previews never match. */
+/**
+ * Same provider, model, image(s), prompt, duration, and preset.
+ * When the shot has a stored seed, the take's seed must match too.
+ * Previews never match.
+ */
 export function takeFieldsMatch(
   job: MatchJob,
   shot: MatchShot,
@@ -113,6 +125,7 @@ export function takeFieldsMatch(
   if (job.prompt !== effectivePrompt(styleBase, shot.prompt)) return false;
   if (job.presetId !== shot.presetId) return false;
   if (job.durationSec == null || Number(job.durationSec) !== Number(shot.durationSec)) return false;
+  if (shot.seed != null && job.seed !== shot.seed) return false;
   return true;
 }
 
@@ -132,10 +145,14 @@ export type ChainStaleShot = Pick<
   | "durationSec"
   | "comfyuiWorkflow"
   | "comfyLowMemory"
+  | "seed"
 >;
 
 export type ChainStaleJob = CutCandidate &
-  Pick<Job, "provider" | "modelName" | "endImagePath" | "prompt" | "presetId" | "durationSec" | "kind">;
+  Pick<
+    Job,
+    "provider" | "modelName" | "endImagePath" | "prompt" | "presetId" | "durationSec" | "kind" | "seed"
+  >;
 
 export type ChainStaleMark = {
   id: string;

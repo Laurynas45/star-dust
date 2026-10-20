@@ -1217,7 +1217,7 @@ async function main() {
   const skippedAll = render.renderAll(spend.id);
   assert(skippedAll.ok && skippedAll.jobs.length === 0, "render all skipped a matching take");
   assert(
-    skippedAll.ok && skippedAll.skipped.some((item) => item.reason === "Completed take already matches these inputs"),
+    skippedAll.ok && skippedAll.skipped.some((item) => item.reason === "Reused an existing clip. No new spend."),
     "skip reason names the matching take"
   );
   const skippedShot = render.renderShot(spendShot.id);
@@ -1982,7 +1982,16 @@ async function main() {
   assert(hardCut.durationSec > faded.durationSec + 0.6, "hard cut is longer than the two crossfades");
 
   const skippedChain = render.renderAll(continuity.id);
-  assert(skippedChain.ok && skippedChain.jobs.length === 0, "a current chained take is skipped like any other match");
+  const joinTrimIds = (skippedChain.ok ? skippedChain.jobs : []).map((job) => job.shotId).sort();
+  assert(
+    skippedChain.ok && JSON.stringify(joinTrimIds) === JSON.stringify([shotB.id, shotC.id].sort()),
+    `a hard cut's start-frame trim is part of the key, so the chained shots render again, got ${joinTrimIds.join(",")}`
+  );
+  assert(
+    skippedChain.ok && skippedChain.skipped.some((item) => item.shotId === shotA.id && item.reason === "Reused an existing clip. No new spend."),
+    "the unchained shot is reused when the trim does not apply"
+  );
+  for (const job of skippedChain.ok ? skippedChain.jobs : []) await providers.startJob(job.id);
 
   storage.updateShot(shotB.id, { chainFromPrevious: false });
   const afterOff = storage.listShots(continuity.id);
@@ -2991,6 +3000,250 @@ async function main() {
   }
   assert(missingPrev, "the first shot has no seam to preview");
   assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "color seam previews stayed on ffmpeg");
+
+  const inputKey = await import("../src/lib/input-key");
+  const keyTypes = await import("../src/lib/types");
+  assert(/paying again/i.test(keyTypes.REUSE_HONESTY), "reuse says it avoids paying again");
+  assert(/another backend/i.test(keyTypes.REUSE_HONESTY), "reuse does not promise identical output across backends");
+  assert(/does not lock a character/i.test(keyTypes.REUSE_HONESTY), "reuse makes no character-lock claim");
+  const keyBase = {
+    image: "img-a",
+    endImage: "",
+    prompt: "lanterns",
+    seed: 7,
+    provider: "mock",
+    model: "ffmpeg Ken Burns (mock)",
+    workflow: "",
+    lowMemory: false,
+    preset: "slow-zoom-in",
+    durationSec: 2,
+    startFrameTrim: 1 as number | null,
+    upstreamKey: "",
+  };
+  const keyOf = (patch: Partial<typeof keyBase>) => inputKey.buildInputKey({ ...keyBase, ...patch });
+  const sameKey = keyOf({});
+  assert(sameKey === keyOf({}), "the content key is deterministic");
+  assert(sameKey !== keyOf({ image: "img-b" }), "the source image is in the key");
+  assert(sameKey !== keyOf({ prompt: "other" }), "the prompt is in the key");
+  assert(sameKey !== keyOf({ seed: 8 }), "the seed is in the key");
+  assert(sameKey !== keyOf({ startFrameTrim: 0 }), "start-frame trim is in the key");
+  assert(sameKey !== keyOf({ startFrameTrim: null }), "a trim that does not apply is a different key");
+  assert(sameKey !== keyOf({ upstreamKey: "upstream" }), "the upstream clip is in the key");
+  assert(sameKey !== keyOf({ model: "other-model" }), "the model is in the key");
+  assert(sameKey !== keyOf({ provider: "fal" }), "the backend is in the key");
+  assert(comfy.providerSeed(424242) === 424242, "ComfyUI sends the stored seed");
+  const seededLtx = comfy.patchLtxWorkflow(comfy.loadLtxWorkflow(), {
+    imageName: "a.png",
+    prompt: "p",
+    seed: 424242,
+    frames: 25,
+    width: 832,
+    height: 480,
+    fps: 24,
+  });
+  const seededNoise = Object.values(seededLtx).find((node) => node.class_type === "RandomNoise");
+  assert(seededNoise?.inputs?.noise_seed === 424242, "the LTX graph receives the clip seed");
+
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  const reuseProject = storage.createProject("Reuse and retake");
+  const stillA = storage.saveUpload(reuseProject.id, "a.png", solidPng(dataDir, "reuse-a.png", "red"));
+  const stillB = storage.saveUpload(reuseProject.id, "b.png", solidPng(dataDir, "reuse-b.png", "blue"));
+  const stillC = storage.saveUpload(reuseProject.id, "c.png", solidPng(dataDir, "reuse-c.png", "green"));
+  const stillD = storage.saveUpload(reuseProject.id, "d.png", solidPng(dataDir, "reuse-d.png", "gray"));
+  const reuseA = storage.createShot({
+    projectId: reuseProject.id,
+    prompt: "Opening still.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: stillA,
+  });
+  const reuseB = storage.createShot({
+    projectId: reuseProject.id,
+    prompt: "Continue from the previous frame.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: stillB,
+    chainFromPrevious: true,
+  });
+  const reuseC = storage.createShot({
+    projectId: reuseProject.id,
+    prompt: "Continue again.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: stillC,
+    chainFromPrevious: true,
+  });
+  const reuseD = storage.createShot({
+    projectId: reuseProject.id,
+    prompt: "A separate shot.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: stillD,
+  });
+  const takesOf = (shotId: string) =>
+    storage
+      .listJobs(reuseProject.id)
+      .filter((job) => job.shotId === shotId && job.kind !== "preview" && job.status === "completed" && job.outputPath)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const finishJobs = async (jobs: { id: string }[]) => {
+    for (const job of jobs) await providers.startJob(job.id);
+  };
+  const firstPass = render.renderAll(reuseProject.id);
+  assert(firstPass.ok && firstPass.jobs.length === 4, "the reuse project queues four shots");
+  await finishJobs(firstPass.ok ? firstPass.jobs : []);
+  for (const shot of [reuseA, reuseB, reuseC, reuseD]) {
+    const take = takesOf(shot.id).at(-1);
+    const fresh = storage.getShot(shot.id);
+    assert(take?.status === "completed" && take.outputPath, `${shot.prompt} rendered on Mock`);
+    assert(take?.inputKey && take.seed != null, "the take stores a seed and a content key");
+    assert(take?.inputKey === inputKey.desiredClipKey(fresh!), "the stored key matches the current inputs");
+    assert(fs.statSync(storage.resolveDataPath(take!.outputPath!)).size > 1000, "Mock wrote an mp4 with no API key");
+  }
+  assert(takesOf(reuseC.id).at(-1)?.inputKey !== takesOf(reuseB.id).at(-1)?.inputKey, "a chained clip is not the upstream clip");
+  const jobCount = storage.listJobs(reuseProject.id).length;
+  const reusedPass = render.renderAll(reuseProject.id);
+  assert(reusedPass.ok && reusedPass.jobs.length === 0, "an unchanged sequence loads existing clips");
+  assert(
+    reusedPass.ok && reusedPass.skipped.every((item) => item.reason === keyTypes.REUSE_SKIP_REASON),
+    "reuse is labelled as no new spend"
+  );
+  assert(storage.listJobs(reuseProject.id).length === jobCount, "reuse did not queue a job");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "reuse did not need a provider key");
+
+  const styleBefore = inputKey.desiredClipKey(storage.getShot(reuseD.id)!);
+  storage.updateProject(reuseProject.id, { styleBase: "warm dusk" });
+  assert(inputKey.desiredClipKey(storage.getShot(reuseD.id)!) !== styleBefore, "shared style is part of the key");
+  storage.updateProject(reuseProject.id, { styleBase: "" });
+  assert(inputKey.desiredClipKey(storage.getShot(reuseD.id)!) === styleBefore, "clearing shared style restores the key");
+  const afterStyle = render.renderAll(reuseProject.id);
+  assert(afterStyle.ok && afterStyle.jobs.length === 0, "restoring the style reuses the clips");
+
+  const aKey = inputKey.desiredClipKey(storage.getShot(reuseA.id)!);
+  const dKey = inputKey.desiredClipKey(storage.getShot(reuseD.id)!);
+  const bKey = inputKey.desiredClipKey(storage.getShot(reuseB.id)!);
+  fs.writeFileSync(storage.resolveDataPath(stillA), solidPng(dataDir, "reuse-a-white.png", "white"));
+  assert(inputKey.desiredClipKey(storage.getShot(reuseA.id)!) !== aKey, "new image bytes change the key");
+  assert(inputKey.desiredClipKey(storage.getShot(reuseD.id)!) === dKey, "another shot's image is unchanged");
+  assert(inputKey.desiredClipKey(storage.getShot(reuseB.id)!) === bKey, "the chained key stays on the current upstream clip");
+  const imagePass = render.renderAll(reuseProject.id);
+  const imageIds = (imagePass.ok ? imagePass.jobs : []).map((job) => job.shotId).sort();
+  assert(
+    imagePass.ok && JSON.stringify(imageIds) === JSON.stringify([reuseA.id, reuseB.id, reuseC.id].sort()),
+    `a new still re-renders that shot and the chain after it, got ${imageIds.join(",")}`
+  );
+  await finishJobs(imagePass.ok ? imagePass.jobs : []);
+  assert(
+    takesOf(reuseA.id).at(-1)?.inputKey === inputKey.desiredClipKey(storage.getShot(reuseA.id)!),
+    "the new still's take matches its key"
+  );
+
+  const trimA = inputKey.desiredClipKey(storage.getShot(reuseA.id)!);
+  const trimB = inputKey.desiredClipKey(storage.getShot(reuseB.id)!);
+  storage.updateProject(reuseProject.id, { chainTrimStartFrames: 0 });
+  assert(inputKey.desiredClipKey(storage.getShot(reuseA.id)!) === trimA, "trim does not change an unchained key");
+  assert(inputKey.desiredClipKey(storage.getShot(reuseB.id)!) !== trimB, "trim changes a chained hard-cut key");
+  const trimPass = render.renderAll(reuseProject.id);
+  const trimIds = (trimPass.ok ? trimPass.jobs : []).map((job) => job.shotId).sort();
+  assert(
+    trimPass.ok && JSON.stringify(trimIds) === JSON.stringify([reuseB.id, reuseC.id].sort()),
+    `trim re-renders only the chain, got ${trimIds.join(",")}`
+  );
+  await finishJobs(trimPass.ok ? trimPass.jobs : []);
+  storage.updateProject(reuseProject.id, { chainTrimStartFrames: 1 });
+  const trimBack = render.renderAll(reuseProject.id);
+  assert(trimBack.ok && trimBack.jobs.length === 0, "restoring the trim reuses the earlier clips");
+
+  const beforeRefusal = storage.listJobs(reuseProject.id).length;
+  const seedBeforeRefusal = storage.getShot(reuseB.id)?.seed;
+  storage.updateShot(reuseB.id, { prompt: "nude child" });
+  const refusedRetake = render.retakeShot(reuseB.id);
+  assert(!refusedRetake.ok && refusedRetake.refused, "retake refuses sexual content involving a minor");
+  assert(storage.listJobs(reuseProject.id).length === beforeRefusal, "the refusal queued nothing");
+  assert(storage.getShot(reuseB.id)?.seed === seedBeforeRefusal, "the refusal did not change the seed");
+  storage.updateShot(reuseB.id, { prompt: "Continue from the previous frame." });
+
+  const keptA = takesOf(reuseA.id).at(-1)?.outputPath;
+  const keptD = takesOf(reuseD.id).at(-1)?.outputPath;
+  const oldB = takesOf(reuseB.id).at(-1)!;
+  const quote = render.quoteRetake(reuseB.id);
+  assert(quote.ok && quote.cost.total === 0 && /No charge/i.test(quote.cost.label), "Mock retake estimates no charge");
+  const retaken = render.retakeShot(reuseB.id);
+  assert(retaken.ok, "retake queues");
+  const retakeIds = (retaken.ok ? retaken.jobs : []).map((job) => job.shotId);
+  assert(JSON.stringify(retakeIds) === JSON.stringify([reuseB.id, reuseC.id]), "retake renders this shot and the chain after it");
+  const newBJob = retaken.ok ? retaken.jobs[0] : undefined;
+  assert(newBJob?.seed != null && newBJob.seed !== oldB.seed, "retake changes only this shot's seed");
+  assert(newBJob?.inputKey && newBJob.inputKey !== oldB.inputKey, "the new seed is a new key");
+  assert(retaken.ok && retaken.jobs[1]?.inputKey !== takesOf(reuseC.id).at(-1)?.inputKey, "the downstream key follows the new upstream clip");
+  const staleNow = staleOf(reuseProject.id);
+  assert(staleNow.includes(reuseC.id), "the chained shot after a retake is out of date");
+  assert(
+    !staleNow.includes(reuseA.id) && !staleNow.includes(reuseD.id) && !staleNow.includes(reuseB.id),
+    "retake does not mark the shot itself, earlier shots, or an unchained shot"
+  );
+  await providers.startJob(retaken.ok ? retaken.jobs[1].id : "");
+  assert(storage.getJob(newBJob?.id ?? "")?.status === "completed", "the retaken shot rendered on Mock");
+  assert(storage.getJob(retaken.ok ? retaken.jobs[1].id : "")?.status === "completed", "the downstream shot rendered on Mock");
+  assert(storage.getShot(reuseC.id)?.chainedFromJobId === newBJob?.id, "the chain uses the retaken take");
+  assert(takesOf(reuseB.id).length >= 2, "the earlier take is kept");
+  assert(fs.existsSync(storage.resolveDataPath(oldB.outputPath!)), "the earlier take file stays on disk");
+  assert(takesOf(reuseA.id).at(-1)?.outputPath === keptA, "the shot before the retake was not rendered");
+  assert(takesOf(reuseD.id).at(-1)?.outputPath === keptD, "the unchained shot was not rendered");
+  assert(staleOf(reuseProject.id).length === 0, "the retaken chain is current");
+  storage.selectTake(reuseB.id, oldB.id);
+  assert(staleOf(reuseProject.id).includes(reuseC.id), "picking the earlier take marks the chain out of date");
+  storage.selectTake(reuseB.id, newBJob!.id);
+  assert(staleOf(reuseProject.id).length === 0, "picking the retaken take clears the chain");
+  const afterRetake = render.renderAll(reuseProject.id);
+  assert(afterRetake.ok && afterRetake.jobs.length === 0, "the retaken sequence is reused");
+
+  const cCount = takesOf(reuseC.id).length;
+  const cutA = storage.getShot(reuseA.id)?.selectedJobId ?? takesOf(reuseA.id).at(-1)?.id;
+  const huntQuote = render.quoteHunt(reuseA.id, 3);
+  assert(
+    huntQuote.ok && huntQuote.cost.total === 0 && /No charge/i.test(huntQuote.cost.label) && /3 seeds/i.test(huntQuote.cost.label),
+    "Mock try-seeds shows no charge before running"
+  );
+  const badHunt = render.huntShot(reuseA.id, 5);
+  assert(!badHunt.ok && badHunt.status === 400, "try seeds only accepts 2, 3, or 4");
+  const hunted = render.huntShot(reuseA.id, 3);
+  assert(hunted.ok && hunted.jobs.length === 3, "try seeds queues one take per seed");
+  const huntSeeds = (hunted.ok ? hunted.jobs : []).map((job) => job.seed);
+  assert(new Set(huntSeeds).size === 3, "each candidate has its own seed");
+  assert(huntSeeds.every((seed) => seed !== takesOf(reuseA.id).at(-1)?.seed), "candidates are not the current seed");
+  assert(storage.getShot(reuseA.id)?.selectedJobId === cutA, "try seeds leaves the stitch on the current take");
+  assert(takesOf(reuseC.id).length === cCount, "try seeds does not render the chain");
+  await finishJobs(hunted.ok ? hunted.jobs : []);
+  for (const job of hunted.ok ? hunted.jobs : []) {
+    const done = storage.getJob(job.id);
+    assert(done?.status === "completed" && done.outputPath, "each seed rendered on Mock");
+    assert(fs.statSync(storage.resolveDataPath(done!.outputPath!)).size > 1000, "each candidate is an mp4");
+  }
+  const huntStitch = await stitch.stitchProject(reuseProject.id);
+  assert(huntStitch.includedJobIds[0] === cutA, "the stitch still uses the take from before try seeds");
+  const winner = hunted.ok ? hunted.jobs[1] : undefined;
+  storage.selectTake(reuseA.id, winner!.id);
+  const winnerStitch = await stitch.stitchProject(reuseProject.id);
+  assert(winnerStitch.includedJobIds[0] === winner?.id, "the user can pick a candidate");
+  assert(takesOf(reuseA.id).length >= 4, "every candidate stays a take");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "try seeds did not need a provider key");
+
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": 0.5 }, replicate: {} },
+    budgetCap: 0.2,
+  });
+  const beforePaid = storage.listJobs(reuseProject.id).length;
+  const blockedHunt = render.huntShot(reuseA.id, 3, { acknowledgeModel: "fal-ai/test-model" });
+  assert(!blockedHunt.ok && blockedHunt.overBudget, "try seeds blocks a paid run above the typed rate");
+  assert(blockedHunt.cost?.total != null && blockedHunt.cost.total > 0.2, "the block shows the estimate");
+  assert(storage.listJobs(reuseProject.id).length === beforePaid, "the blocked run queued nothing");
+  assert(
+    storage.listJobs(reuseProject.id).every((job) => job.provider !== "fal"),
+    "the blocked run did not call fal"
+  );
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
 
   console.log("provider checks ok");
   console.log(dataDir);

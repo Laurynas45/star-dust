@@ -1,7 +1,8 @@
-import { ChainStaleJob, chainStaleMarks, completedTakesFor, cutIsPinned, takeFieldsMatch } from "./chain-stale";
+import { ChainStaleJob, chainStaleMarks, completedTakesFor, cutIsPinned, cutTake, takeFieldsMatch } from "./chain-stale";
 import { startImageForMatch } from "./continuity";
+import { desiredClipKey } from "./input-key";
 import { getProject } from "./storage";
-import { Job, ProviderId, Shot } from "./types";
+import { Job, ProviderId, REUSE_SKIP_REASON, Shot } from "./types";
 
 export function isPreview(job: Job): boolean {
   return job.kind === "preview";
@@ -22,7 +23,7 @@ export type SkipReason = "inflight" | "match";
 
 export function skipReasonText(reason: SkipReason): string {
   if (reason === "inflight") return "Already queued or running";
-  return "Completed take already matches these inputs";
+  return REUSE_SKIP_REASON;
 }
 
 export type ShotDecision =
@@ -34,20 +35,26 @@ function matchDecision(
   jobs: Job[],
   provider: ProviderId,
   modelName: string,
-  styleBase: string
+  styleBase: string,
+  upstreamOverride?: string
 ): ShotDecision {
   const takes = jobs.filter((job) => job.shotId === shot.id && !isPreview(job));
   const inflight = takes.find((job) => job.status === "queued" || job.status === "running");
   if (inflight) return { action: "skip", reason: "inflight", jobId: inflight.id };
-  const matches = takes
-    .filter(
-      (job) =>
-        job.status === "completed" &&
-        Boolean(job.outputPath) &&
-        takeInputsMatch(job, shot, provider, modelName, styleBase)
-    )
+  const finished = takes
+    .filter((job) => job.status === "completed" && Boolean(job.outputPath))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  if (matches[0]) return { action: "skip", reason: "match", jobId: matches[0].id };
+  const desired = desiredClipKey(shot, upstreamOverride);
+  const keyed = finished.find((job) => Boolean(job.inputKey) && job.inputKey === desired);
+  if (keyed) return { action: "skip", reason: "match", jobId: keyed.id };
+  // Rows from before content keys have no inputKey. They still match on the
+  // older fields until a retake stores a seed on the shot.
+  if (shot.seed == null) {
+    const legacy = finished.find(
+      (job) => !job.inputKey && takeInputsMatch(job, shot, provider, modelName, styleBase)
+    );
+    if (legacy) return { action: "skip", reason: "match", jobId: legacy.id };
+  }
   return { action: "run" };
 }
 
@@ -70,6 +77,8 @@ export type PlannedShot = {
   stale: boolean;
   /** Queuing this shot replaces the take the stitch uses. */
   refreshesCut: boolean;
+  /** Reuse should put this finished take in the cut. */
+  selectJobId?: string;
 };
 
 /**
@@ -96,13 +105,24 @@ export function projectRenderPlan(
     }).map((mark) => [mark.id, mark])
   );
   let cutWillChange = false;
-  return shots.map((shot) => {
+  /** inputKey that will be in the cut, or null when this plan will render a new one. */
+  const plannedCut = new Map<string, string | null>();
+  return shots.map((shot, index) => {
     const mark = marks.get(shot.id) ?? { id: shot.id, stale: false, immediate: false };
-    const base = matchDecision(shot, jobs, provider, modelNameForShot(shot), styleBase);
+    const prev = index > 0 ? shots[index - 1] : undefined;
+    let upstreamOverride: string | undefined;
+    if (shot.chainFromPrevious && prev && plannedCut.has(prev.id)) {
+      const planned = plannedCut.get(prev.id);
+      upstreamOverride = planned == null ? "pending-render" : planned;
+    }
+    const base = matchDecision(shot, jobs, provider, modelNameForShot(shot), styleBase, upstreamOverride);
     const takes = completedTakesFor(jobs, shot.id);
     const pinned = cutIsPinned(shot.selectedJobId, takes);
+    const cut = cutTake(shot.selectedJobId, takes);
     if (base.action === "skip" && base.reason === "inflight") {
       cutWillChange = !pinned;
+      if (!pinned) plannedCut.set(shot.id, null);
+      else if (cut?.inputKey) plannedCut.set(shot.id, cut.inputKey);
       return {
         shot,
         action: "skip",
@@ -112,9 +132,21 @@ export function projectRenderPlan(
         refreshesCut: false,
       };
     }
-    const run = base.action === "run" || (mark.stale && (mark.immediate || cutWillChange));
+    const keyMatch = base.action === "skip" && base.reason === "match";
+    // A shot whose cut will change pulls the unbroken chain with it, including
+    // when the change is a new content key the field compare does not see.
+    // A finished clip for the upstream key we are about to use is still reused.
+    const chainedFromChangingCut = cutWillChange && shot.chainFromPrevious;
+    const run =
+      base.action === "run" ||
+      (mark.stale && mark.immediate) ||
+      (mark.stale && cutWillChange && !keyMatch) ||
+      (chainedFromChangingCut && !keyMatch);
     if (!run) {
-      cutWillChange = false;
+      const matched = jobs.find((job) => job.id === base.jobId);
+      const selectJobId = matched && cut?.id !== matched.id ? matched.id : undefined;
+      if (matched?.inputKey) plannedCut.set(shot.id, matched.inputKey);
+      cutWillChange = Boolean(selectJobId);
       return {
         shot,
         action: "skip",
@@ -122,10 +154,13 @@ export function projectRenderPlan(
         jobId: base.action === "skip" ? base.jobId : undefined,
         stale: mark.stale,
         refreshesCut: false,
+        selectJobId,
       };
     }
     const refreshesCut = !pinned || mark.stale;
     cutWillChange = refreshesCut;
+    if (refreshesCut) plannedCut.set(shot.id, null);
+    else if (cut?.inputKey) plannedCut.set(shot.id, cut.inputKey);
     return { shot, action: "run", stale: mark.stale, refreshesCut };
   });
 }
