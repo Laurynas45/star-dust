@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { approvedTakeMismatch } from "@/lib/approve";
 import { desiredClipKey } from "@/lib/input-key";
 import { ensureJobWorker } from "@/lib/providers";
 import {
@@ -46,10 +47,19 @@ export async function GET(
   const project = getProject(params.id);
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   const shots = listShots(params.id);
+  const jobs = listJobs(params.id);
   return NextResponse.json({
     project,
-    shots: shots.map((shot) => ({ ...shot, currentInputKey: desiredClipKey(shot) })),
-    jobs: listJobs(params.id),
+    shots: shots.map((shot) => ({
+      ...shot,
+      currentInputKey: desiredClipKey(shot),
+      approvedMismatch: approvedTakeMismatch(
+        shot,
+        jobs.find((job) => job.id === shot.approvedJobId),
+        project.styleBase
+      ),
+    })),
+    jobs,
   });
 }
 

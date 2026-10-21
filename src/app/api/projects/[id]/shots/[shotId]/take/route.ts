@@ -14,6 +14,12 @@ export async function POST(
   }
   const body = await req.json().catch(() => ({}));
   const jobId = typeof body.jobId === "string" ? body.jobId : "";
+  if (shot.approvedJobId && jobId !== shot.approvedJobId) {
+    return NextResponse.json(
+      { error: "This shot is approved. Clear approval to pick another take." },
+      { status: 409 }
+    );
+  }
   const updated = selectTake(shot.id, jobId);
   if (!updated) {
     return NextResponse.json(

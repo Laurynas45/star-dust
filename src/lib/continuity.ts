@@ -52,7 +52,7 @@ export function previousShot(shot: Shot): Shot | undefined {
 
 export function finishedTake(shot: Shot): Job | undefined {
   const takes = completedTakesFor(listJobs(shot.projectId), shot.id);
-  return cutTake(shot.selectedJobId, takes);
+  return cutTake(shot.selectedJobId, takes, shot.approvedJobId);
 }
 
 /** True when the stitch is pinned to a chosen take, so a newer render does not replace it. */

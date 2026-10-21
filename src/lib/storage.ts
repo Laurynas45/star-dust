@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import Database from "better-sqlite3";
@@ -101,7 +102,11 @@ function openDatabase(): DB {
       chained_frame_back INTEGER,
       chained_frame_request INTEGER,
       drop_duplicate_frame INTEGER,
-      chain_trim_start_frames INTEGER
+      chain_trim_start_frames INTEGER,
+      seed INTEGER,
+      approved_job_id TEXT,
+      approved_start_stamp TEXT,
+      approved_end_stamp TEXT
     );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -286,6 +291,15 @@ function migrate(db: DB) {
   if (!hasColumn(db, "jobs", "input_key")) {
     db.exec("ALTER TABLE jobs ADD COLUMN input_key TEXT");
   }
+  if (!hasColumn(db, "shots", "approved_job_id")) {
+    db.exec("ALTER TABLE shots ADD COLUMN approved_job_id TEXT");
+  }
+  if (!hasColumn(db, "shots", "approved_start_stamp")) {
+    db.exec("ALTER TABLE shots ADD COLUMN approved_start_stamp TEXT");
+  }
+  if (!hasColumn(db, "shots", "approved_end_stamp")) {
+    db.exec("ALTER TABLE shots ADD COLUMN approved_end_stamp TEXT");
+  }
 }
 
 function seedSample(db: DB) {
@@ -430,6 +444,19 @@ function mapShot(row: Record<string, unknown>): Shot {
     startImagePath: str(row.start_image_path),
     endImagePath: str(row.end_image_path),
     selectedJobId: str(row.selected_job_id),
+    approvedJobId: str(row.approved_job_id),
+    approvedStartStamp:
+      row.approved_job_id == null || row.approved_job_id === ""
+        ? undefined
+        : typeof row.approved_start_stamp === "string"
+          ? row.approved_start_stamp
+          : "",
+    approvedEndStamp:
+      row.approved_job_id == null || row.approved_job_id === ""
+        ? undefined
+        : typeof row.approved_end_stamp === "string"
+          ? row.approved_end_stamp
+          : "",
     seed: row.seed == null || !Number.isFinite(Number(row.seed)) ? undefined : Math.floor(Number(row.seed)),
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
@@ -1117,10 +1144,22 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
   return next;
 }
 
-/** Drops the pinned take so the newest completed take is the one in the cut. */
+/** Hash of an image file. Empty when the shot has no image. Missing files stay distinct from a real file. */
+export function imageStamp(relativePath: string | undefined): string {
+  if (!relativePath) return "";
+  try {
+    const abs = resolveDataPath(relativePath);
+    if (!fs.existsSync(abs)) return `missing:${relativePath}`;
+    return createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+  } catch {
+    return `missing:${relativePath}`;
+  }
+}
+
+/** Drops the pinned take so the newest completed take is the one in the cut. An approved take stays pinned. */
 export function clearTakeSelection(shotId: string): void {
   const shot = getShot(shotId);
-  if (!shot?.selectedJobId) return;
+  if (!shot?.selectedJobId || shot.approvedJobId) return;
   const now = new Date().toISOString();
   getDb()
     .prepare("UPDATE shots SET selected_job_id = NULL, updated_at = ? WHERE id = ?")
@@ -1141,6 +1180,44 @@ export function selectTake(shotId: string, jobId: string): Shot | undefined {
   getDb()
     .prepare("UPDATE shots SET selected_job_id = ?, seed = ?, updated_at = ? WHERE id = ?")
     .run(jobId, seed, now, shotId);
+  touchProject(shot.projectId);
+  return getShot(shotId);
+}
+
+/** Locks the chosen completed take. The stitch keeps it until approval is cleared. */
+export function approveTake(shotId: string, jobId: string): Shot | undefined {
+  const selected = selectTake(shotId, jobId);
+  if (!selected) return undefined;
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(
+      `UPDATE shots
+       SET approved_job_id = ?, approved_start_stamp = ?, approved_end_stamp = ?, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(
+      jobId,
+      imageStamp(selected.startImagePath),
+      imageStamp(selected.endImagePath),
+      now,
+      shotId
+    );
+  touchProject(selected.projectId);
+  return getShot(shotId);
+}
+
+/** Drops the lock. The selected take stays until the user picks another. */
+export function clearApproval(shotId: string): Shot | undefined {
+  const shot = getShot(shotId);
+  if (!shot) return undefined;
+  const now = new Date().toISOString();
+  getDb()
+    .prepare(
+      `UPDATE shots
+       SET approved_job_id = NULL, approved_start_stamp = NULL, approved_end_stamp = NULL, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(now, shotId);
   touchProject(shot.projectId);
   return getShot(shotId);
 }
