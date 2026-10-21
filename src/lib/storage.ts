@@ -277,6 +277,15 @@ function migrate(db: DB) {
        END`
     );
   }
+  if (!hasColumn(db, "shots", "seed")) {
+    db.exec("ALTER TABLE shots ADD COLUMN seed INTEGER");
+  }
+  if (!hasColumn(db, "jobs", "seed")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN seed INTEGER");
+  }
+  if (!hasColumn(db, "jobs", "input_key")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN input_key TEXT");
+  }
 }
 
 function seedSample(db: DB) {
@@ -421,6 +430,7 @@ function mapShot(row: Record<string, unknown>): Shot {
     startImagePath: str(row.start_image_path),
     endImagePath: str(row.end_image_path),
     selectedJobId: str(row.selected_job_id),
+    seed: row.seed == null || !Number.isFinite(Number(row.seed)) ? undefined : Math.floor(Number(row.seed)),
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
     chainFromPrevious: Number(row.chain_from_previous) === 1,
@@ -465,6 +475,8 @@ function mapJob(row: Record<string, unknown>): Job {
     durationSec: row.duration_sec == null ? undefined : Number(row.duration_sec),
     remoteId: str(row.remote_id),
     awaitPreviousFrame: Number(row.await_previous_frame) === 1,
+    seed: row.seed == null || !Number.isFinite(Number(row.seed)) ? undefined : Math.floor(Number(row.seed)),
+    inputKey: str(row.input_key),
   };
 }
 
@@ -718,6 +730,7 @@ export function updateShot(
       | "dropDuplicateFrame"
       | "seamMode"
       | "seamFadeSec"
+      | "seed"
     >
   >
 ): Shot | undefined {
@@ -764,6 +777,12 @@ export function updateShot(
           ? null
           : clampChainFrameBack(patch.chainedFrameRequest),
     chainTrimStartFrames: nextShotTrim(current, patch),
+    seed:
+      patch.seed === undefined
+        ? current.seed ?? null
+        : patch.seed == null || !Number.isFinite(patch.seed)
+          ? null
+          : Math.floor(Math.abs(patch.seed)) % 1_000_000_000,
     seamMode: patch.seamMode === undefined ? current.seamMode ?? null : patch.seamMode,
     seamFadeSec:
       patch.seamFadeSec === undefined
@@ -781,7 +800,7 @@ export function updateShot(
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
            seam_mode = ?, seam_fade_sec = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
-           chain_trim_start_frames = ?, updated_at = ?
+           chain_trim_start_frames = ?, seed = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -802,6 +821,7 @@ export function updateShot(
       next.chainedFrameRequest,
       next.chainTrimStartFrames == null ? null : next.chainTrimStartFrames > 0 ? 1 : 0,
       next.chainTrimStartFrames,
+      next.seed,
       next.updatedAt,
       id
     );
@@ -882,6 +902,8 @@ export function createJob(input: {
   durationSec?: number;
   progress?: number;
   awaitPreviousFrame?: boolean;
+  seed?: number;
+  inputKey?: string;
   createdAt?: string;
 }): Job {
   const now = input.createdAt ?? new Date().toISOString();
@@ -904,6 +926,11 @@ export function createJob(input: {
     durationSec: input.durationSec,
     progress: input.progress ?? 0,
     awaitPreviousFrame: Boolean(input.awaitPreviousFrame),
+    seed:
+      input.seed == null || !Number.isFinite(input.seed)
+        ? undefined
+        : Math.floor(Math.abs(input.seed)) % 1_000_000_000,
+    inputKey: input.inputKey,
     createdAt: now,
     updatedAt: now,
   };
@@ -913,8 +940,8 @@ export function createJob(input: {
         id, project_id, shot_id, prompt, preset_id, provider, kind, status, image_path,
         end_image_path, character_sheet_path, character_note, provider_note,
         output_path, error, progress, model_name, duration_sec, remote_id,
-        await_previous_frame, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)`
+        await_previous_frame, seed, input_key, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
     )
     .run(
       job.id,
@@ -935,6 +962,8 @@ export function createJob(input: {
       job.modelName ?? null,
       job.durationSec ?? null,
       job.awaitPreviousFrame ? 1 : 0,
+      job.seed ?? null,
+      job.inputKey ?? null,
       job.createdAt,
       job.updatedAt
     );
@@ -1107,9 +1136,11 @@ export function selectTake(shotId: string, jobId: string): Shot | undefined {
   if (job.kind === "preview") return undefined;
   if (job.status !== "completed" || !job.outputPath) return undefined;
   const now = new Date().toISOString();
+  const seed =
+    job.seed == null || !Number.isFinite(job.seed) ? shot.seed ?? null : Math.floor(job.seed);
   getDb()
-    .prepare("UPDATE shots SET selected_job_id = ?, updated_at = ? WHERE id = ?")
-    .run(jobId, now, shotId);
+    .prepare("UPDATE shots SET selected_job_id = ?, seed = ?, updated_at = ? WHERE id = ?")
+    .run(jobId, seed, now, shotId);
   touchProject(shot.projectId);
   return getShot(shotId);
 }

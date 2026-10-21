@@ -70,6 +70,11 @@ export interface Shot {
   endImagePath?: string;
   /** Take the stitch uses. When unset, the stitch uses the newest completed take. */
   selectedJobId?: string;
+  /**
+   * Sequence seed. Unset rows use a stable seed derived from the shot id.
+   * Retake stores a new seed here. Try seeds keeps its candidates on the takes.
+   */
+  seed?: number;
   /** Null inherits the project, then the app default. */
   comfyuiWorkflow?: ComfyWorkflowId | null;
   /** Null inherits the project, then the app default. */
@@ -143,6 +148,10 @@ export interface Job {
   remoteId?: string;
   /** The worker must extract the previous shot's last frame before the provider runs. */
   awaitPreviousFrame?: boolean;
+  /** Seed sent to the provider. Mock records it and does not resample pixels from it. */
+  seed?: number;
+  /** Content key of the inputs that produced this clip. Previews leave it unset. */
+  inputKey?: string;
 }
 
 export interface RateTable {
@@ -293,6 +302,29 @@ export const CHAIN_HONESTY =
 
 export const CHAIN_STALE_NOTE =
   "Out of date. The previous shot's take changed since this one was rendered.";
+
+export const REUSE_SKIP_REASON = "Reused an existing clip. No new spend.";
+
+export const REUSE_LABEL = "Reused · no new spend";
+
+export const REUSE_HONESTY =
+  "Reuse loads a finished clip when the still, the effective prompt (including shared style text), the seed, the backend and model or workflow, the render settings, the start-frame trim when it applies, and the upstream clip are unchanged. That avoids paying again for an unchanged shot. It does not promise the same pixels from another backend, and it does not lock a character.";
+
+export const RETAKE_NOTE =
+  "Retake gives this shot a new seed and renders it again, plus every chained shot after it. Earlier takes stay. Pick which take the stitch uses. It does not lock a character.";
+
+export const HUNT_NOTE =
+  "Try 2, 3, or 4 seeds of this one shot and pick a winner. Each candidate stays as a take. The estimate is shown first. A paid run above your typed rate is blocked. It does not lock a character.";
+
+export const HUNT_SEED_CHOICES = [2, 3, 4] as const;
+
+export type HuntSeedCount = (typeof HUNT_SEED_CHOICES)[number];
+
+export function huntSeedCount(value: unknown): HuntSeedCount | null {
+  const count = typeof value === "number" ? value : Number(value);
+  if (count === 2 || count === 3 || count === 4) return count;
+  return null;
+}
 
 /** Tail of the previous take, and head of the next, in a seam preview. */
 export const SEAM_PREVIEW_SEC = 1.5;

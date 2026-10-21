@@ -26,12 +26,18 @@ import {
   ComfyWorkflowId,
   CostEstimate,
   FRAME_BACK_HONESTY,
+  HUNT_NOTE,
+  HUNT_SEED_CHOICES,
+  HuntSeedCount,
   Job,
   MAX_SHOT_SECONDS,
   MIN_SHOT_SECONDS,
   MOTION_PRESETS,
   Project,
   ProviderId,
+  REUSE_HONESTY,
+  REUSE_LABEL,
+  RETAKE_NOTE,
   SEAM_FADE_CHOICES,
   SEAM_FRAME_HONESTY,
   SEAM_HONESTY,
@@ -50,7 +56,9 @@ type SettingsResponse = AppSettings & {
   env: { hasFalKey: boolean; hasReplicateToken: boolean };
 };
 
-type Detail = { project: Project; shots: Shot[]; jobs: Job[] };
+type StudioShot = Shot & { currentInputKey?: string };
+
+type Detail = { project: Project; shots: StudioShot[]; jobs: Job[] };
 
 type StitchResponse = {
   outputPath: string;
@@ -72,6 +80,8 @@ type SkippedShot = {
 type Pending =
   | { kind: "shot"; shotId: string; force?: boolean }
   | { kind: "all" }
+  | { kind: "retake"; shotId: string }
+  | { kind: "hunt"; shotId: string; count: HuntSeedCount }
   | { kind: "retry"; jobId: string; provider: ProviderId };
 
 export default function ProjectStudioPage() {
@@ -84,6 +94,7 @@ export default function ProjectStudioPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [ackCost, setAckCost] = useState<CostEstimate | null>(null);
+  const [huntCounts, setHuntCounts] = useState<Record<string, HuntSeedCount>>({});
   const [cost, setCost] = useState<CostEstimate | null>(null);
   const [busy, setBusy] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -266,12 +277,17 @@ export default function ProjectStudioPage() {
     const body: Record<string, unknown> = {};
     if (acknowledgeModel) body.acknowledgeModel = acknowledgeModel;
     if (action.kind === "shot" && action.force) body.force = true;
+    if (action.kind === "hunt") body.count = action.count;
     const url =
       action.kind === "all"
         ? `/api/projects/${projectId}/render`
         : action.kind === "shot"
           ? `/api/projects/${projectId}/shots/${action.shotId}/render`
-          : `/api/jobs/${action.jobId}/retry`;
+          : action.kind === "retake"
+            ? `/api/projects/${projectId}/shots/${action.shotId}/retake`
+            : action.kind === "hunt"
+              ? `/api/projects/${projectId}/shots/${action.shotId}/hunt`
+              : `/api/jobs/${action.jobId}/retry`;
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -312,12 +328,38 @@ export default function ProjectStudioPage() {
 
   function ask(action: Pending) {
     const actionProvider = action.kind === "retry" ? action.provider : provider;
-    if (isPaidProvider(actionProvider)) {
+    if (action.kind === "hunt" || isPaidProvider(actionProvider)) {
+      setAckCost(null);
       setPending(action);
       return;
     }
     void run(action);
   }
+
+  useEffect(() => {
+    if (!pending || (pending.kind !== "hunt" && pending.kind !== "retake")) return;
+    let cancelled = false;
+    const url =
+      pending.kind === "hunt"
+        ? `/api/projects/${projectId}/shots/${pending.shotId}/hunt?count=${pending.count}`
+        : `/api/projects/${projectId}/shots/${pending.shotId}/retake`;
+    void fetch(url)
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok) {
+          setError(data.error || "Could not estimate this run");
+          return;
+        }
+        setAckCost(data as CostEstimate);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Could not estimate this run");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pending, projectId]);
 
   async function onAddShot(e: React.FormEvent) {
     e.preventDefault();
@@ -598,7 +640,7 @@ export default function ProjectStudioPage() {
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
             {shots.length === 0
               ? "Add a shot, then run the list."
-              : "Skips a shot that already has a matching completed take, and any shot already queued or running. A chained shot is rendered again when an earlier take in that chain changed."}
+              : "Loads a finished clip when its inputs are unchanged, and does not spend again. A chained shot is rendered again when an earlier take in that chain changed. Retake changes one shot's seed."}
           </p>
           <button
             type="button"
@@ -608,6 +650,7 @@ export default function ProjectStudioPage() {
           >
             {busy ? "Working…" : "Render all"}
           </button>
+          <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{REUSE_HONESTY}</p>
         </article>
         <article className="panel flex flex-col p-4">
           <p className="font-mono text-[11px] text-violet-300">03 · Export stitch</p>
@@ -1349,7 +1392,12 @@ export default function ProjectStudioPage() {
                         <legend className="text-[11px] uppercase tracking-wide text-[var(--muted)]">
                           Takes kept on disk. Stitch uses the one you pick.
                         </legend>
-                        {takes.map((take, takeIndex) => (
+                        {takes.map((take, takeIndex) => {
+                          const reused =
+                            !outOfDate &&
+                            Boolean(take.inputKey) &&
+                            take.inputKey === shot.currentInputKey;
+                          return (
                           <label key={take.id} className="flex items-center gap-2 text-xs text-[var(--muted)]">
                             <input
                               type="radio"
@@ -1360,10 +1408,15 @@ export default function ProjectStudioPage() {
                             <span className="text-white">
                               Take {takeIndex + 1}
                               {chosen === take.id ? " · in the stitch" : ""}
+                              {take.seed != null ? ` · seed ${take.seed}` : ""}
                             </span>
+                            {reused && (
+                              <span className="text-emerald-300">{REUSE_LABEL}</span>
+                            )}
                             <span className="truncate">{take.modelName || take.provider}</span>
                           </label>
-                        ))}
+                          );
+                        })}
                       </fieldset>
                     )}
                     <div className="mt-3 flex flex-wrap gap-2">
@@ -1385,6 +1438,46 @@ export default function ProjectStudioPage() {
                           Re-render
                         </button>
                       )}
+                      <button
+                        type="button"
+                        className="btn-ghost !px-3 !py-1.5"
+                        disabled={busy || takeBusy}
+                        onClick={() => ask({ kind: "retake", shotId: shot.id })}
+                      >
+                        Retake
+                      </button>
+                      <label className="flex items-center gap-2 text-[11px] text-[var(--muted)]">
+                        Seeds
+                        <select
+                          className="input !w-auto !py-1"
+                          value={huntCounts[shot.id] ?? 2}
+                          disabled={busy || takeBusy}
+                          onChange={(e) => {
+                            const value = Number(e.target.value);
+                            if (value !== 2 && value !== 3 && value !== 4) return;
+                            setHuntCounts((current) => ({ ...current, [shot.id]: value }));
+                          }}
+                        >
+                          {HUNT_SEED_CHOICES.map((count) => (
+                            <option key={count} value={count}>
+                              {count}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        className="btn-ghost !px-3 !py-1.5"
+                        disabled={busy || takeBusy}
+                        onClick={() =>
+                          ask({ kind: "hunt", shotId: shot.id, count: huntCounts[shot.id] ?? 2 })
+                        }
+                      >
+                        Try seeds
+                      </button>
+                      <p className="basis-full text-[11px] leading-relaxed text-[var(--muted)]">
+                        {RETAKE_NOTE} {HUNT_NOTE}
+                      </p>
                       <button
                         type="button"
                         className="btn-ghost !px-3 !py-1.5"
@@ -1625,23 +1718,45 @@ export default function ProjectStudioPage() {
       {pending && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
           <div className="panel w-full max-w-md p-5" role="dialog" aria-modal="true" aria-labelledby="model-title">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200">
-              Cloud image-to-video
-            </p>
-            <h2 id="model-title" className="mt-2 text-xl font-semibold text-white">
-              {confirmModel}
-            </h2>
-            <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{CLOUD_RISK_NOTE}</p>
-            {pending.kind === "all" && (
-              <p className="mt-3 text-sm leading-relaxed text-white">
-                {(ackCost ?? cost)?.label ??
-                  "Cost unknown. No per-second rate is set for this model. This is not a vendor quote."}
-              </p>
-            )}
-            {(ackCost ?? cost)?.credits?.hosted && pending.kind === "all" && (
-              <p className="mt-3 text-sm leading-relaxed text-white">
-                {(ackCost ?? cost)?.credits?.label}
-              </p>
+            {pending.kind === "hunt" && !paid ? (
+              <>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300">
+                  Try seeds
+                </p>
+                <h2 id="model-title" className="mt-2 text-xl font-semibold text-white">
+                  Try {pending.count} seeds
+                </h2>
+                <p className="mt-3 text-sm leading-relaxed text-white">
+                  {ackCost?.label ?? "Estimating this run…"}
+                </p>
+                <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{HUNT_NOTE}</p>
+              </>
+            ) : (
+              <>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200">
+                  Cloud image-to-video
+                </p>
+                <h2 id="model-title" className="mt-2 text-xl font-semibold text-white">
+                  {pending.kind === "hunt"
+                    ? `Try ${pending.count} seeds`
+                    : pending.kind === "retake"
+                      ? "Retake"
+                      : confirmModel}
+                </h2>
+                <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{CLOUD_RISK_NOTE}</p>
+                {(pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake") && (
+                  <p className="mt-3 text-sm leading-relaxed text-white">
+                    {(pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.label ??
+                      "Estimating this run…"}
+                  </p>
+                )}
+                {(pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.credits?.hosted &&
+                  (pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake") && (
+                    <p className="mt-3 text-sm leading-relaxed text-white">
+                      {(pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.credits?.label}
+                    </p>
+                  )}
+              </>
             )}
             <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button
@@ -1661,13 +1776,14 @@ export default function ProjectStudioPage() {
                 disabled={
                   busy ||
                   Boolean(
-                    pending.kind === "all" &&
-                      ((ackCost ?? cost)?.overBudget || (ackCost ?? cost)?.credits?.insufficient)
+                    (pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake") &&
+                      ((pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.overBudget ||
+                        (pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.credits?.insufficient)
                   )
                 }
-                onClick={() => void run(pending, confirmModel)}
+                onClick={() => void run(pending, paid ? confirmModel : undefined)}
               >
-                {busy ? "Queuing…" : "Run this model"}
+                {busy ? "Queuing…" : pending.kind === "hunt" ? "Render these seeds" : pending.kind === "retake" ? "Retake" : "Run this model"}
               </button>
             </div>
           </div>

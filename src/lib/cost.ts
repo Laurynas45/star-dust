@@ -102,6 +102,31 @@ export function withCredits(
   return credits ? { ...estimate, credits } : estimate;
 }
 
+/**
+ * Estimate for one queued run.
+ * Unpaid providers report the seconds and no charge. Paid providers use the
+ * typed per-second rate and the budget cap.
+ */
+export function quoteRun(opts: { seconds: number; unpaidLabel: string }): CostEstimate {
+  const settings = getSettings();
+  const provider = settings.provider;
+  const modelName = modelNameFor(provider, settings);
+  const seconds = round4(Math.max(0, opts.seconds));
+  if (!isPaidProvider(provider)) {
+    return {
+      paid: false,
+      seconds,
+      ratePerSecond: null,
+      total: 0,
+      unknown: false,
+      budgetCap: settings.budgetCap,
+      overBudget: false,
+      label: opts.unpaidLabel,
+    };
+  }
+  return withCredits(buildEstimate({ provider, modelName, seconds, settings }), provider, seconds);
+}
+
 /** Seconds that a paid Render all would newly send. Skipped shots are not included. */
 export function estimateRenderAll(projectId: string): CostEstimate {
   const settings = getSettings();

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { desiredClipKey } from "@/lib/input-key";
 import { ensureJobWorker } from "@/lib/providers";
 import {
   deleteProject,
@@ -44,9 +45,10 @@ export async function GET(
   ensureJobWorker();
   const project = getProject(params.id);
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  const shots = listShots(params.id);
   return NextResponse.json({
     project,
-    shots: listShots(params.id),
+    shots: shots.map((shot) => ({ ...shot, currentInputKey: desiredClipKey(shot) })),
     jobs: listJobs(params.id),
   });
 }
