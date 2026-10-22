@@ -63,11 +63,19 @@ export type CutCandidate = {
   outputPath?: string;
 };
 
-/** The take the stitch uses: the selected completed take, otherwise the newest. */
+/**
+ * The take the stitch uses.
+ * An approved take wins. Otherwise the selected completed take, otherwise the newest.
+ */
 export function cutTake<T extends { id: string; createdAt: string }>(
   selectedJobId: string | undefined,
-  takes: readonly T[]
+  takes: readonly T[],
+  approvedJobId?: string
 ): T | undefined {
+  if (approvedJobId) {
+    const approved = takes.find((take) => take.id === approvedJobId);
+    if (approved) return approved;
+  }
   if (selectedJobId) {
     const chosen = takes.find((take) => take.id === selectedJobId);
     if (chosen) return chosen;
@@ -138,6 +146,7 @@ export type ChainStaleShot = Pick<
   | "chainedStartImagePath"
   | "chainedFrameRequest"
   | "selectedJobId"
+  | "approvedJobId"
   | "startImagePath"
   | "endImagePath"
   | "prompt"
@@ -171,6 +180,8 @@ export type ChainStaleMark = {
  * shot's current take, or when an earlier shot in that unbroken chain is out of
  * date or is about to replace its take. An unchained shot stops the walk.
  * Shots before the changed take are left alone.
+ * An approved shot is an anchor: it is never out of date, and it stops the
+ * walk, so only unapproved shots between approved takes are marked.
  */
 export function chainStaleMarks<T extends ChainStaleShot>(args: {
   shots: readonly T[];
@@ -182,7 +193,7 @@ export function chainStaleMarks<T extends ChainStaleShot>(args: {
   const cutIds = new Map<string, string | undefined>();
   for (const shot of args.shots) {
     const takes = completedTakesFor(args.jobs, shot.id);
-    cutIds.set(shot.id, cutTake(shot.selectedJobId, takes)?.id);
+    cutIds.set(shot.id, cutTake(shot.selectedJobId, takes, shot.approvedJobId)?.id);
   }
 
   let upstreamWillChange = false;
@@ -195,7 +206,8 @@ export function chainStaleMarks<T extends ChainStaleShot>(args: {
     const hasMatchingTake = takes.some((job) =>
       takeFieldsMatch(job, shot, expected, args.provider, modelName, args.styleBase)
     );
-    const pinned = cutIsPinned(shot.selectedJobId, takes);
+    const approvedHeld = Boolean(shot.approvedJobId);
+    const pinned = cutIsPinned(shot.selectedJobId, takes) || approvedHeld;
     const inflight = args.jobs.some(
       (job) =>
         job.shotId === shot.id &&
@@ -207,12 +219,16 @@ export function chainStaleMarks<T extends ChainStaleShot>(args: {
     const fromPrev = Boolean(prev && chainedStillFromTake(shot, prevCutId));
     let stale = false;
     let immediate = false;
-    if (shot.chainFromPrevious && prev && hasCutTake) {
+    if (!approvedHeld && shot.chainFromPrevious && prev && hasCutTake) {
       immediate = !fromPrev;
       stale = immediate || upstreamWillChange;
     }
-    upstreamWillChange = stale || replacesCut;
-    if (!shot.chainFromPrevious) upstreamWillChange = replacesCut;
+    if (approvedHeld) {
+      upstreamWillChange = false;
+    } else {
+      upstreamWillChange = stale || replacesCut;
+      if (!shot.chainFromPrevious) upstreamWillChange = replacesCut;
+    }
     return { id: shot.id, stale, immediate };
   });
 }

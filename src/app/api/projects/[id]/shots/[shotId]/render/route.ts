@@ -18,7 +18,8 @@ export async function POST(
   const acknowledgeModel =
     typeof body.acknowledgeModel === "string" ? body.acknowledgeModel : undefined;
   const force = body.force === true;
-  const result = renderShot(shot.id, { acknowledgeModel, force });
+  const confirmApproved = body.confirmApproved === true;
+  const result = renderShot(shot.id, { acknowledgeModel, force, confirmApproved });
   if (!result.ok) return NextResponse.json(result, { status: result.status });
   for (const job of result.jobs) enqueueJob(job.id);
   return NextResponse.json(

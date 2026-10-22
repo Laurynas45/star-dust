@@ -18,6 +18,9 @@ import {
   modelNameFor,
 } from "@/lib/provider-info";
 import {
+  APPROVE_HONESTY,
+  APPROVED_LABEL,
+  APPROVED_MISMATCH_NOTE,
   AppSettings,
   CHAIN_FRAME_BACK_CHOICES,
   CHAIN_HONESTY,
@@ -56,7 +59,7 @@ type SettingsResponse = AppSettings & {
   env: { hasFalKey: boolean; hasReplicateToken: boolean };
 };
 
-type StudioShot = Shot & { currentInputKey?: string };
+type StudioShot = Shot & { currentInputKey?: string; approvedMismatch?: boolean };
 
 type Detail = { project: Project; shots: StudioShot[]; jobs: Job[] };
 
@@ -78,10 +81,10 @@ type SkippedShot = {
 };
 
 type Pending =
-  | { kind: "shot"; shotId: string; force?: boolean }
+  | { kind: "shot"; shotId: string; force?: boolean; confirmedApproval?: boolean }
   | { kind: "all" }
-  | { kind: "retake"; shotId: string }
-  | { kind: "hunt"; shotId: string; count: HuntSeedCount }
+  | { kind: "retake"; shotId: string; confirmedApproval?: boolean }
+  | { kind: "hunt"; shotId: string; count: HuntSeedCount; confirmedApproval?: boolean }
   | { kind: "retry"; jobId: string; provider: ProviderId };
 
 export default function ProjectStudioPage() {
@@ -226,6 +229,9 @@ export default function ProjectStudioPage() {
   }
 
   function stitchChoice(shot: Shot, takes: Job[]): string | undefined {
+    if (shot.approvedJobId && takes.some((take) => take.id === shot.approvedJobId)) {
+      return shot.approvedJobId;
+    }
     if (shot.selectedJobId && takes.some((take) => take.id === shot.selectedJobId)) {
       return shot.selectedJobId;
     }
@@ -277,6 +283,7 @@ export default function ProjectStudioPage() {
     const body: Record<string, unknown> = {};
     if (acknowledgeModel) body.acknowledgeModel = acknowledgeModel;
     if (action.kind === "shot" && action.force) body.force = true;
+    if ("confirmedApproval" in action && action.confirmedApproval) body.confirmApproved = true;
     if (action.kind === "hunt") body.count = action.count;
     const url =
       action.kind === "all"
@@ -297,6 +304,11 @@ export default function ProjectStudioPage() {
       const data = await res.json();
       if (!res.ok) {
         if (data.cost) setAckCost(data.cost as CostEstimate);
+        if (data.needsApprovalConfirm && !("confirmedApproval" in action && action.confirmedApproval)) {
+          setPending(action);
+          setError(null);
+          return;
+        }
         if (data.needsModelAck && data.modelName) {
           setPending(action);
           setError(data.overBudget || data.insufficientCredits ? data.error : null);
@@ -327,6 +339,13 @@ export default function ProjectStudioPage() {
   }
 
   function ask(action: Pending) {
+    const shot = "shotId" in action ? shots.find((item) => item.id === action.shotId) : undefined;
+    if ("shotId" in action && shot?.approvedJobId && !action.confirmedApproval) {
+      setAckCost(null);
+      setError(null);
+      setPending(action);
+      return;
+    }
     const actionProvider = action.kind === "retry" ? action.provider : provider;
     if (action.kind === "hunt" || isPaidProvider(actionProvider)) {
       setAckCost(null);
@@ -451,6 +470,50 @@ export default function ProjectStudioPage() {
     } finally {
       setPreviewing(false);
     }
+  }
+
+  async function onApprove(shot: Shot, jobId: string | undefined) {
+    setError(null);
+    const res = await fetch(`/api/projects/${projectId}/shots/${shot.id}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(shot.approvedJobId ? { clear: true } : { jobId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not update approval");
+      return;
+    }
+    await load();
+  }
+
+  async function saveShotPrompt(shotId: string, nextPrompt: string) {
+    const res = await fetch(`/api/projects/${projectId}/shots/${shotId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: nextPrompt }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not save the prompt");
+      return;
+    }
+    await load();
+  }
+
+  async function replaceStartImage(shotId: string, file: File) {
+    const form = new FormData();
+    form.set("startImage", file);
+    const res = await fetch(`/api/projects/${projectId}/shots/${shotId}`, {
+      method: "PATCH",
+      body: form,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not replace the image");
+      return;
+    }
+    await load();
   }
 
   async function onSelectTake(shotId: string, jobId: string) {
@@ -598,6 +661,12 @@ export default function ProjectStudioPage() {
     pending?.kind === "retry" && settings
       ? modelNameFor(pending.provider, settings)
       : modelName;
+  const pendingShot =
+    pending && "shotId" in pending ? shots.find((shot) => shot.id === pending.shotId) : undefined;
+  const approvalGate = Boolean(
+    pendingShot?.approvedJobId &&
+      !(pending && "confirmedApproval" in pending && pending.confirmedApproval)
+  );
 
   return (
     <div className="space-y-8">
@@ -640,7 +709,7 @@ export default function ProjectStudioPage() {
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
             {shots.length === 0
               ? "Add a shot, then run the list."
-              : "Loads a finished clip when its inputs are unchanged, and does not spend again. A chained shot is rendered again when an earlier take in that chain changed. Retake changes one shot's seed."}
+              : "Loads a finished clip when its inputs are unchanged, and does not spend again. A chained shot is rendered again when an earlier take in that chain changed, unless that shot is approved. Retake changes one shot's seed and stops at the next approved take."}
           </p>
           <button
             type="button"
@@ -656,8 +725,9 @@ export default function ProjectStudioPage() {
           <p className="font-mono text-[11px] text-violet-300">03 · Export stitch</p>
           <h2 className="mt-1 text-lg font-medium text-white">One mp4, same editor</h2>
           <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
-            ffmpeg joins the take you chose. Hard cut, or a short crossfade. A chained hard cut
-            can trim a few start frames of the next clip. The stitch is not a new model.
+            ffmpeg joins the take you chose. An approved take stays in that stitch. Hard cut, or a
+            short crossfade. A chained hard cut can trim a few start frames of the next clip. The
+            stitch is not a new model.
           </p>
           <button
             type="button"
@@ -1203,8 +1273,42 @@ export default function ProjectStudioPage() {
                           Out of date
                         </span>
                       )}
+                      {shot.approvedJobId && !shot.approvedMismatch && (
+                        <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-200">
+                          {APPROVED_LABEL}
+                        </span>
+                      )}
+                      {shot.approvedMismatch && (
+                        <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
+                          {APPROVED_MISMATCH_NOTE}
+                        </span>
+                      )}
                     </div>
-                    <p className="mt-2 text-sm text-white">{shot.prompt}</p>
+                    <label className="mt-2 block text-[11px] text-[var(--muted)]">
+                      Prompt
+                      <textarea
+                        key={`${shot.id}:${shot.prompt}`}
+                        className="input mt-1 min-h-16 text-sm text-white"
+                        defaultValue={shot.prompt}
+                        onBlur={(e) => {
+                          const next = e.target.value;
+                          if (next !== shot.prompt) void saveShotPrompt(shot.id, next);
+                        }}
+                      />
+                    </label>
+                    <label className="mt-2 block text-[11px] text-[var(--muted)]">
+                      Replace start image
+                      <input
+                        className="mt-1 block w-full text-xs"
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = "";
+                          if (file) void replaceStartImage(shot.id, file);
+                        }}
+                      />
+                    </label>
                     {styleBaseText(project.styleBase) && (
                       <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[var(--muted)]">
                         Provider sees: {effectivePrompt(project.styleBase, shot.prompt)}
@@ -1387,14 +1491,39 @@ export default function ProjectStudioPage() {
                         onChange={(patch) => void saveShotPatch(shot.id, patch)}
                       />
                     )}
+                    {shot.approvedJobId && (
+                      <div className="mt-3 space-y-2">
+                        <p
+                          className={`text-sm leading-relaxed ${
+                            shot.approvedMismatch ? "text-amber-100" : "text-emerald-200"
+                          }`}
+                        >
+                          {shot.approvedMismatch ? APPROVED_MISMATCH_NOTE : "This take is approved."}
+                        </p>
+                        <p className="text-[11px] leading-relaxed text-[var(--muted)]">{APPROVE_HONESTY}</p>
+                        {shot.approvedMismatch && (
+                          <button
+                            type="button"
+                            className="btn-primary !px-3 !py-1.5 text-xs"
+                            disabled={busy || takeBusy}
+                            onClick={() => ask({ kind: "shot", shotId: shot.id, force: true })}
+                          >
+                            Re-render this shot
+                          </button>
+                        )}
+                      </div>
+                    )}
                     {takes.length > 0 && (
                       <fieldset className="mt-3 space-y-1">
                         <legend className="text-[11px] uppercase tracking-wide text-[var(--muted)]">
-                          Takes kept on disk. Stitch uses the one you pick.
+                          {shot.approvedJobId
+                            ? "Takes kept on disk. The stitch uses the approved take."
+                            : "Takes kept on disk. Stitch uses the one you pick."}
                         </legend>
                         {takes.map((take, takeIndex) => {
                           const reused =
                             !outOfDate &&
+                            !shot.approvedJobId &&
                             Boolean(take.inputKey) &&
                             take.inputKey === shot.currentInputKey;
                           return (
@@ -1403,11 +1532,13 @@ export default function ProjectStudioPage() {
                               type="radio"
                               name={`take-${shot.id}`}
                               checked={chosen === take.id}
+                              disabled={Boolean(shot.approvedJobId && take.id !== shot.approvedJobId)}
                               onChange={() => void onSelectTake(shot.id, take.id)}
                             />
                             <span className="text-white">
                               Take {takeIndex + 1}
                               {chosen === take.id ? " · in the stitch" : ""}
+                              {shot.approvedJobId === take.id ? " · approved" : ""}
                               {take.seed != null ? ` · seed ${take.seed}` : ""}
                             </span>
                             {reused && (
@@ -1420,6 +1551,14 @@ export default function ProjectStudioPage() {
                       </fieldset>
                     )}
                     <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="btn-ghost !px-3 !py-1.5"
+                        disabled={busy || takeBusy || !chosen}
+                        onClick={() => void onApprove(shot, chosen)}
+                      >
+                        {shot.approvedJobId ? "Clear approval" : "Approve take"}
+                      </button>
                       <button
                         type="button"
                         className="btn-primary !px-3 !py-1.5"
@@ -1718,7 +1857,29 @@ export default function ProjectStudioPage() {
       {pending && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
           <div className="panel w-full max-w-md p-5" role="dialog" aria-modal="true" aria-labelledby="model-title">
-            {pending.kind === "hunt" && !paid ? (
+            {approvalGate ? (
+              <>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200">
+                  Approved take
+                </p>
+                <h2 id="model-title" className="mt-2 text-xl font-semibold text-white">
+                  {pendingShot?.approvedMismatch
+                    ? APPROVED_MISMATCH_NOTE
+                    : "This shot is approved."}
+                </h2>
+                <p className="mt-3 text-sm leading-relaxed text-white">
+                  {pendingShot?.approvedMismatch
+                    ? "The prompt or image changed after you approved this take. Rendering again replaces it. Render all will not do that on its own."
+                    : pending.kind === "hunt"
+                      ? "These seeds are extra takes. The stitch keeps the approved take until you clear approval and pick another."
+                      : "Rendering again replaces the approved take. Render all will not do that on its own."}
+                </p>
+                <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{APPROVE_HONESTY}</p>
+                {(pending.kind === "retake" || pending.kind === "hunt") && ackCost?.label && (
+                  <p className="mt-3 text-sm leading-relaxed text-white">{ackCost.label}</p>
+                )}
+              </>
+            ) : pending.kind === "hunt" && !paid ? (
               <>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300">
                   Try seeds
@@ -1781,9 +1942,33 @@ export default function ProjectStudioPage() {
                         (pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.credits?.insufficient)
                   )
                 }
-                onClick={() => void run(pending, paid ? confirmModel : undefined)}
+                onClick={() => {
+                  if (approvalGate && pending && "shotId" in pending) {
+                    const next = { ...pending, confirmedApproval: true as const };
+                    const actionProvider = provider;
+                    if (pending.kind === "hunt" || isPaidProvider(actionProvider)) {
+                      setPending(next);
+                      return;
+                    }
+                    void run(next);
+                    return;
+                  }
+                  void run(pending, paid ? confirmModel : undefined);
+                }}
               >
-                {busy ? "Queuing…" : pending.kind === "hunt" ? "Render these seeds" : pending.kind === "retake" ? "Retake" : "Run this model"}
+                {busy
+                  ? "Queuing…"
+                  : approvalGate
+                    ? pending.kind === "hunt"
+                      ? "Try these seeds"
+                      : pending.kind === "retake"
+                        ? "Retake anyway"
+                        : "Re-render this shot"
+                    : pending.kind === "hunt"
+                      ? "Render these seeds"
+                      : pending.kind === "retake"
+                        ? "Retake"
+                        : "Run this model"}
               </button>
             </div>
           </div>

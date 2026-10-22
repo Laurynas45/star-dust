@@ -1,3 +1,4 @@
+import { approvalConfirmError } from "./approve";
 import { resolveComfyChoice } from "./comfy-choice";
 import { chainStaleMarks, completedTakesFor, cutTake } from "./chain-stale";
 import { chainProviderNote, planChain, previousShot } from "./continuity";
@@ -16,8 +17,10 @@ import {
 } from "./provider-info";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "./safety";
 import {
+  clearApproval,
   clearTakeSelection,
   createJob,
+  getJob,
   getProject,
   getSettings,
   getShot,
@@ -60,6 +63,7 @@ export type RenderFailure = {
   riskNote?: string;
   overBudget?: boolean;
   insufficientCredits?: boolean;
+  needsApprovalConfirm?: boolean;
   cost?: CostEstimate;
 };
 
@@ -281,22 +285,37 @@ function queueRunnable(items: RunnableShot[], provider: ProviderId): Job[] {
   });
 }
 
+function approvalBlock(shot: Shot): RenderFailure {
+  const styleBase = getProject(shot.projectId)?.styleBase ?? "";
+  const job = shot.approvedJobId ? getJob(shot.approvedJobId) : undefined;
+  return {
+    ok: false,
+    status: 409,
+    error: approvalConfirmError(shot, job, styleBase),
+    needsApprovalConfirm: true,
+  };
+}
+
 export function renderShot(
   shotId: string,
-  opts?: { acknowledgeModel?: string; force?: boolean }
+  opts?: { acknowledgeModel?: string; force?: boolean; confirmApproved?: boolean }
 ): RenderResult {
   const prepared = prepareShot(shotId);
   if (!prepared.ok) return prepared;
+  if (prepared.shot.approvedJobId && !opts?.confirmApproved) return approvalBlock(prepared.shot);
+  const shot = getShot(shotId);
+  if (!shot) return { ok: false, status: 404, error: "Shot not found" };
   const settings = getSettings();
   const provider = settings.provider;
   const modelName = modelNameFor(
     provider,
     settings,
-    provider === "comfyui" ? comfyForShot(prepared.shot, settings) : undefined
+    provider === "comfyui" ? comfyForShot(shot, settings) : undefined
   );
-  const existing = listJobs(prepared.shot.projectId);
-  const decision = classifyShot(prepared.shot, existing, provider, modelName);
-  if (decision.action === "skip" && (decision.reason === "inflight" || !opts?.force)) {
+  const existing = listJobs(shot.projectId);
+  const decision = classifyShot(shot, existing, provider, modelName);
+  const force = Boolean(opts?.force || opts?.confirmApproved);
+  if (decision.action === "skip" && (decision.reason === "inflight" || !force)) {
     if (decision.reason === "inflight") {
       return { ok: false, status: 409, error: skipReasonText("inflight") };
     }
@@ -305,37 +324,38 @@ export function renderShot(
       jobs: [],
       skipped: [
         {
-          shotId: prepared.shot.id,
-          position: prepared.shot.position,
+          shotId: shot.id,
+          position: shot.position,
           reason: skipReasonText("match"),
           jobId: decision.jobId,
         },
       ],
     };
   }
-  const plan = planChain(prepared.shot, new Set());
+  const plan = planChain(shot, new Set());
   if (!plan.ok) return { ok: false, status: 400, error: plan.error };
-  const missingEnd = flfEndFailure(prepared.shot, provider, settings);
+  const missingEnd = flfEndFailure(shot, provider, settings);
   if (missingEnd) return missingEnd;
   const ack = ackFailure(provider, opts?.acknowledgeModel);
   if (ack) return ack;
-  const seconds = Number(prepared.shot.durationSec) || 0;
+  const seconds = Number(shot.durationSec) || 0;
   const short = insufficientFailure(provider, seconds);
   if (short) return short;
   const key = keyFailure(provider);
   if (key) return key;
-  const charged = chargeCredits(provider, seconds, `shot ${prepared.shot.id}`);
+  const charged = chargeCredits(provider, seconds, `shot ${shot.id}`);
   if (charged) return charged;
   const mark = chainStaleMarks({
-    shots: listShots(prepared.shot.projectId),
+    shots: listShots(shot.projectId),
     jobs: existing,
     provider,
-    styleBase: getProject(prepared.shot.projectId)?.styleBase ?? "",
-    modelNameForShot: (shot) => modelForShot(shot, provider, settings),
-  }).find((item) => item.id === prepared.shot.id);
-  if (mark?.immediate) clearTakeSelection(prepared.shot.id);
-  const chain = prepared.shot.chainFromPrevious ? plan : undefined;
-  const seeded = getShot(prepared.shot.id) ?? prepared.shot;
+    styleBase: getProject(shot.projectId)?.styleBase ?? "",
+    modelNameForShot: (item) => modelForShot(item, provider, settings),
+  }).find((item) => item.id === shot.id);
+  if (shot.approvedJobId) clearApproval(shot.id);
+  if (mark?.immediate) clearTakeSelection(shot.id);
+  const chain = shot.chainFromPrevious ? plan : undefined;
+  const seeded = getShot(shot.id) ?? shot;
   const upstream = seeded.chainFromPrevious ? upstreamCutKey(seeded) : "";
   return {
     ok: true,
@@ -475,6 +495,7 @@ function retakeChain(shotId: string): Shot[] | undefined {
   const chain = [shots[index]];
   for (let cursor = index + 1; cursor < shots.length; cursor += 1) {
     if (!shots[cursor].chainFromPrevious) break;
+    if (shots[cursor].approvedJobId) break;
     chain.push(shots[cursor]);
   }
   return chain;
@@ -576,11 +597,18 @@ export function quoteRetake(shotId: string): { ok: true; cost: CostEstimate } | 
 }
 
 /**
- * New seed on this shot only. Renders this shot and the unbroken chain after it.
- * Earlier takes stay. Downstream shots are marked out of date by the same
- * chain walk Render all uses, because this shot's cut will change.
+ * New seed on this shot only. Renders this shot and the unbroken chain after it,
+ * stopping at the next approved take. Earlier takes stay. Downstream unapproved
+ * shots are marked out of date by the same chain walk Render all uses.
+ * An approved shot is not rendered unless the user confirms.
  */
-export function retakeShot(shotId: string, opts?: { acknowledgeModel?: string }): RenderResult {
+export function retakeShot(
+  shotId: string,
+  opts?: { acknowledgeModel?: string; confirmApproved?: boolean }
+): RenderResult {
+  const current = getShot(shotId);
+  if (!current) return { ok: false, status: 404, error: "Shot not found" };
+  if (current.approvedJobId && !opts?.confirmApproved) return approvalBlock(current);
   const chain = retakeChain(shotId);
   if (!chain) return { ok: false, status: 404, error: "Shot not found" };
   const refreshIds = new Set(chain.map((shot) => shot.id));
@@ -591,6 +619,7 @@ export function retakeShot(shotId: string, opts?: { acknowledgeModel?: string })
   if (!paid.ok) return paid;
   const head = chain[0];
   const nextSeed = freshSeed([effectiveSeed(head)]);
+  if (head.approvedJobId) clearApproval(head.id);
   updateShot(head.id, { seed: nextSeed });
   for (const shot of chain) clearTakeSelection(shot.id);
   const runnable = inspected.runnable.map((item) => {
@@ -622,12 +651,13 @@ export function quoteHunt(
 export function huntShot(
   shotId: string,
   countInput: unknown,
-  opts?: { acknowledgeModel?: string }
+  opts?: { acknowledgeModel?: string; confirmApproved?: boolean }
 ): RenderResult {
   const count = huntSeedCount(countInput);
   if (!count) return { ok: false, status: 400, error: "Choose 2, 3, or 4 seeds." };
   const shot = getShot(shotId);
   if (!shot) return { ok: false, status: 404, error: "Shot not found" };
+  if (shot.approvedJobId && !opts?.confirmApproved) return approvalBlock(shot);
   const inspected = inspectShots([shot], new Set());
   if (!("runnable" in inspected)) return inspected;
   const seconds = inspected.seconds * count;
@@ -640,7 +670,7 @@ export function huntShot(
   );
   if (!paid.ok) return paid;
   const takes = completedTakesFor(listJobs(shot.projectId), shot.id);
-  const cut = cutTake(shot.selectedJobId, takes);
+  const cut = cutTake(shot.selectedJobId, takes, shot.approvedJobId);
   if (cut && !shot.selectedJobId) selectTake(shot.id, cut.id);
   const current = getShot(shot.id) ?? shot;
   const plan = inspected.runnable[0];

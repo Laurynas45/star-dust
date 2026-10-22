@@ -131,7 +131,7 @@ export function upstreamCutKey(shot: Shot): string {
   const prev = previousShotOf(shot);
   if (!prev) return "";
   const takes = completedTakesFor(listJobs(shot.projectId), prev.id);
-  const cut = cutTake(prev.selectedJobId, takes);
+  const cut = cutTake(prev.selectedJobId, takes, prev.approvedJobId);
   if (!cut) return "";
   if (cut.inputKey) return cut.inputKey;
   return buildInputKey({

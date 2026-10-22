@@ -71,6 +71,15 @@ export interface Shot {
   /** Take the stitch uses. When unset, the stitch uses the newest completed take. */
   selectedJobId?: string;
   /**
+   * Approved take. The stitch keeps this clip. Render all, Retake, and
+   * out-of-date updates do not replace it. Unset means the shot is not approved.
+   */
+  approvedJobId?: string;
+  /** Hash of the start image at the moment the take was approved. */
+  approvedStartStamp?: string;
+  /** Hash of the end image at the moment the take was approved. Empty when there was none. */
+  approvedEndStamp?: string;
+  /**
    * Sequence seed. Unset rows use a stable seed derived from the shot id.
    * Retake stores a new seed here. Try seeds keeps its candidates on the takes.
    */
@@ -311,7 +320,16 @@ export const REUSE_HONESTY =
   "Reuse loads a finished clip when the still, the effective prompt (including shared style text), the seed, the backend and model or workflow, the render settings, the start-frame trim when it applies, and the upstream clip are unchanged. That avoids paying again for an unchanged shot. It does not promise the same pixels from another backend, and it does not lock a character.";
 
 export const RETAKE_NOTE =
-  "Retake gives this shot a new seed and renders it again, plus every chained shot after it. Earlier takes stay. Pick which take the stitch uses. It does not lock a character.";
+  "Retake gives this shot a new seed and renders it again, plus every chained shot after it until an approved take. An approved take stays. Earlier takes stay. It does not lock a character.";
+
+export const APPROVED_LABEL = "Approved";
+
+export const APPROVED_MISMATCH_NOTE = "Approved take no longer matches this shot.";
+
+export const APPROVED_HOLD_REASON = "Approved take kept. Not rendered again.";
+
+export const APPROVE_HONESTY =
+  "Approve keeps this take in the stitch. Render all, Retake, and out-of-date updates do not replace it. Only unapproved shots between approved takes are marked out of date. This does not lock a character, lip-sync, or build a long film.";
 
 export const HUNT_NOTE =
   "Try 2, 3, or 4 seeds of this one shot and pick a winner. Each candidate stays as a take. The estimate is shown first. A paid run above your typed rate is blocked. It does not lock a character.";

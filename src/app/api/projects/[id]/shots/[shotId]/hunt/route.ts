@@ -39,7 +39,8 @@ export async function POST(
   const body = await req.json().catch(() => ({}));
   const acknowledgeModel =
     typeof body.acknowledgeModel === "string" ? body.acknowledgeModel : undefined;
-  const result = huntShot(params.shotId, body.count, { acknowledgeModel });
+  const confirmApproved = body.confirmApproved === true;
+  const result = huntShot(params.shotId, body.count, { acknowledgeModel, confirmApproved });
   if (!result.ok) return NextResponse.json(result, { status: result.status });
   for (const job of result.jobs) enqueueJob(job.id);
   return NextResponse.json(

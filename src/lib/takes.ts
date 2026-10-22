@@ -2,7 +2,7 @@ import { ChainStaleJob, chainStaleMarks, completedTakesFor, cutIsPinned, cutTake
 import { startImageForMatch } from "./continuity";
 import { desiredClipKey } from "./input-key";
 import { getProject } from "./storage";
-import { Job, ProviderId, REUSE_SKIP_REASON, Shot } from "./types";
+import { APPROVED_HOLD_REASON, Job, ProviderId, REUSE_SKIP_REASON, Shot } from "./types";
 
 export function isPreview(job: Job): boolean {
   return job.kind === "preview";
@@ -19,10 +19,11 @@ export function takeInputsMatch(
   return takeFieldsMatch(job, shot, startImageForMatch(shot), provider, modelName, styleBase);
 }
 
-export type SkipReason = "inflight" | "match";
+export type SkipReason = "inflight" | "match" | "approved";
 
 export function skipReasonText(reason: SkipReason): string {
   if (reason === "inflight") return "Already queued or running";
+  if (reason === "approved") return APPROVED_HOLD_REASON;
   return REUSE_SKIP_REASON;
 }
 
@@ -87,6 +88,8 @@ export type PlannedShot = {
  * either its own still is from an older take, or an earlier shot in this same
  * plan will replace the take the chain was built from.
  * Unchained shots, and shots before that change, stay on the matching-take skip.
+ * An approved shot is skipped. It also stops the chain, so a later shot is not
+ * rendered just because something before that approved take changed.
  */
 export function projectRenderPlan(
   shots: Shot[],
@@ -108,6 +111,17 @@ export function projectRenderPlan(
   /** inputKey that will be in the cut, or null when this plan will render a new one. */
   const plannedCut = new Map<string, string | null>();
   return shots.map((shot, index) => {
+    if (shot.approvedJobId) {
+      cutWillChange = false;
+      return {
+        shot,
+        action: "skip" as const,
+        reason: "approved" as const,
+        jobId: shot.approvedJobId,
+        stale: false,
+        refreshesCut: false,
+      };
+    }
     const mark = marks.get(shot.id) ?? { id: shot.id, stale: false, immediate: false };
     const prev = index > 0 ? shots[index - 1] : undefined;
     let upstreamOverride: string | undefined;
@@ -118,7 +132,7 @@ export function projectRenderPlan(
     const base = matchDecision(shot, jobs, provider, modelNameForShot(shot), styleBase, upstreamOverride);
     const takes = completedTakesFor(jobs, shot.id);
     const pinned = cutIsPinned(shot.selectedJobId, takes);
-    const cut = cutTake(shot.selectedJobId, takes);
+    const cut = cutTake(shot.selectedJobId, takes, shot.approvedJobId);
     if (base.action === "skip" && base.reason === "inflight") {
       cutWillChange = !pinned;
       if (!pinned) plannedCut.set(shot.id, null);

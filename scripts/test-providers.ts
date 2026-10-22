@@ -3245,6 +3245,194 @@ async function main() {
   );
   storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
 
+  const approve = await import("../src/lib/approve");
+  const { APPROVED_HOLD_REASON, APPROVED_MISMATCH_NOTE, APPROVE_HONESTY } = await import("../src/lib/types");
+  assert(/approved take no longer matches this shot/i.test(APPROVED_MISMATCH_NOTE), "mismatch uses the plain sentence");
+  assert(/does not lock a character/i.test(APPROVE_HONESTY), "approve makes no character-lock claim");
+  assert(/lip-sync/i.test(APPROVE_HONESTY), "approve makes no lip-sync claim");
+  assert(/long film/i.test(APPROVE_HONESTY), "approve makes no long-film claim");
+  assert(!/api[_ ]?key/i.test(APPROVE_HONESTY), "approve copy does not mention an API key");
+
+  const anchor = (
+    id: string,
+    extra: Record<string, unknown> = {}
+  ) =>
+    ({
+      id,
+      chainFromPrevious: false,
+      chainFrameBack: 0,
+      prompt: id,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: "uploads/x.png",
+      ...extra,
+    }) as const;
+  const clip = (id: string, shotId: string, imagePath: string) =>
+    ({
+      id,
+      shotId,
+      createdAt: `2020-01-01T00:00:0${id.length}.000Z`,
+      imagePath,
+      status: "completed",
+      outputPath: `outputs/${id}.mp4`,
+      kind: "take",
+      provider: "mock",
+      modelName: mockModel,
+      prompt: shotId,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+    }) as const;
+  const marksOf = (
+    shots: ReturnType<typeof anchor>[],
+    jobs: ReturnType<typeof clip>[]
+  ) =>
+    chainStale.chainStaleMarks({
+      shots,
+      jobs,
+      provider: "mock",
+      styleBase: "",
+      modelNameForShot: () => mockModel,
+    });
+  const anchorA = anchor("A");
+  const anchorB = anchor("B", { chainFromPrevious: true, chainedFromJobId: "a1", chainedStartImagePath: "uploads/a.png" });
+  const anchorC = anchor("C", { chainFromPrevious: true, chainedFromJobId: "b1", chainedStartImagePath: "uploads/b.png" });
+  const anchorD = anchor("D", {
+    chainFromPrevious: true,
+    chainedFromJobId: "c1",
+    chainedStartImagePath: "uploads/c.png",
+    approvedJobId: "d1",
+  });
+  const anchorE = anchor("E", { chainFromPrevious: true, chainedFromJobId: "d1", chainedStartImagePath: "uploads/d.png" });
+  const anchorJobs = [
+    clip("a1", "A", "uploads/x.png"),
+    clip("b1", "B", "uploads/a.png"),
+    clip("b2", "B", "uploads/a.png"),
+    clip("c1", "C", "uploads/b.png"),
+    clip("d1", "D", "uploads/c.png"),
+    clip("e1", "E", "uploads/d.png"),
+  ];
+  const pickedB = marksOf(
+    [anchorA, { ...anchorB, selectedJobId: "b2" }, anchorC, anchorD, anchorE],
+    anchorJobs
+  );
+  const anchorStale = pickedB.filter((mark) => mark.stale).map((mark) => mark.id);
+  assert(JSON.stringify(anchorStale) === JSON.stringify(["C"]), `only the unapproved shot between approved takes is out of date, got ${anchorStale.join(",")}`);
+  assert(!pickedB.find((mark) => mark.id === "D")?.stale, "an approved shot is not out of date");
+  assert(!pickedB.find((mark) => mark.id === "E")?.stale, "a shot after an approved take is not out of date");
+  const openChain = marksOf(
+    [anchorA, { ...anchorB, selectedJobId: "b2" }, anchorC, { ...anchorD, approvedJobId: undefined }, anchorE],
+    anchorJobs
+  );
+  const openIds = openChain.filter((mark) => mark.stale).map((mark) => mark.id);
+  assert(
+    JSON.stringify(openIds) === JSON.stringify(["C", "D", "E"]),
+    `without approval the rest of the chain is out of date, got ${openIds.join(",")}`
+  );
+
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  const approveProject = storage.createProject("Approve take");
+  const stills = ["red", "blue", "green", "gray", "white"].map((color) =>
+    storage.saveUpload(approveProject.id, `${color}.png`, solidPng(dataDir, `approve-${color}.png`, color))
+  );
+  const approveShots = stills.map((still, index) =>
+    storage.createShot({
+      projectId: approveProject.id,
+      prompt: `Approve shot ${index + 1}.`,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: still,
+      chainFromPrevious: index > 0,
+    })
+  );
+  const [appA, appB, appC, appD, appE] = approveShots;
+  const queued = render.renderAll(approveProject.id);
+  assert(queued.ok && queued.jobs.length === 5, "the approve project queues five shots");
+  for (const job of queued.ok ? queued.jobs : []) await providers.startJob(job.id);
+  const takeId = (shotId: string) =>
+    storage
+      .listJobs(approveProject.id)
+      .filter((job) => job.shotId === shotId && job.kind !== "preview" && job.status === "completed")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .at(-1);
+  const approvedA = storage.approveTake(appA.id, takeId(appA.id)!.id);
+  const approvedD = storage.approveTake(appD.id, takeId(appD.id)!.id);
+  assert(approvedA?.approvedJobId === takeId(appA.id)!.id, "approval is stored on the shot");
+  assert(approvedD?.approvedStartStamp && approvedD.approvedStartStamp.length > 10, "approval stores an image stamp, not a key");
+  assert(!/sk-|fal_|r8_|whsec_|secret/i.test(JSON.stringify(approvedD)), "approval does not store an API key");
+  const held = render.renderAll(approveProject.id);
+  assert(held.ok && held.jobs.length === 0, "approving unchanged shots does not render them");
+  const between = render.retakeShot(appB.id);
+  assert(between.ok, "retake of an unapproved shot is allowed");
+  const blockedIds = (between.ok ? between.jobs : []).map((job) => job.shotId);
+  assert(
+    JSON.stringify(blockedIds) === JSON.stringify([appB.id, appC.id]),
+    `retake stops at the next approved take, got ${blockedIds.join(",")}`
+  );
+  const midStale = staleOf(approveProject.id);
+  assert(midStale.includes(appC.id), "the unapproved shot after the retake is out of date");
+  assert(!midStale.includes(appD.id) && !midStale.includes(appE.id), "approved D and the shot after it stay current");
+  assert(!midStale.includes(appA.id), "the approved opening shot is not out of date");
+  for (const job of between.ok ? between.jobs : []) await providers.startJob(job.id);
+  assert(staleOf(approveProject.id).length === 0, "finishing the in-between shots clears the mark");
+  const stitchBefore = await stitch.stitchProject(approveProject.id);
+  assert(stitchBefore.includedJobIds.includes(approvedD!.approvedJobId!), "the stitch uses the approved take");
+  const dBefore = approvedD!.approvedJobId!;
+  storage.updateShot(appD.id, { prompt: "A different action for the approved shot." });
+  const mismatched = storage.getShot(appD.id)!;
+  const mismatchJob = storage.getJob(dBefore);
+  assert(
+    approve.approvedTakeMismatch(mismatched, mismatchJob, ""),
+    "editing the prompt marks the approved take as a mismatch"
+  );
+  fs.writeFileSync(storage.resolveDataPath(stills[0]), solidPng(dataDir, "approve-red-next.png", "white"));
+  const imageMismatch = storage.getShot(appA.id)!;
+  assert(
+    approve.approvedTakeMismatch(imageMismatch, storage.getJob(imageMismatch.approvedJobId!), ""),
+    "replacing the image bytes marks the approved take as a mismatch"
+  );
+  const quiet = render.renderAll(approveProject.id);
+  const quietIds = (quiet.ok ? quiet.jobs : []).map((job) => job.shotId);
+  assert(quiet.ok && quietIds.length === 0, `render all does not re-render a mismatched approved shot, got ${quietIds.join(",")}`);
+  assert(
+    quiet.ok && quiet.skipped.some((item) => item.shotId === appA.id && item.reason === APPROVED_HOLD_REASON),
+    "render all says the approved take was kept"
+  );
+  const asked = render.renderShot(appD.id, { force: true });
+  assert(!asked.ok && asked.needsApprovalConfirm, "re-render asks before replacing an approved take");
+  assert(!asked.ok && /approved take no longer matches this shot/i.test(asked.error), "the ask uses the mismatch sentence");
+  assert(storage.getShot(appD.id)?.approvedJobId === dBefore, "the ask did not clear approval");
+  const replaced = render.renderShot(appD.id, { force: true, confirmApproved: true });
+  assert(replaced.ok && replaced.jobs.length === 1 && replaced.jobs[0]?.shotId === appD.id, "confirming re-renders only that shot");
+  assert(!storage.getShot(appD.id)?.approvedJobId, "confirming clears approval");
+  await providers.startJob(replaced.ok ? replaced.jobs[0].id : "");
+  storage.approveTake(appD.id, takeId(appD.id)!.id);
+  const refusedA = render.retakeShot(appA.id);
+  assert(!refusedA.ok && refusedA.needsApprovalConfirm, "retake asks before replacing an approved shot");
+  const retakeA = render.retakeShot(appA.id, { confirmApproved: true });
+  const retakeAIds = (retakeA.ok ? retakeA.jobs : []).map((job) => job.shotId);
+  assert(
+    retakeA.ok && JSON.stringify(retakeAIds) === JSON.stringify([appA.id, appB.id, appC.id]),
+    `a confirmed retake stops at the next approved take, got ${retakeAIds.join(",")}`
+  );
+  assert(storage.getShot(appD.id)?.approvedJobId, "the downstream approved take stays approved");
+  for (const job of retakeA.ok ? retakeA.jobs : []) await providers.startJob(job.id);
+  const huntBlocked = render.huntShot(appD.id, 2);
+  assert(!huntBlocked.ok && huntBlocked.needsApprovalConfirm, "try seeds asks when the shot is approved");
+  const huntedApproved = render.huntShot(appD.id, 2, { confirmApproved: true });
+  assert(huntedApproved.ok && huntedApproved.jobs.length === 2, "confirmed try seeds keeps extra takes");
+  assert(storage.getShot(appD.id)?.approvedJobId, "try seeds does not clear approval");
+  for (const job of huntedApproved.ok ? huntedApproved.jobs : []) await providers.startJob(job.id);
+  const finalStitch = await stitch.stitchProject(approveProject.id);
+  assert(
+    finalStitch.includedJobIds.includes(storage.getShot(appD.id)?.approvedJobId ?? ""),
+    "the stitch still uses the approved take after try seeds"
+  );
+  assert(
+    fs.statSync(storage.resolveDataPath(finalStitch.outputPath)).size > 1000,
+    "the approved stitch is an mp4 with no API key"
+  );
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "approval tests did not need a provider key");
+
   console.log("provider checks ok");
   console.log(dataDir);
 }
