@@ -337,6 +337,21 @@ function withFrameCounts(included: Included[]): Included[] {
   return included.map((part) => ({ ...part, frameCount: probeVideoFrames(part.abs) }));
 }
 
+/**
+ * Joins between the clips the stitch would include, in that order.
+ * The first clip has no join. A crossfade that does not fit becomes a hard cut.
+ * A chained hard cut from the exact last frame reports the start frames removed.
+ */
+export function planStitchSeams(
+  project: Project,
+  parts: { shotId: string; jobId: string; abs: string; shot: Shot; imagePath: string }[]
+): StitchSeam[] {
+  return seamsFor(
+    project,
+    withFrameCounts(parts.map((part) => ({ ...part, frameCount: 0 })))
+  );
+}
+
 function seamsFor(project: Project, included: Included[]): StitchSeam[] {
   const seams: StitchSeam[] = [];
   for (let index = 1; index < included.length; index += 1) {
