@@ -117,6 +117,67 @@ export function probeVideoFrames(file: string): number {
   return probeVideoStream(file).frames;
 }
 
+export interface ClipShape {
+  durationSec: number;
+  fps: number;
+  width: number;
+  height: number;
+  hasAudio: boolean;
+}
+
+/** Frame rate, size, duration, and whether the file has an audio stream. No frame count. */
+export function probeClipShape(file: string): ClipShape {
+  const probe = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "stream=codec_type,width,height,r_frame_rate,duration:format=duration",
+      "-of",
+      "json",
+      file,
+    ],
+    { encoding: "utf8" }
+  );
+  if (probe.status !== 0 || probe.error) {
+    throw ffprobeError(probe, "Could not read the clip");
+  }
+  let parsed: { streams?: Record<string, unknown>[]; format?: { duration?: unknown } };
+  try {
+    parsed = JSON.parse(String(probe.stdout)) as {
+      streams?: Record<string, unknown>[];
+      format?: { duration?: unknown };
+    };
+  } catch {
+    throw new Error("Could not read the clip");
+  }
+  const streams = parsed.streams ?? [];
+  const video = streams.find((stream) => stream.codec_type === "video");
+  if (!video) throw new Error("Could not read the clip");
+  const width = Number(video.width);
+  const height = Number(video.height);
+  const fps = parseFrameRate(String(video.r_frame_rate ?? ""));
+  if (!Number.isFinite(width) || width < 1 || !Number.isFinite(height) || height < 1 || fps <= 0) {
+    throw new Error("Could not read the clip");
+  }
+  const formatDuration = Number(parsed.format?.duration);
+  const streamDuration = Number(video.duration);
+  const durationSec =
+    Number.isFinite(formatDuration) && formatDuration > 0
+      ? formatDuration
+      : Number.isFinite(streamDuration) && streamDuration > 0
+        ? streamDuration
+        : 0;
+  return {
+    durationSec,
+    fps,
+    width,
+    height,
+    hasAudio: streams.some((stream) => stream.codec_type === "audio"),
+  };
+}
+
 export function runFfmpeg(args: string[], opts?: { jobId?: string }): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });

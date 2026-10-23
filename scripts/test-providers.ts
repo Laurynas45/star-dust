@@ -84,6 +84,52 @@ function runFfmpegSync(args: string[]) {
   if (made.status !== 0) throw new Error(made.stderr || "ffmpeg failed");
 }
 
+function hasAudioStream(file: string): boolean {
+  const probe = spawnSync(
+    "ffprobe",
+    ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", file],
+    { encoding: "utf8" }
+  );
+  return String(probe.stdout).includes("audio");
+}
+
+function videoRate(file: string): number {
+  const probe = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=r_frame_rate",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      file,
+    ],
+    { encoding: "utf8" }
+  );
+  const [num, den] = String(probe.stdout).trim().split("/").map(Number);
+  if (!Number.isFinite(num) || num <= 0) throw new Error(probe.stderr || "fps probe failed");
+  return den ? num / den : num;
+}
+
+function integratedLufs(file: string): number {
+  const probe = spawnSync(
+    "ffmpeg",
+    ["-hide_banner", "-i", file, "-af", "loudnorm=print_format=json", "-f", "null", "-"],
+    { encoding: "utf8" }
+  );
+  const text = String(probe.stderr);
+  const start = text.lastIndexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error(text.slice(-400) || "loudness probe failed");
+  const parsed = JSON.parse(text.slice(start, end + 1)) as { input_i?: string };
+  const value = Number(parsed.input_i);
+  if (!Number.isFinite(value)) throw new Error(`loudness ${parsed.input_i}`);
+  return value;
+}
+
 function frameCountOf(file: string): number {
   const probe = spawnSync(
     "ffprobe",
@@ -3655,6 +3701,349 @@ async function main() {
     delete process.env.REPLICATE_API_TOKEN;
   }
   assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN && !process.env.COMFYUI_AUTH_HEADER, "edit export did not need a provider key");
+
+  const conform = await import("../src/lib/conform");
+  const { CONFORM_HONESTY } = await import("../src/lib/types");
+  assert(conform.majorityFps([16, 16, 24]) === 16, "majority fps is 16 when 16 leads");
+  assert(conform.majorityFps([16, 24]) === 24, "an fps tie uses the higher rate");
+  assert(conform.majorityFps([25, 25, 16, 16]) === 25, "an fps tie of 25 and 16 uses 25");
+  assert(conform.majorityFps([24, 30, 30, 24]) === 30, "30 wins a tie with 24");
+  assert(conform.majorityFps([23.976, 24.2, 16]) === 24, "rates near 24 count as 24");
+  const larger = conform.majoritySize([
+    { width: 1280, height: 720 },
+    { width: 1920, height: 1080 },
+  ]);
+  assert(larger.width === 1920 && larger.height === 1080, "a size tie uses the larger frame");
+  const common = conform.majoritySize([
+    { width: 1280, height: 720 },
+    { width: 1280, height: 720 },
+    { width: 640, height: 480 },
+  ]);
+  assert(common.width === 1280 && common.height === 720, "majority size is 1280x720");
+  const wide = conform.letterboxFit(1920, 800, 1280, 720);
+  assert(wide.letterboxed && !wide.pillarboxed, "a wide frame is letterboxed");
+  assert(wide.width === 1280 && wide.height === 533 && wide.padX === 0 && wide.padY === 93, "letterbox math");
+  assert(Math.abs(wide.width / wide.height - 1920 / 800) < 0.01, "letterbox keeps the aspect ratio");
+  const square = conform.letterboxFit(640, 640, 1280, 720);
+  assert(square.pillarboxed && !square.letterboxed && square.padX === 280 && square.padY === 0, "a square frame is pillarboxed");
+  const sameFit = conform.letterboxFit(1280, 720, 1280, 720);
+  assert(!sameFit.letterboxed && !sameFit.pillarboxed && sameFit.padX === 0 && sameFit.padY === 0, "a matching frame is not padded");
+  assert(conform.conformVideoFilter(1280, 720, 24) === conform.HISTORIC_NORMALIZE, "24 fps 1280x720 keeps the old filter");
+  const rateFilter = conform.conformVideoFilter(1920, 1080, 25);
+  assert(rateFilter.includes("fps=25") && rateFilter.includes("force_original_aspect_ratio=decrease"), "conform filter sets fps and pads");
+  assert(!rateFilter.includes("setpts"), "conform filter does not speed the clip with setpts");
+  assert(conform.silenceForClip(false, true) && !conform.silenceForClip(true, true) && !conform.silenceForClip(false, false), "silence is added only for a silent clip in a mixed cut");
+  assert(conform.loudnessOn(null, true) && !conform.loudnessOn(null, false), "loudness defaults on only when a clip has audio");
+  assert(conform.loudnessOn(false, true) === false && conform.loudnessOn(true, false) === false, "loudness can be turned off, and stays off with no audio");
+  const labelPlan = conform.planTakeConform(
+    { outputFps: null, outputWidth: null, outputHeight: null, loudnessNormalize: null },
+    [
+      { shotId: "wide", fps: 16, width: 1920, height: 800, hasAudio: true },
+      { shotId: "a", fps: 24, width: 1280, height: 720, hasAudio: true },
+      { shotId: "b", fps: 24, width: 1280, height: 720, hasAudio: true },
+    ]
+  );
+  assert(labelPlan.fps === 24 && labelPlan.width === 1280 && labelPlan.height === 720, "plan uses majority 24 fps and 1280x720");
+  assert(labelPlan.shots[0].label === "16 fps → 24 fps, letterboxed", `conform label: ${labelPlan.shots[0].label}`);
+  assert(labelPlan.shots[1].label === null, "a matching clip has no conform label");
+  assert(/duplicating or dropping frames/.test(labelPlan.summary), "the summary says frames are duplicated or dropped");
+  assert(!/character lock|lip-sync|long film/i.test(labelPlan.summary), "the summary does not claim a lock");
+  assert(/duplicating or dropping frames/.test(CONFORM_HONESTY) && /not by speeding/i.test(CONFORM_HONESTY), "copy says the rate change is not a speed change");
+  assert(/does not lock a character/i.test(CONFORM_HONESTY) && /lip-sync/i.test(CONFORM_HONESTY) && /long film/i.test(CONFORM_HONESTY), "conform copy keeps the lock out of scope");
+  const tied = conform.planTakeConform(
+    { outputFps: null, outputWidth: null, outputHeight: null, loudnessNormalize: null },
+    [
+      { shotId: "slow", fps: 16, width: 640, height: 480, hasAudio: false },
+      { shotId: "fast", fps: 24, width: 1280, height: 720, hasAudio: true },
+    ]
+  );
+  assert(tied.fps === 24, "one 16 and one 24 conform to 24");
+  assert(tied.shots[0].label === "16 fps → 24 fps, pillarboxed, silence added", `mixed label: ${tied.shots[0].label}`);
+  assert(tied.loudness, "mixed audio turns loudness on");
+  const projectTarget = conform.resolveConformTarget(
+    { outputFps: 25, outputWidth: 1920, outputHeight: 1080 },
+    [{ fps: 16, width: 640, height: 480 }]
+  );
+  assert(projectTarget.fps === 25 && projectTarget.fpsSource === "project", "a project fps override wins");
+  assert(projectTarget.width === 1920 && projectTarget.height === 1080 && projectTarget.sizeSource === "project", "a project size override wins");
+  const silentArgs = stitch.conformClipArgs({
+    src: "silent.mp4",
+    dest: "out.mp4",
+    videoFilter: conform.HISTORIC_NORMALIZE,
+    withAudio: true,
+    hasAudio: false,
+  });
+  assert(silentArgs.some((arg) => arg.includes("anullsrc")), "a silent clip in a mixed cut gets a silent audio source");
+  assert(silentArgs.includes("-shortest"), "silence is trimmed to the video");
+  const quietArgs = stitch.conformClipArgs({
+    src: "silent.mp4",
+    dest: "out.mp4",
+    videoFilter: conform.HISTORIC_NORMALIZE,
+    withAudio: false,
+    hasAudio: false,
+  });
+  assert(quietArgs.includes("-an") && !quietArgs.some((arg) => arg.includes("anullsrc")), "an all-silent cut stays video only");
+  const at25 = edit.timelineEvents(
+    [
+      { filename: "a.mp4", frames: 25 },
+      { filename: "b.mp4", frames: 25 },
+    ],
+    [{ mode: "crossfade", fadeSec: 0.5, droppedFrames: 0 }],
+    25
+  );
+  assert(at25[1].dissolveFrames === 13, "a 0.5s dissolve is 13 frames at 25 fps");
+  assert(edit.dissolveFrames(0.5, 24) === 12, "the same dissolve is 12 frames at 24 fps");
+  assert(edit.framesToTimecode(25, 25) === "00:00:01:00", "25 frames at 25 fps is one second");
+  assert(edit.framesToTimecode(25, 24) === "00:00:01:01", "25 frames at 24 fps is not the same timecode");
+  assert(edit.formatCmx3600("Rate", at25, 25).includes("Timecode is 25 fps non-drop"), "EDL names the conformed rate");
+
+  function conformStill(projectId: string): string {
+    const rel = `uploads/${projectId}/conform-still.png`;
+    const abs = path.join(dataDir, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, solidPng(dataDir, `conform-still-${projectId}.png`, "red"));
+    return rel;
+  }
+
+  function attachClip(
+    projectId: string,
+    shotId: string,
+    imagePath: string,
+    filename: string,
+    args: string[]
+  ): string {
+    const { abs, rel } = storage.absoluteOutputPath(projectId, filename);
+    runFfmpegSync(["-y", ...args, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", abs]);
+    const job = storage.createJob({
+      projectId,
+      shotId,
+      prompt: "conform clip",
+      presetId: "slow-zoom-in",
+      provider: "mock",
+      status: "completed",
+      imagePath,
+    });
+    storage.updateJob(job.id, { status: "completed", outputPath: rel });
+    return rel;
+  }
+
+  const rateProject = storage.createProject("Conform rate", "");
+  const rateStill = conformStill(rateProject.id);
+  const rateShots = [0, 1, 2].map((index) =>
+    storage.createShot({
+      projectId: rateProject.id,
+      prompt: `rate ${index}`,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: rateStill,
+    })
+  );
+  attachClip(rateProject.id, rateShots[0].id, rateStill, "rate-a.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=green:s=320x180:r=16:d=0.5",
+    "-frames:v",
+    "8",
+    "-an",
+  ]);
+  attachClip(rateProject.id, rateShots[1].id, rateStill, "rate-b.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=blue:s=320x180:r=16:d=0.5",
+    "-frames:v",
+    "8",
+    "-an",
+  ]);
+  attachClip(rateProject.id, rateShots[2].id, rateStill, "rate-c.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=red:s=640x360:r=24:d=0.5",
+    "-frames:v",
+    "12",
+    "-an",
+  ]);
+  const rateExport = await edit.buildEditExport(rateProject.id);
+  assert(rateExport.edl.includes("Timecode is 16 fps non-drop"), "EDL timecode uses the majority 16 fps");
+  assert(!rateExport.edl.includes("Timecode is 24 fps"), "EDL does not stay on 24 fps when the cut is 16");
+  const rateInfo = (await import("../src/lib/ffmpeg")).probeVideoStream(
+    storage.resolveDataPath(storage.getJob(storage.listJobs(rateProject.id).find((job) => job.shotId === rateShots[2].id)!.id)!.outputPath!)
+  );
+  const framesAt16 = edit.reviewFrames(rateInfo, 16);
+  const framesAt24 = edit.reviewFrames(rateInfo, 24);
+  assert(framesAt16 !== framesAt24, "the 24 fps clip has a different length at 16 fps");
+  assert(rateExport.edl.includes(edit.framesToTimecode(framesAt16, 16)), "the 24 fps clip is timed at the conformed 16 fps");
+  assert(!rateExport.edl.includes(edit.framesToTimecode(framesAt24, 24)) || edit.framesToTimecode(framesAt16, 16) !== edit.framesToTimecode(framesAt24, 24), "24 fps timecode is not the record");
+
+  const overrideProject = storage.createProject("Conform override", "");
+  storage.updateProject(overrideProject.id, { outputFps: 25 });
+  assert(storage.getProject(overrideProject.id)?.outputFps === 25, "project fps is stored");
+  const overrideStill = conformStill(overrideProject.id);
+  const overrideShots = [0, 1].map((index) =>
+    storage.createShot({
+      projectId: overrideProject.id,
+      prompt: `override ${index}`,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: overrideStill,
+    })
+  );
+  storage.updateShot(overrideShots[1].id, { seamMode: "crossfade", seamFadeSec: 0.5 });
+  for (const [index, shot] of overrideShots.entries()) {
+    attachClip(overrideProject.id, shot.id, overrideStill, `over-${index}.mp4`, [
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=${index === 0 ? "green" : "blue"}:s=320x180:r=24:d=1`,
+      "-an",
+    ]);
+  }
+  const overrideExport = await edit.buildEditExport(overrideProject.id);
+  assert(overrideExport.edl.includes("Timecode is 25 fps non-drop"), "EDL uses the project fps override");
+  const overrideEvents = overrideExport.edl
+    .split("\n")
+    .map((line) =>
+      /^(\d+)\s+(\S+)\s+V\s+([CD])\s+(?:(\d+)\s+)?(\d\d:\d\d:\d\d:\d\d)\s+/.exec(line.trim())
+    )
+    .filter((match): match is RegExpExecArray => Boolean(match));
+  assert(overrideEvents.length === 2, "override EDL has two events");
+  assert(Number(overrideEvents[1][4]) === 13, `0.5s at 25 fps is 13 frames, got ${overrideEvents[1][4]}`);
+  storage.updateProject(overrideProject.id, { outputFps: null });
+  assert(storage.getProject(overrideProject.id)?.outputFps == null, "clearing the fps override returns to the majority");
+
+  const mixProject = storage.createProject("Conform mix", "");
+  const mixStill = conformStill(mixProject.id);
+  const mixShots = [0, 1].map((index) =>
+    storage.createShot({
+      projectId: mixProject.id,
+      prompt: `mix ${index}`,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: mixStill,
+    })
+  );
+  const silentRel = attachClip(mixProject.id, mixShots[0].id, mixStill, "mix-silent.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0x00ff00:s=640x480:r=16:d=1",
+    "-an",
+  ]);
+  const loudRel = attachClip(mixProject.id, mixShots[1].id, mixStill, "mix-loud.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=blue:s=1280x720:r=24:d=1",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:sample_rate=48000:duration=1",
+    "-c:a",
+    "aac",
+    "-shortest",
+  ]);
+  assert(!hasAudioStream(storage.resolveDataPath(silentRel)), "the first clip has no audio");
+  assert(hasAudioStream(storage.resolveDataPath(loudRel)), "the second clip has audio");
+  const mixed = await stitch.stitchProject(mixProject.id);
+  const mixedAbs = storage.resolveDataPath(mixed.outputPath);
+  const mixedDur = mediaDuration(mixedAbs);
+  assert(mixedDur > 1.85 && mixedDur < 2.3, `mixed stitch keeps duration ${mixedDur}, it does not speed 16 fps up to 24`);
+  assert(Math.abs(videoRate(mixedAbs) - 24) < 0.05, "the mixed stitch plays at the higher tie rate");
+  assert(hasAudioStream(mixedAbs), "silence was added so the mixed cut has audio");
+  const edge = (() => {
+    const png = path.join(dataDir, `edge-${probeSeq++}.png`);
+    runFfmpegSync(["-y", "-i", mixedAbs, "-vf", "crop=16:16:0:240", "-frames:v", "1", png]);
+    try {
+      return averageRgb(png);
+    } finally {
+      fs.rmSync(png, { force: true });
+    }
+  })();
+  const middle = (() => {
+    const png = path.join(dataDir, `mid-${probeSeq++}.png`);
+    runFfmpegSync(["-y", "-i", mixedAbs, "-vf", "crop=16:16:632:352", "-frames:v", "1", png]);
+    try {
+      return averageRgb(png);
+    } finally {
+      fs.rmSync(png, { force: true });
+    }
+  })();
+  assert(edge.r < 30 && edge.g < 30 && edge.b < 30, "pillarbox pad is black instead of a stretched frame");
+  assert(isGreen(middle), "the picture sits inside the pillarbox");
+  const mixedLufs = integratedLufs(mixedAbs);
+  assert(mixedLufs < -16, `EBU R128 brought the mixed cut down, measured ${mixedLufs}`);
+
+  const fadeProject = storage.createProject("Conform fade", "");
+  const fadeStill = conformStill(fadeProject.id);
+  const fadeShots = [0, 1].map((index) =>
+    storage.createShot({
+      projectId: fadeProject.id,
+      prompt: `fade ${index}`,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: fadeStill,
+    })
+  );
+  storage.updateShot(fadeShots[1].id, { seamMode: "crossfade", seamFadeSec: 0.5 });
+  attachClip(fadeProject.id, fadeShots[0].id, fadeStill, "fade-silent.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=red:s=320x180:r=24:d=1",
+    "-an",
+  ]);
+  attachClip(fadeProject.id, fadeShots[1].id, fadeStill, "fade-audio.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=blue:s=320x180:r=24:d=1",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=330:sample_rate=48000:duration=1",
+    "-c:a",
+    "aac",
+    "-shortest",
+  ]);
+  const fadedMix = await stitch.stitchProject(fadeProject.id);
+  const fadedMixAbs = storage.resolveDataPath(fadedMix.outputPath);
+  assert(hasAudioStream(fadedMixAbs), "a crossfade between a silent clip and an audio clip keeps audio");
+  const fadedMixDur = mediaDuration(fadedMixAbs);
+  assert(fadedMixDur > 1.2 && fadedMixDur < 1.9, `crossfade duration ${fadedMixDur} stays near 1.5s`);
+
+  const loudProject = storage.createProject("Conform loudness", "");
+  const loudStill = conformStill(loudProject.id);
+  const loudShot = storage.createShot({
+    projectId: loudProject.id,
+    prompt: "loud",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: loudStill,
+  });
+  attachClip(loudProject.id, loudShot.id, loudStill, "loud.mp4", [
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=gray:s=320x180:r=24:d=2",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:sample_rate=48000:duration=2",
+    "-c:a",
+    "aac",
+    "-shortest",
+  ]);
+  storage.updateProject(loudProject.id, { loudnessNormalize: false });
+  const rawStitch = await stitch.stitchProject(loudProject.id);
+  const rawLufs = integratedLufs(storage.resolveDataPath(rawStitch.outputPath));
+  storage.updateProject(loudProject.id, { loudnessNormalize: null });
+  const normStitch = await stitch.stitchProject(loudProject.id);
+  const normLufs = integratedLufs(storage.resolveDataPath(normStitch.outputPath));
+  assert(normLufs < -20 && normLufs > -26, `EBU R128 lands near -23 LUFS, measured ${normLufs}`);
+  assert(rawLufs > normLufs + 0.5, `loudness off stays louder (${rawLufs}) than EBU R128 (${normLufs})`);
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "conform checks did not need a provider key");
 
   console.log("provider checks ok");
   console.log(dataDir);

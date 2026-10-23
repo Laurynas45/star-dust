@@ -20,6 +20,7 @@ import {
 import {
   APPROVE_HONESTY,
   APPROVED_LABEL,
+  CONFORM_HONESTY,
   APPROVED_MISMATCH_NOTE,
   EDIT_EXPORT_HONESTY,
   AppSettings,
@@ -62,7 +63,24 @@ type SettingsResponse = AppSettings & {
 
 type StudioShot = Shot & { currentInputKey?: string; approvedMismatch?: boolean };
 
-type Detail = { project: Project; shots: StudioShot[]; jobs: Job[] };
+type Detail = {
+  project: Project;
+  shots: StudioShot[];
+  jobs: Job[];
+  conform?: {
+    summary: string;
+    shots: { shotId: string; label: string | null }[];
+  };
+};
+
+const OUTPUT_FPS_CHOICES = [16, 24, 25, 30] as const;
+const OUTPUT_SIZE_CHOICES = [
+  [1280, 720],
+  [1920, 1080],
+  [1024, 576],
+  [960, 544],
+  [832, 480],
+] as const;
 
 type StitchResponse = {
   outputPath: string;
@@ -624,6 +642,10 @@ export default function ProjectStudioPage() {
     seamFadeSec?: number;
     chainTrimStartFrames?: number;
     dropDuplicateFrame?: boolean;
+    outputFps?: number | null;
+    outputWidth?: number | null;
+    outputHeight?: number | null;
+    loudnessNormalize?: boolean | null;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -753,9 +775,87 @@ export default function ProjectStudioPage() {
           <h2 className="mt-1 text-lg font-medium text-white">One mp4, same editor</h2>
           <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
             ffmpeg joins the take you chose. An approved take stays in that stitch. Hard cut, or a
-            short crossfade. A chained hard cut can trim a few start frames of the next clip. The
-            stitch is not a new model.
+            short crossfade. A chained hard cut can trim a few start frames of the next clip. Mixed
+            clips are conformed to one frame rate and size first. The stitch is not a new model.
           </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <label className="text-xs text-[var(--muted)]">
+              Output frame rate
+              <select
+                className="input mt-1"
+                value={project.outputFps ?? ""}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  void saveProjectPatch({ outputFps: value === "" ? null : Number(value) });
+                }}
+              >
+                <option value="">Majority of the clips</option>
+                {(project.outputFps && !OUTPUT_FPS_CHOICES.includes(project.outputFps as (typeof OUTPUT_FPS_CHOICES)[number])
+                  ? [project.outputFps, ...OUTPUT_FPS_CHOICES]
+                  : OUTPUT_FPS_CHOICES
+                ).map((fps) => (
+                  <option key={fps} value={fps}>
+                    {fps} fps
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs text-[var(--muted)]">
+              Output size
+              <select
+                className="input mt-1"
+                value={
+                  project.outputWidth && project.outputHeight
+                    ? `${project.outputWidth}x${project.outputHeight}`
+                    : ""
+                }
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (!value) {
+                    void saveProjectPatch({ outputWidth: null, outputHeight: null });
+                    return;
+                  }
+                  const [width, height] = value.split("x").map(Number);
+                  void saveProjectPatch({ outputWidth: width, outputHeight: height });
+                }}
+              >
+                <option value="">Majority of the clips</option>
+                {OUTPUT_SIZE_CHOICES.map(([width, height]) => (
+                  <option key={`${width}x${height}`} value={`${width}x${height}`}>
+                    {width}×{height}
+                  </option>
+                ))}
+                {project.outputWidth &&
+                  project.outputHeight &&
+                  !OUTPUT_SIZE_CHOICES.some(
+                    ([width, height]) => width === project.outputWidth && height === project.outputHeight
+                  ) && (
+                    <option value={`${project.outputWidth}x${project.outputHeight}`}>
+                      {project.outputWidth}×{project.outputHeight}
+                    </option>
+                  )}
+              </select>
+            </label>
+            <label className="text-xs text-[var(--muted)]">
+              Loudness
+              <select
+                className="input mt-1"
+                value={project.loudnessNormalize == null ? "" : project.loudnessNormalize ? "on" : "off"}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  void saveProjectPatch({
+                    loudnessNormalize: value === "" ? null : value === "on",
+                  });
+                }}
+              >
+                <option value="">On when a clip has audio</option>
+                <option value="on">EBU R128 on</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+          </div>
+          <p className="mt-3 text-xs leading-relaxed text-white">{detail.conform?.summary}</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{CONFORM_HONESTY}</p>
           <button
             type="button"
             className="btn-ghost mt-3 w-full"
@@ -844,7 +944,8 @@ export default function ProjectStudioPage() {
           <h2 className="mt-1 text-lg font-medium text-white">Watch the whole edit for $0</h2>
           <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
             Renders every shot with Mock and stitches them. Camera motion on your stills, not AI
-            motion. Last-frame chaining, and the start-frame trim, apply when you render a take
+            motion. Those preview clips are conformed before they join, the same way as Export
+            stitch. Last-frame chaining, and the start-frame trim, apply when you render a take
             and export the stitch, not in this preview. Preview clips do not replace or count as
             the shot&apos;s takes.
           </p>
@@ -1258,6 +1359,7 @@ export default function ProjectStudioPage() {
                         ? `Needs shot ${prev.position}'s finished take first. Your still is not used.`
                         : `The next render starts from the ${frameWord} of the previous shot.`;
               const seamClip = seamClips[shot.id];
+              const conformLabel = detail.conform?.shots.find((row) => row.shotId === shot.id)?.label;
               return (
                 <li key={shot.id} className="panel grid gap-4 p-4 sm:grid-cols-[140px_1fr]">
                   <div className="space-y-2">
@@ -1309,6 +1411,11 @@ export default function ProjectStudioPage() {
                         {preset.label} · {shot.durationSec}s
                         {shot.endImagePath ? " · end still" : ""}
                       </span>
+                      {conformLabel && (
+                        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-sky-100">
+                          {conformLabel}
+                        </span>
+                      )}
                       {job && <StatusBadge status={job.status} />}
                       {outOfDate && (
                         <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">

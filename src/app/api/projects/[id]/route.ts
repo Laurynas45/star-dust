@@ -1,5 +1,9 @@
+import fs from "fs";
 import { NextRequest, NextResponse } from "next/server";
 import { approvedTakeMismatch } from "@/lib/approve";
+import { planTakeConform } from "@/lib/conform";
+import { finishedTake } from "@/lib/continuity";
+import { probeClipShape } from "@/lib/ffmpeg";
 import { desiredClipKey } from "@/lib/input-key";
 import { ensureJobWorker } from "@/lib/providers";
 import {
@@ -7,6 +11,7 @@ import {
   getProject,
   listJobs,
   listShots,
+  resolveDataPath,
   updateProject,
 } from "@/lib/storage";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
@@ -36,6 +41,20 @@ function seamModeField(value: unknown): SeamMode | undefined {
   return undefined;
 }
 
+function nullableNumber(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return undefined;
+}
+
+function nullableFlag(value: unknown): boolean | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "boolean") return value;
+  return undefined;
+}
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -48,8 +67,22 @@ export async function GET(
   if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
   const shots = listShots(params.id);
   const jobs = listJobs(params.id);
+  const conformClips = [];
+  for (const shot of shots) {
+    const job = finishedTake(shot);
+    if (!job?.outputPath) continue;
+    const abs = resolveDataPath(job.outputPath);
+    if (!fs.existsSync(abs)) continue;
+    try {
+      const shape = probeClipShape(abs);
+      conformClips.push({ shotId: shot.id, ...shape });
+    } catch {
+      continue;
+    }
+  }
   return NextResponse.json({
     project,
+    conform: planTakeConform(project, conformClips),
     shots: shots.map((shot) => ({
       ...shot,
       currentInputKey: desiredClipKey(shot),
@@ -93,6 +126,10 @@ export async function PATCH(
         ? clampChainTrimStartFrames(body.chainTrimStartFrames)
         : undefined,
     dropDuplicateFrame: typeof body.dropDuplicateFrame === "boolean" ? body.dropDuplicateFrame : undefined,
+    outputFps: nullableNumber(body.outputFps),
+    outputWidth: nullableNumber(body.outputWidth),
+    outputHeight: nullableNumber(body.outputHeight),
+    loudnessNormalize: nullableFlag(body.loudnessNormalize),
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

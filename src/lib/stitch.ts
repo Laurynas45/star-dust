@@ -1,6 +1,13 @@
 import fs from "fs";
+import {
+  HISTORIC_NORMALIZE,
+  LOUDNORM_FILTER,
+  conformVideoFilter,
+  loudnessOn,
+  resolveConformTarget,
+} from "./conform";
 import { finishedTake } from "./continuity";
-import { probeDurationSec, runFfmpeg } from "./ffmpeg";
+import { probeClipShape, probeDurationSec, probeVideoStream, runFfmpeg, type ClipShape } from "./ffmpeg";
 import { absoluteOutputPath, getProject, listJobs, listShots, resolveDataPath } from "./storage";
 import { probeVideoFrames } from "./ffmpeg";
 import {
@@ -51,19 +58,21 @@ type Included = {
   frameCount: number;
 };
 
-const NORMALIZE =
-  "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p";
+/** Same string the stitch used when every cut was 1280×720 at 24 fps. */
+const NORMALIZE = HISTORIC_NORMALIZE;
 
-/** Same rate the stitch normalizes to, so a 1.5s window is a fixed frame count. */
+/** Fallback when a caller does not pass the clip's own rate. A 1.5s window is then 36 frames. */
 export const SEAM_PREVIEW_FPS = 24;
 
 /** Frame span kept from one clip. A short clip keeps every frame. */
 export function seamPreviewSpan(
   frameCount: number,
-  edge: "head" | "tail"
+  edge: "head" | "tail",
+  fps = SEAM_PREVIEW_FPS
 ): { start: number; frames: number } {
   const total = Number.isFinite(frameCount) ? Math.max(0, Math.floor(frameCount)) : 0;
-  const frames = Math.min(Math.round(SEAM_PREVIEW_SEC * SEAM_PREVIEW_FPS), total);
+  const rate = Number.isFinite(fps) && fps > 0 ? fps : SEAM_PREVIEW_FPS;
+  const frames = Math.min(Math.round(SEAM_PREVIEW_SEC * rate), total);
   const start = edge === "head" ? 0 : Math.max(0, total - frames);
   return { start, frames };
 }
@@ -140,10 +149,10 @@ export function applyDropLimit(requested: number, frameCount: number): number {
   return requested;
 }
 
-export function hardCutFilterComplex(dropStartFrames: number[]): string {
+export function hardCutFilterComplex(dropStartFrames: number[], videoFilter = NORMALIZE): string {
   const filters = dropStartFrames.map((drop, index) => {
     const trim = drop > 0 ? `,trim=start_frame=${drop},setpts=PTS-STARTPTS` : "";
-    return `[${index}:v]${NORMALIZE}${trim}[v${index}]`;
+    return `[${index}:v]${videoFilter}${trim}[v${index}]`;
   });
   const concat =
     dropStartFrames.map((_, index) => `[v${index}]`).join("") +
@@ -151,12 +160,17 @@ export function hardCutFilterComplex(dropStartFrames: number[]): string {
   return [...filters, concat].join(";");
 }
 
-export function hardCutArgs(inputs: string[], output: string, dropStartFrames: number[]): string[] {
+export function hardCutArgs(
+  inputs: string[],
+  output: string,
+  dropStartFrames: number[],
+  videoFilter = NORMALIZE
+): string[] {
   const args = ["-y"];
   for (const file of inputs) args.push("-i", file);
   args.push(
     "-filter_complex",
-    hardCutFilterComplex(dropStartFrames),
+    hardCutFilterComplex(dropStartFrames, videoFilter),
     "-map",
     "[v]",
     "-c:v",
@@ -176,8 +190,120 @@ export function pairCutFilter(dropStartFrames: number): string {
   return `[1:v]trim=start_frame=${dropStartFrames},setpts=PTS-STARTPTS[b];[0:v][b]concat=n=2:v=1:a=0[v]`;
 }
 
-export function crossfadeFilter(fadeSec: number, offsetSec: number): string {
-  return `[0:v][1:v]xfade=transition=fade:duration=${fadeSec.toFixed(3)}:offset=${offsetSec.toFixed(3)},format=yuv420p[v]`;
+export function crossfadeFilter(fadeSec: number, offsetSec: number, withAudio = false): string {
+  const video = `[0:v][1:v]xfade=transition=fade:duration=${fadeSec.toFixed(3)}:offset=${offsetSec.toFixed(3)},format=yuv420p[v]`;
+  if (!withAudio) return video;
+  return `${video};[0:a][1:a]acrossfade=d=${fadeSec.toFixed(3)}:c1=tri:c2=tri[a]`;
+}
+
+/**
+ * ffmpeg args that conform one clip. The video filter uses the fps filter,
+ * which duplicates or drops frames and keeps the clip's duration.
+ * A silent clip gets an infinite silent source trimmed to the video with -shortest
+ * when the cut needs an audio stream.
+ */
+export function conformClipArgs(input: {
+  src: string;
+  dest: string;
+  videoFilter: string;
+  withAudio: boolean;
+  hasAudio: boolean;
+}): string[] {
+  if (!input.withAudio) {
+    return [
+      "-y",
+      "-i",
+      input.src,
+      "-vf",
+      input.videoFilter,
+      "-an",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      input.dest,
+    ];
+  }
+  if (!input.hasAudio) {
+    return [
+      "-y",
+      "-i",
+      input.src,
+      "-f",
+      "lavfi",
+      "-i",
+      "anullsrc=channel_layout=stereo:sample_rate=48000",
+      "-vf",
+      input.videoFilter,
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-shortest",
+      "-movflags",
+      "+faststart",
+      input.dest,
+    ];
+  }
+  return [
+    "-y",
+    "-i",
+    input.src,
+    "-vf",
+    input.videoFilter,
+    "-af",
+    "aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "-movflags",
+    "+faststart",
+    input.dest,
+  ];
+}
+
+/** Concat already-conformed clips, including a silent or real audio track on each. */
+export function preparedConcatFilter(dropStartFrames: number[], fps: number): string {
+  const filters: string[] = [];
+  const parts: string[] = [];
+  const rate = Math.max(1, fps);
+  dropStartFrames.forEach((drop, index) => {
+    const videoTrim = drop > 0 ? `trim=start_frame=${drop},setpts=PTS-STARTPTS` : "setpts=PTS-STARTPTS";
+    filters.push(`[${index}:v]${videoTrim}[v${index}]`);
+    const audioTrim =
+      drop > 0
+        ? `atrim=start=${(drop / rate).toFixed(6)},asetpts=PTS-STARTPTS`
+        : "asetpts=PTS-STARTPTS";
+    filters.push(`[${index}:a]${audioTrim}[a${index}]`);
+    parts.push(`[v${index}][a${index}]`);
+  });
+  filters.push(`${parts.join("")}concat=n=${dropStartFrames.length}:v=1:a=1[v][a]`);
+  return filters.join(";");
+}
+
+export function pairCutAudioFilter(dropStartFrames: number, fps: number): string {
+  if (dropStartFrames <= 0) return "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]";
+  const start = (dropStartFrames / Math.max(1, fps)).toFixed(6);
+  return `[1:v]trim=start_frame=${dropStartFrames},setpts=PTS-STARTPTS[b];[1:a]atrim=start=${start},asetpts=PTS-STARTPTS[ba];[0:v][0:a][b][ba]concat=n=2:v=1:a=1[v][a]`;
 }
 
 /**
@@ -372,19 +498,27 @@ async function concatClips(
   const project = getProject(projectId);
   if (!project) throw new Error("Project not found");
   const counted = withFrameCounts(included);
+  const shapes = counted.map((part) => probeClipShape(part.abs));
+  const target = resolveConformTarget(project, shapes);
+  const videoFilter = conformVideoFilter(target.width, target.height, target.fps);
+  const anyAudio = shapes.some((shape) => shape.hasAudio);
+  const withAudio = anyAudio;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const { abs: outAbs, rel } = absoluteOutputPath(projectId, `${prefix}-${stamp}.mp4`);
   const planned = seamsFor(project, counted);
-  const seams = planned.some((seam) => seam.mode === "crossfade")
-    ? await crossfadeJoin(project, projectId, stamp, counted, outAbs)
+  const crossfade = planned.some((seam) => seam.mode === "crossfade");
+  const seams = crossfade
+    ? await crossfadeJoin(project, projectId, stamp, counted, shapes, outAbs, videoFilter, withAudio, target.fps)
     : planned;
-  if (!planned.some((seam) => seam.mode === "crossfade")) {
-    await hardCut(
-      counted,
-      outAbs,
-      planned.map((seam) => seam.droppedFrames)
-    );
+  if (!crossfade) {
+    const drops = planned.map((seam) => seam.droppedFrames);
+    if (withAudio) {
+      await hardCutWithAudio(projectId, stamp, counted, shapes, outAbs, drops, videoFilter, target.fps);
+    } else {
+      await hardCut(counted, outAbs, drops, videoFilter);
+    }
   }
+  if (loudnessOn(project.loudnessNormalize, anyAudio)) await applyLoudnorm(outAbs);
   return {
     outputPath: rel,
     includedShotIds: included.map((part) => part.shotId),
@@ -396,9 +530,96 @@ async function concatClips(
   };
 }
 
-async function hardCut(included: Included[], outAbs: string, droppedFrames: number[]): Promise<void> {
+async function hardCut(
+  included: Included[],
+  outAbs: string,
+  droppedFrames: number[],
+  videoFilter: string
+): Promise<void> {
   const drops = [0, ...droppedFrames];
-  await runFfmpeg(hardCutArgs(included.map((part) => part.abs), outAbs, drops));
+  await runFfmpeg(hardCutArgs(included.map((part) => part.abs), outAbs, drops, videoFilter));
+}
+
+async function hardCutWithAudio(
+  projectId: string,
+  stamp: string,
+  included: Included[],
+  shapes: ClipShape[],
+  outAbs: string,
+  droppedFrames: number[],
+  videoFilter: string,
+  fps: number
+): Promise<void> {
+  const temps: string[] = [];
+  try {
+    const prepared: string[] = [];
+    for (let index = 0; index < included.length; index += 1) {
+      const { abs } = absoluteOutputPath(projectId, `conform-${stamp}-${index}.mp4`);
+      temps.push(abs);
+      await runFfmpeg(
+        conformClipArgs({
+          src: included[index].abs,
+          dest: abs,
+          videoFilter,
+          withAudio: true,
+          hasAudio: shapes[index]?.hasAudio ?? false,
+        })
+      );
+      prepared.push(abs);
+    }
+    const drops = [0, ...droppedFrames];
+    await runFfmpeg([
+      "-y",
+      ...prepared.flatMap((file) => ["-i", file]),
+      "-filter_complex",
+      preparedConcatFilter(drops, fps),
+      "-map",
+      "[v]",
+      "-map",
+      "[a]",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-movflags",
+      "+faststart",
+      outAbs,
+    ]);
+  } finally {
+    for (const file of temps) fs.rmSync(file, { force: true });
+  }
+}
+
+async function applyLoudnorm(file: string): Promise<void> {
+  const temp = `${file}.loud.mp4`;
+  try {
+    await runFfmpeg([
+      "-y",
+      "-i",
+      file,
+      "-af",
+      LOUDNORM_FILTER,
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-ar",
+      "48000",
+      "-movflags",
+      "+faststart",
+      temp,
+    ]);
+    fs.renameSync(temp, file);
+  } catch (error) {
+    fs.rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 async function crossfadeJoin(
@@ -406,7 +627,11 @@ async function crossfadeJoin(
   projectId: string,
   stamp: string,
   included: Included[],
-  outAbs: string
+  shapes: ClipShape[],
+  outAbs: string,
+  videoFilter: string,
+  withAudio: boolean,
+  fps: number
 ): Promise<StitchSeam[]> {
   const temps: string[] = [];
   const applied: StitchSeam[] = [];
@@ -415,21 +640,15 @@ async function crossfadeJoin(
     for (let index = 0; index < included.length; index += 1) {
       const { abs } = absoluteOutputPath(projectId, `seam-${stamp}-${index}.mp4`);
       temps.push(abs);
-      await runFfmpeg([
-        "-y",
-        "-i",
-        included[index].abs,
-        "-vf",
-        NORMALIZE,
-        "-an",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        abs,
-      ]);
+      await runFfmpeg(
+        conformClipArgs({
+          src: included[index].abs,
+          dest: abs,
+          videoFilter,
+          withAudio,
+          hasAudio: shapes[index]?.hasAudio ?? false,
+        })
+      );
       normalized.push(abs);
     }
     let current = normalized[0];
@@ -452,7 +671,7 @@ async function crossfadeJoin(
         ? outAbs
         : absoluteOutputPath(projectId, `seam-${stamp}-join-${index}.mp4`).abs;
       if (!last) temps.push(dest);
-      await joinPair(current, normalized[index], dest, seam);
+      await joinPair(current, normalized[index], dest, seam, withAudio, fps);
       current = dest;
     }
     return applied;
@@ -461,7 +680,17 @@ async function crossfadeJoin(
   }
 }
 
-async function joinPair(a: string, b: string, out: string, seam: StitchSeam): Promise<void> {
+async function joinPair(
+  a: string,
+  b: string,
+  out: string,
+  seam: StitchSeam,
+  withAudio: boolean,
+  fps: number
+): Promise<void> {
+  const audioOut = withAudio
+    ? ["-map", "[a]", "-c:a", "aac", "-ar", "48000", "-ac", "2"]
+    : [];
   if (seam.mode === "cut" || seam.fadeSec <= 0) {
     const drop = seam.mode === "cut" ? seam.droppedFrames : 0;
     await runFfmpeg([
@@ -471,9 +700,10 @@ async function joinPair(a: string, b: string, out: string, seam: StitchSeam): Pr
       "-i",
       b,
       "-filter_complex",
-      pairCutFilter(drop),
+      withAudio ? pairCutAudioFilter(drop, fps) : pairCutFilter(drop),
       "-map",
       "[v]",
+      ...audioOut,
       "-c:v",
       "libx264",
       "-pix_fmt",
@@ -492,9 +722,10 @@ async function joinPair(a: string, b: string, out: string, seam: StitchSeam): Pr
     "-i",
     b,
     "-filter_complex",
-    crossfadeFilter(seam.fadeSec, offset),
+    crossfadeFilter(seam.fadeSec, offset, withAudio),
     "-map",
     "[v]",
+    ...audioOut,
     "-c:v",
     "libx264",
     "-pix_fmt",
@@ -506,8 +737,8 @@ async function joinPair(a: string, b: string, out: string, seam: StitchSeam): Pr
 }
 
 async function trimWindow(src: string, dest: string, edge: "head" | "tail"): Promise<void> {
-  const total = probeVideoFrames(src);
-  const span = seamPreviewSpan(total, edge);
+  const info = probeVideoStream(src);
+  const span = seamPreviewSpan(info.frames, edge, info.fps);
   if (span.frames < 1) throw new Error("The clip has no video frames.");
   const end = span.start + span.frames;
   await runFfmpeg([
