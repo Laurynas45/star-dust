@@ -21,6 +21,7 @@ import {
   APPROVE_HONESTY,
   APPROVED_LABEL,
   APPROVED_MISMATCH_NOTE,
+  EDIT_EXPORT_HONESTY,
   AppSettings,
   CHAIN_FRAME_BACK_CHOICES,
   CHAIN_HONESTY,
@@ -102,6 +103,7 @@ export default function ProjectStudioPage() {
   const [busy, setBusy] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [editExporting, setEditExporting] = useState(false);
   const [stitch, setStitch] = useState<StitchResponse | null>(null);
   const [previewCut, setPreviewCut] = useState<StitchResponse | null>(null);
   const [seamBusyId, setSeamBusyId] = useState<string | null>(null);
@@ -547,6 +549,31 @@ export default function ProjectStudioPage() {
     }
   }
 
+  async function onExportEdit() {
+    setEditExporting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/export/edit`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Export failed");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const header = res.headers.get("Content-Disposition") || "";
+      const named = /filename="([^"]+)"/.exec(header);
+      link.href = url;
+      link.download = named?.[1] || "star-dust-edit.zip";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setEditExporting(false);
+    }
+  }
+
   async function onPreviewSeam(shotId: string) {
     setSeamBusyId(shotId);
     setError(null);
@@ -724,7 +751,7 @@ export default function ProjectStudioPage() {
         <article className="panel flex flex-col p-4">
           <p className="font-mono text-[11px] text-violet-300">03 · Export stitch</p>
           <h2 className="mt-1 text-lg font-medium text-white">One mp4, same editor</h2>
-          <p className="mt-1 flex-1 text-xs leading-relaxed text-[var(--muted)]">
+          <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
             ffmpeg joins the take you chose. An approved take stays in that stitch. Hard cut, or a
             short crossfade. A chained hard cut can trim a few start frames of the next clip. The
             stitch is not a new model.
@@ -737,6 +764,21 @@ export default function ProjectStudioPage() {
           >
             {exporting ? "Stitching…" : "Export stitch"}
           </button>
+          <p className="mt-3 text-xs leading-relaxed text-[var(--muted)]">
+            Export for edit downloads a zip for an editor: one chosen take per shot, a CMX3600
+            EDL, and a JSON manifest per take. The EDL carries cuts, dissolves, and in/out only.
+            It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering
+            codec.
+          </p>
+          <button
+            type="button"
+            className="btn-ghost mt-3 w-full"
+            disabled={editExporting || takeClips.length === 0}
+            onClick={() => void onExportEdit()}
+          >
+            {editExporting ? "Packing…" : "Export for edit"}
+          </button>
+          <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{EDIT_EXPORT_HONESTY}</p>
         </article>
       </section>
 

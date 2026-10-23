@@ -331,6 +331,9 @@ export const APPROVED_HOLD_REASON = "Approved take kept. Not rendered again.";
 export const APPROVE_HONESTY =
   "Approve keeps this take in the stitch. Render all, Retake, and out-of-date updates do not replace it. Only unapproved shots between approved takes are marked out of date. This does not lock a character, lip-sync, or build a long film.";
 
+export const EDIT_EXPORT_HONESTY =
+  "Export for edit zips the chosen take of each shot: the approved take when one is set, otherwise the current take. Names look like SH010_v03.mp4, so a newer version does not overwrite an earlier file. The CMX3600 EDL follows the shot list, with the same hard cuts and crossfade lengths as the stitch. It carries cuts, dissolves, and in/out only. It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering codec. This does not lock a character, lip-sync, or build a long film.";
+
 export const HUNT_NOTE =
   "Try 2, 3, or 4 seeds of this one shot and pick a winner. Each candidate stays as a take. The estimate is shown first. A paid run above your typed rate is blocked. It does not lock a character.";
 

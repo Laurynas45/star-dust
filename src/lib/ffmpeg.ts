@@ -35,7 +35,34 @@ export function probeDurationSec(file: string): number {
   return value;
 }
 
-export function probeVideoFrames(file: string): number {
+export interface VideoStreamInfo {
+  durationSec: number;
+  frames: number;
+  fps: number;
+  width: number;
+  height: number;
+}
+
+function ffprobeError(probe: ReturnType<typeof spawnSync>, fallback: string): Error {
+  if (probe.error) {
+    const code = (probe.error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return new Error("ffprobe is not on PATH. Install ffmpeg and try again.");
+    }
+    return probe.error;
+  }
+  return new Error(String(probe.stderr || fallback));
+}
+
+function parseFrameRate(rate: string): number {
+  const [num, den] = rate.split("/").map((part) => Number(part));
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  if (!Number.isFinite(den) || den === 0) return num;
+  return num / den;
+}
+
+/** Width, height, frame rate, and frame count of the first video stream. */
+export function probeVideoStream(file: string): VideoStreamInfo {
   const probe = spawnSync(
     "ffprobe",
     [
@@ -45,25 +72,49 @@ export function probeVideoFrames(file: string): number {
       "v:0",
       "-count_frames",
       "-show_entries",
-      "stream=nb_read_frames",
+      "stream=width,height,r_frame_rate,nb_read_frames,nb_frames,duration",
       "-of",
-      "default=noprint_wrappers=1:nokey=1",
+      "json",
       file,
     ],
     { encoding: "utf8" }
   );
-  if (probe.error) {
-    const code = (probe.error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      throw new Error("ffprobe is not on PATH. Install ffmpeg and try again.");
-    }
-    throw probe.error;
+  if (probe.status !== 0 || probe.error) {
+    throw ffprobeError(probe, "Could not read the video stream");
   }
-  const value = Number(String(probe.stdout).trim());
-  if (probe.status !== 0 || !Number.isFinite(value) || value < 0) {
-    throw new Error(probe.stderr || "Could not count video frames");
+  let parsed: { streams?: Record<string, unknown>[] };
+  try {
+    parsed = JSON.parse(String(probe.stdout)) as { streams?: Record<string, unknown>[] };
+  } catch {
+    throw new Error("Could not read the video stream");
   }
-  return Math.floor(value);
+  const stream = parsed.streams?.[0];
+  if (!stream) throw new Error("Could not read the video stream");
+  const width = Number(stream.width);
+  const height = Number(stream.height);
+  const fps = parseFrameRate(String(stream.r_frame_rate ?? ""));
+  const readFrames = Number(stream.nb_read_frames);
+  const taggedFrames = Number(stream.nb_frames);
+  const streamDuration = Number(stream.duration);
+  const frames = Number.isFinite(readFrames) && readFrames >= 0
+    ? Math.floor(readFrames)
+    : Number.isFinite(taggedFrames) && taggedFrames >= 0
+      ? Math.floor(taggedFrames)
+      : 0;
+  if (!Number.isFinite(width) || width < 1 || !Number.isFinite(height) || height < 1 || fps <= 0) {
+    throw new Error("Could not read the video stream");
+  }
+  const durationSec = Number.isFinite(streamDuration) && streamDuration >= 0
+    ? streamDuration
+    : frames > 0
+      ? frames / fps
+      : probeDurationSec(file);
+  const resolvedFrames = frames > 0 ? frames : Math.max(1, Math.round(durationSec * fps));
+  return { durationSec, frames: resolvedFrames, fps, width, height };
+}
+
+export function probeVideoFrames(file: string): number {
+  return probeVideoStream(file).frames;
 }
 
 export function runFfmpeg(args: string[], opts?: { jobId?: string }): Promise<void> {

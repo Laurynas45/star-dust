@@ -3433,6 +3433,229 @@ async function main() {
   );
   assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "approval tests did not need a provider key");
 
+  const edit = await import("../src/lib/edit-export");
+  const { createHash } = await import("crypto");
+  const JSZip = (await import("jszip")).default;
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  const editProject = storage.createProject("Edit export");
+  storage.updateProject(editProject.id, {
+    styleBase: "cool dusk grade",
+    seamMode: "cut",
+    chainTrimStartFrames: 1,
+  });
+  const editStills = ["red", "blue", "green"].map((color) =>
+    storage.saveUpload(editProject.id, `edit-${color}.png`, solidPng(dataDir, `edit-${color}.png`, color))
+  );
+  const editPrompts = ["Lanterns over the water", "Boat crosses the frame", "Dock lights fade"];
+  const editShots = editPrompts.map((prompt, index) =>
+    storage.createShot({
+      projectId: editProject.id,
+      prompt,
+      presetId: "slow-zoom-in",
+      durationSec: 2,
+      startImagePath: editStills[index],
+      chainFromPrevious: index === 1,
+    })
+  );
+  storage.updateShot(editShots[2].id, { seamMode: "crossfade", seamFadeSec: 0.5 });
+  async function renderEditShot(shotId: string, force = false) {
+    const result = render.renderShot(shotId, force ? { force: true } : undefined);
+    assert(result.ok && result.jobs.length === 1, `edit render failed: ${result.ok ? "no job" : result.error}`);
+    if (!result.ok) throw new Error("unreachable");
+    await providers.startJob(result.jobs[0].id);
+    return result.jobs[0].id;
+  }
+  const editV1 = await renderEditShot(editShots[0].id);
+  const editV2 = await renderEditShot(editShots[0].id, true);
+  const editV3 = await renderEditShot(editShots[0].id, true);
+  assert(edit.takeFilename(1, 1) === "SH010_v01.mp4", "shot 1 version 1 is SH010_v01");
+  assert(edit.takeFilename(1, 3) === "SH010_v03.mp4", "shot 1 version 3 is SH010_v03");
+  assert(edit.takeFilename(1, 1) !== edit.takeFilename(1, 3), "versions do not share a filename");
+  const approvedEdit = storage.approveTake(editShots[0].id, editV3);
+  assert(approvedEdit?.approvedJobId === editV3, "the third take is the approved one");
+  const editShot2Job = await renderEditShot(editShots[1].id);
+  const editShot3Job = await renderEditShot(editShots[2].id);
+  const chainedShot = storage.getShot(editShots[1].id);
+  assert(chainedShot?.chainedFromJobId === editV3, "the chained shot started from the approved take");
+  const huntedEdit = render.huntShot(editShots[0].id, 2, { confirmApproved: true });
+  assert(huntedEdit.ok && huntedEdit.jobs.length === 2, "two later seeds stay as takes");
+  for (const job of huntedEdit.ok ? huntedEdit.jobs : []) await providers.startJob(job.id);
+  assert(storage.getShot(editShots[0].id)?.approvedJobId === editV3, "later seeds do not replace the approved take");
+  const shot1Takes = edit.orderedTakes(
+    storage.listJobs(editProject.id).filter(
+      (job) =>
+        job.shotId === editShots[0].id &&
+        job.kind !== "preview" &&
+        job.status === "completed" &&
+        job.outputPath
+    )
+  );
+  assert(shot1Takes.length === 5, `shot 1 keeps five takes, got ${shot1Takes.length}`);
+  assert(edit.takeVersion(shot1Takes, editV1) === 1, "oldest take stays v01");
+  assert(edit.takeVersion(shot1Takes, editV2) === 2, "middle take stays v02");
+  assert(edit.takeVersion(shot1Takes, editV3) === 3, "approved take stays v03");
+  assert(edit.takeVersion(shot1Takes, shot1Takes[4].id) === 5, "newest take is v05 and is not the export");
+
+  const falSecret = "fal-secret-SHOULD-NOT-LEAK-9f3a";
+  const headerSecret = "Bearer header-SHOULD-NOT-LEAK-77";
+  const urlSecret = "https://gpu.example.test/should-not-leak";
+  const replicateSecret = "r8_should-not-leak-token-value";
+  process.env.FAL_KEY = falSecret;
+  process.env.COMFYUI_AUTH_HEADER = headerSecret;
+  process.env.COMFYUI_BASE_URL = urlSecret;
+  process.env.REPLICATE_API_TOKEN = replicateSecret;
+  try {
+    for (const id of [editV3, editShot2Job, editShot3Job]) {
+      storage.updateJob(id, {
+        error: falSecret,
+        remoteId: headerSecret,
+        providerNote: urlSecret,
+        characterNote: replicateSecret,
+      });
+    }
+    storage.updateJob(editShot3Job, {
+      provider: "comfyui",
+      modelName: "ComfyUI Wan 2.2 TI2V-5B",
+    });
+    storage.createJob({
+      projectId: editProject.id,
+      shotId: editShots[0].id,
+      prompt: `PREVIEW_SHOULD_NOT_EXPORT ${falSecret}`,
+      presetId: "slow-zoom-in",
+      provider: "mock",
+      kind: "preview",
+      status: "completed",
+      imagePath: editStills[0],
+      error: headerSecret,
+      providerNote: urlSecret,
+    });
+
+    const packed = await edit.buildEditExport(editProject.id);
+    const again = await edit.buildEditExport(editProject.id);
+    const zip = await JSZip.loadAsync(packed.bytes);
+    const againZip = await JSZip.loadAsync(again.bytes);
+    const entryNames = (archive: JSZip) =>
+      Object.keys(archive.files)
+        .filter((name) => !archive.files[name].dir)
+        .sort();
+    const names = entryNames(zip);
+    const againNames = entryNames(againZip);
+    assert(
+      JSON.stringify(names) === JSON.stringify(["SH010_v03.json", "SH010_v03.mp4", "SH020_v01.json", "SH020_v01.mp4", "SH030_v01.json", "SH030_v01.mp4", "cut.edl"]),
+      `edit zip names: ${names.join(", ")}`
+    );
+    assert(JSON.stringify(againNames) === JSON.stringify(names), "a second export keeps the same names");
+    assert(!names.includes("SH010_v01.mp4") && !names.includes("SH010_v05.mp4"), "earlier and later versions are not overwritten or substituted");
+
+    const edl = packed.edl;
+    assert(edl.includes("FCM: NON-DROP FRAME"), "EDL declares non-drop");
+    assert(edl.includes("* FROM CLIP NAME: SH010_v03.mp4"), "EDL points at SH010_v03");
+    assert(edl.includes("* FROM CLIP NAME: SH020_v01.mp4"), "EDL points at SH020_v01");
+    assert(edl.includes("* FROM CLIP NAME: SH030_v01.mp4"), "EDL points at SH030_v01");
+    assert(/not a Premiere or Resolve project/i.test(edl), "EDL says it is not an NLE project");
+    assert(/review codec, not a mastering codec/i.test(edl), "EDL says mp4 is a review codec");
+    assert(!/character lock|lip-sync a performance|long film ready/i.test(edl), "EDL makes no lock or long-film promise");
+
+    function tc(frame: number): string {
+      const fps = 24;
+      const ff = frame % fps;
+      const total = Math.floor(frame / fps);
+      const ss = total % 60;
+      const mm = Math.floor(total / 60) % 60;
+      const hh = Math.floor(total / 3600);
+      const pad = (value: number) => String(value).padStart(2, "0");
+      return `${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`;
+    }
+    function framesOf(value: string): number {
+      const [hh, mm, ss, ff] = value.split(":").map(Number);
+      return ((hh * 60 + mm) * 60 + ss) * 24 + ff;
+    }
+    const eventRe =
+      /^(\d+)\s+(\S+)\s+V\s+([CD])\s+(?:(\d+)\s+)?(\d\d:\d\d:\d\d:\d\d)\s+(\d\d:\d\d:\d\d:\d\d)\s+(\d\d:\d\d:\d\d:\d\d)\s+(\d\d:\d\d:\d\d:\d\d)\s*$/;
+    const events = edl
+      .split("\n")
+      .map((line) => eventRe.exec(line.trim()))
+      .filter((match): match is RegExpExecArray => Boolean(match));
+    assert(events.length === 3, `EDL has three events, got ${events.length}`);
+    const frameOfJob = (id: string) => frameCountOf(storage.resolveDataPath(storage.getJob(id)!.outputPath!));
+    const frames1 = frameOfJob(editV3);
+    const frames2 = frameOfJob(editShot2Job);
+    const frames3 = frameOfJob(editShot3Job);
+    assert(events[0][2] === "SH010_v03" && events[0][3] === "C", "first event is a cut of SH010_v03");
+    assert(events[0][5] === tc(0) && events[0][6] === tc(frames1), "first source in/out");
+    assert(events[0][7] === tc(0) && events[0][8] === tc(frames1), "first record in/out");
+    assert(events[1][2] === "SH020_v01" && events[1][3] === "C", "second event is a hard cut");
+    assert(events[1][5] === "00:00:00:01", `chained hard cut trims one frame, source in ${events[1][5]}`);
+    assert(framesOf(events[1][6]) - framesOf(events[1][5]) === frames2 - 1, "trim keeps the rest of the clip");
+    assert(framesOf(events[1][7]) === frames1, "hard cut starts where the previous shot ends");
+    assert(framesOf(events[1][8]) - framesOf(events[1][7]) === frames2 - 1, "record duration matches the trimmed clip");
+    assert(events[2][2] === "SH030_v01" && events[2][3] === "D", "third event is a dissolve");
+    assert(Number(events[2][4]) === 12, `0.5s crossfade is 12 frames at 24 fps, got ${events[2][4]}`);
+    assert(events[2][5] === tc(0) && framesOf(events[2][6]) === frames3, "dissolve uses the whole next clip");
+    const overlap = framesOf(events[1][8]) - framesOf(events[2][7]);
+    assert(overlap === 12, `dissolve overlaps the previous shot by 12 frames, got ${overlap}`);
+    assert(framesOf(events[2][8]) - framesOf(events[2][7]) === frames3, "dissolve record duration is the clip");
+
+    const manifest1 = packed.manifests.find((item) => item.filename === "SH010_v03.mp4");
+    const manifest2 = packed.manifests.find((item) => item.shot === "SH020");
+    const manifest3 = packed.manifests.find((item) => item.shot === "SH030");
+    assert(manifest1 && manifest2 && manifest3, "one manifest per exported take");
+    assert(manifest1.provider === "mock" && manifest1.comfyuiWorkflowName === null, "mock has no workflow name");
+    assert(manifest1.sharedStyleText === "cool dusk grade", "shared style text is in the manifest");
+    assert(
+      manifest1.prompt.includes("cool dusk grade") && manifest1.prompt.includes("Lanterns over the water"),
+      "manifest prompt is the take prompt"
+    );
+    assert(manifest1.chainSource === null, "an unchained shot has no chain source");
+    assert(typeof manifest1.seed === "number", "seed is recorded");
+    assert(manifest1.frames === frames1 && manifest1.fps === 24, "frames and fps come from the file");
+    assert(manifest1.width > 0 && manifest1.height > 0 && manifest1.size === `${manifest1.width}x${manifest1.height}`, "size is recorded");
+    const stillHash = createHash("sha256")
+      .update(fs.readFileSync(storage.resolveDataPath(storage.getJob(editV3)!.imagePath)))
+      .digest("hex");
+    assert(manifest1.sourceStillSha256 === stillHash, "source still hash");
+    assert(manifest2.chainSource?.fromFilename === "SH010_v03.mp4", "chain source names the approved take");
+    assert(manifest2.chainSource?.fromShot === "SH010" && manifest2.chainSource.framesBack === 0, "chain source is the last frame of SH010");
+    assert(/last frame/.test(manifest2.chainSource?.frame || ""), "chain source says last frame");
+    const chainedHash = createHash("sha256")
+      .update(fs.readFileSync(storage.resolveDataPath(storage.getJob(editShot2Job)!.imagePath)))
+      .digest("hex");
+    assert(manifest2.sourceStillSha256 === chainedHash, "chained take hashes the still it used");
+    assert(manifest3.provider === "comfyui", "provider is the take's provider");
+    assert(
+      manifest3.comfyuiWorkflowName === "Wan 2.2 TI2V-5B (workflows/comfyui-wan22-ti2v-5b.api.json)",
+      `workflow name: ${manifest3.comfyuiWorkflowName}`
+    );
+    assert(manifest3.chainSource === null, "the crossfade shot was not chained");
+
+    const exportedText = [
+      edl,
+      ...packed.manifests.map((item) => JSON.stringify(item)),
+      names.join("\n"),
+    ].join("\n");
+    for (const secret of [falSecret, headerSecret, urlSecret, replicateSecret]) {
+      assert(!exportedText.includes(secret), "export included a secret");
+    }
+    assert(!exportedText.includes("PREVIEW_SHOULD_NOT_EXPORT"), "preview clips stay out of the edit export");
+    assert(!/FAL_KEY|REPLICATE_API_TOKEN|COMFYUI_AUTH_HEADER|COMFYUI_BASE_URL|Authorization/i.test(exportedText), "export names no key or header");
+    assert(!process.env.FAL_KEY || !exportedText.includes(process.env.FAL_KEY), "FAL_KEY value is absent");
+
+    const editStitch = await stitch.stitchProject(editProject.id);
+    assert(editStitch.includedJobIds[0] === editV3, "the stitch uses the same approved take as the export");
+    assert(editStitch.seams[0]?.mode === "cut" && editStitch.seams[0].droppedFrames === 1, "stitch trims one frame on the hard cut");
+    assert(
+      editStitch.seams[1]?.mode === "crossfade" && editStitch.seams[1].fadeSec === 0.5,
+      "stitch crossfade is 0.5s"
+    );
+    assert(fs.statSync(storage.resolveDataPath(editStitch.outputPath)).size > 1000, "mock stitch still writes an mp4");
+  } finally {
+    delete process.env.FAL_KEY;
+    delete process.env.COMFYUI_AUTH_HEADER;
+    delete process.env.COMFYUI_BASE_URL;
+    delete process.env.REPLICATE_API_TOKEN;
+  }
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN && !process.env.COMFYUI_AUTH_HEADER, "edit export did not need a provider key");
+
   console.log("provider checks ok");
   console.log(dataDir);
 }
