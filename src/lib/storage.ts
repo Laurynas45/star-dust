@@ -28,6 +28,7 @@ import {
   projectChainTrimFromStored,
   shotChainTrimFromStored,
 } from "./types";
+import { canonicalFps, evenDim, OUTPUT_DIM_MIN } from "./conform";
 
 type DB = Database.Database;
 
@@ -77,7 +78,11 @@ function openDatabase(): DB {
       seam_fade_sec REAL NOT NULL DEFAULT 0.5,
       style_base TEXT NOT NULL DEFAULT '',
       drop_duplicate_frame INTEGER NOT NULL DEFAULT 1,
-      chain_trim_start_frames INTEGER NOT NULL DEFAULT 1
+      chain_trim_start_frames INTEGER NOT NULL DEFAULT 1,
+      output_fps REAL,
+      output_width INTEGER,
+      output_height INTEGER,
+      loudness_normalize INTEGER
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -300,6 +305,18 @@ function migrate(db: DB) {
   if (!hasColumn(db, "shots", "approved_end_stamp")) {
     db.exec("ALTER TABLE shots ADD COLUMN approved_end_stamp TEXT");
   }
+  if (!hasColumn(db, "projects", "output_fps")) {
+    db.exec("ALTER TABLE projects ADD COLUMN output_fps REAL");
+  }
+  if (!hasColumn(db, "projects", "output_width")) {
+    db.exec("ALTER TABLE projects ADD COLUMN output_width INTEGER");
+  }
+  if (!hasColumn(db, "projects", "output_height")) {
+    db.exec("ALTER TABLE projects ADD COLUMN output_height INTEGER");
+  }
+  if (!hasColumn(db, "projects", "loudness_normalize")) {
+    db.exec("ALTER TABLE projects ADD COLUMN loudness_normalize INTEGER");
+  }
 }
 
 function seedSample(db: DB) {
@@ -386,6 +403,11 @@ function mapProject(row: Record<string, unknown>): Project {
     seamFadeSec:
       row.seam_fade_sec == null ? DEFAULT_SEAM_FADE_SEC : clampSeamFade(Number(row.seam_fade_sec)),
     styleBase: String(row.style_base ?? ""),
+    outputFps: row.output_fps == null ? null : canonicalFps(Number(row.output_fps)),
+    outputWidth: row.output_width == null ? null : evenDim(Number(row.output_width), OUTPUT_DIM_MIN),
+    outputHeight: row.output_height == null ? null : evenDim(Number(row.output_height), OUTPUT_DIM_MIN),
+    loudnessNormalize:
+      row.loudness_normalize == null ? null : Number(row.loudness_normalize) === 1,
     ...trimFields(
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
@@ -405,6 +427,36 @@ function trimFields(trim: number | null): {
     chainTrimStartFrames: trim,
     dropDuplicateFrame: trim == null ? null : trim > 0,
   };
+}
+
+function nextOutput(
+  current: Project,
+  patch: {
+    outputFps?: number | null;
+    outputWidth?: number | null;
+    outputHeight?: number | null;
+    loudnessNormalize?: boolean | null;
+  }
+): {
+  outputFps: number | null;
+  outputWidth: number | null;
+  outputHeight: number | null;
+  loudnessNormalize: boolean | null;
+} {
+  const outputFps =
+    patch.outputFps === undefined ? current.outputFps : patch.outputFps == null ? null : canonicalFps(patch.outputFps);
+  const width =
+    patch.outputWidth === undefined ? current.outputWidth : patch.outputWidth == null ? null : evenDim(patch.outputWidth, OUTPUT_DIM_MIN);
+  const height =
+    patch.outputHeight === undefined
+      ? current.outputHeight
+      : patch.outputHeight == null
+        ? null
+        : evenDim(patch.outputHeight, OUTPUT_DIM_MIN);
+  const sized = width == null || height == null ? { outputWidth: null, outputHeight: null } : { outputWidth: width, outputHeight: height };
+  const loudnessNormalize =
+    patch.loudnessNormalize === undefined ? current.loudnessNormalize : patch.loudnessNormalize;
+  return { outputFps, ...sized, loudnessNormalize };
 }
 
 function nextProjectTrim(
@@ -558,6 +610,10 @@ export function createProject(name: string, description = ""): Project {
     styleBase: "",
     chainTrimStartFrames: DEFAULT_CHAIN_TRIM_START_FRAMES,
     dropDuplicateFrame: true,
+    outputFps: null,
+    outputWidth: null,
+    outputHeight: null,
+    loudnessNormalize: null,
   };
   getDb()
     .prepare(
@@ -584,6 +640,10 @@ export function updateProject(
       | "styleBase"
       | "chainTrimStartFrames"
       | "dropDuplicateFrame"
+      | "outputFps"
+      | "outputWidth"
+      | "outputHeight"
+      | "loudnessNormalize"
     >
   > & {
     characterSheetPath?: string | null;
@@ -608,6 +668,7 @@ export function updateProject(
       patch.seamFadeSec === undefined ? current.seamFadeSec : clampSeamFade(patch.seamFadeSec),
     styleBase: patch.styleBase === undefined ? current.styleBase : patch.styleBase.trim(),
     chainTrimStartFrames: nextProjectTrim(current, patch),
+    ...nextOutput(current, patch),
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -615,7 +676,8 @@ export function updateProject(
       `UPDATE projects
        SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
            comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?,
-           style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?
+           style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?,
+           output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?
        WHERE id = ?`
     )
     .run(
@@ -630,6 +692,10 @@ export function updateProject(
       next.styleBase,
       next.chainTrimStartFrames > 0 ? 1 : 0,
       next.chainTrimStartFrames,
+      next.outputFps,
+      next.outputWidth,
+      next.outputHeight,
+      next.loudnessNormalize == null ? null : next.loudnessNormalize ? 1 : 0,
       id
     );
   return getProject(id);

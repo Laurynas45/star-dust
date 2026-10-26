@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import fs from "fs";
 import JSZip from "jszip";
 import { completedTakesFor, cutTake } from "./chain-stale";
+import { resolveConformTarget } from "./conform";
 import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
 import { COMFY_WORKFLOWS, comfyWorkflowFromModelName } from "./provider-info";
 import { getProject, listJobs, listShots, resolveDataPath } from "./storage";
@@ -14,8 +15,14 @@ import {
   styleBaseText,
 } from "./types";
 
-/** Review timeline rate. The stitch normalizes every clip to this before a join. */
+/** Fallback timeline rate when a caller does not pass the conformed rate. */
 export const EDIT_FPS = 24;
+
+export function timelineRate(fps = EDIT_FPS): number {
+  const rate = Math.round(fps);
+  if (!Number.isFinite(rate) || rate < 1) return EDIT_FPS;
+  return Math.min(60, rate);
+}
 
 export interface ChainSource {
   fromShot: string | null;
@@ -111,9 +118,10 @@ export function takeVersion(takesOldestFirst: readonly { id: string }[], jobId: 
 }
 
 export function framesToTimecode(frame: number, fps = EDIT_FPS): string {
+  const rate = timelineRate(fps);
   const whole = Math.max(0, Math.round(frame));
-  const ff = whole % fps;
-  const totalSec = Math.floor(whole / fps);
+  const ff = whole % rate;
+  const totalSec = Math.floor(whole / rate);
   const ss = totalSec % 60;
   const totalMin = Math.floor(totalSec / 60);
   const mm = totalMin % 60;
@@ -122,32 +130,34 @@ export function framesToTimecode(frame: number, fps = EDIT_FPS): string {
   return `${pad(hh)}:${pad(mm)}:${pad(ss)}:${pad(ff)}`;
 }
 
-export function dissolveFrames(fadeSec: number): number {
+export function dissolveFrames(fadeSec: number, fps = EDIT_FPS): number {
   if (!Number.isFinite(fadeSec) || fadeSec <= 0) return 0;
-  return Math.max(0, Math.round(fadeSec * EDIT_FPS));
+  return Math.max(0, Math.round(fadeSec * timelineRate(fps)));
 }
 
-/** Frame count on the 24 fps review timeline the stitch builds. */
-export function reviewFrames(info: VideoStreamInfo): number {
-  if (Math.abs(info.fps - EDIT_FPS) < 0.05) return Math.max(1, info.frames);
-  return Math.max(1, Math.round(info.durationSec * EDIT_FPS));
+/** Frame count on the conformed timeline. A clip already at that rate keeps its frame count. */
+export function reviewFrames(info: VideoStreamInfo, fps = EDIT_FPS): number {
+  const rate = timelineRate(fps);
+  if (Math.abs(info.fps - rate) < 0.05) return Math.max(1, info.frames);
+  return Math.max(1, Math.round(info.durationSec * rate));
 }
 
 /**
  * CMX3600 events for the included clips.
  * A hard cut butts the next record in against the previous record out, and a
  * start-frame trim moves the source in point. A crossfade overlaps by the
- * dissolve length, which is the stitch fade converted at 24 fps.
+ * dissolve length, which is the stitch fade converted at the conformed rate.
  */
 export function timelineEvents(
   clips: { filename: string; frames: number }[],
-  seams: { mode: "cut" | "crossfade"; fadeSec: number; droppedFrames: number }[]
+  seams: { mode: "cut" | "crossfade"; fadeSec: number; droppedFrames: number }[],
+  fps = EDIT_FPS
 ): EditEvent[] {
   let timelineEnd = 0;
   return clips.map((clip, index) => {
     const seam = index === 0 ? undefined : seams[index - 1];
     const drop = seam?.mode === "cut" ? Math.max(0, Math.round(seam.droppedFrames)) : 0;
-    const fade = seam?.mode === "crossfade" ? dissolveFrames(seam.fadeSec) : 0;
+    const fade = seam?.mode === "crossfade" ? dissolveFrames(seam.fadeSec, fps) : 0;
     const frames = Math.max(1, Math.round(clip.frames));
     const srcIn = Math.min(drop, frames - 1);
     const srcOut = frames;
@@ -169,7 +179,8 @@ export function timelineEvents(
   });
 }
 
-export function formatCmx3600(title: string, events: EditEvent[]): string {
+export function formatCmx3600(title: string, events: EditEvent[], fps = EDIT_FPS): string {
+  const rate = timelineRate(fps);
   const safeTitle = title.replace(/[\r\n]+/g, " ").trim() || "Star Dust";
   const lines = [
     `TITLE: ${safeTitle}`,
@@ -178,7 +189,8 @@ export function formatCmx3600(title: string, events: EditEvent[]): string {
     "* STAR DUST EXPORT",
     "* Cuts, dissolves, and in/out only. This is not a Premiere or Resolve project.",
     "* MP4 is a review codec, not a mastering codec.",
-    "* Timecode is 24 fps non-drop, the review rate the stitch uses.",
+    `* Timecode is ${rate} fps non-drop, the conformed rate the stitch uses.`,
+    "* Frame rate changes by duplicating or dropping frames, not by speeding a clip up.",
     "* This does not lock a character, lip-sync, or build a long film.",
     "",
   ];
@@ -190,7 +202,7 @@ export function formatCmx3600(title: string, events: EditEvent[]): string {
         ? `D    ${String(event.dissolveFrames).padStart(3, "0")}`
         : "C       ";
     lines.push(
-      `${number}  ${reel} V     ${transition} ${framesToTimecode(event.srcInFrame)} ${framesToTimecode(event.srcOutFrame)} ${framesToTimecode(event.recInFrame)} ${framesToTimecode(event.recOutFrame)}`
+      `${number}  ${reel} V     ${transition} ${framesToTimecode(event.srcInFrame, rate)} ${framesToTimecode(event.srcOutFrame, rate)} ${framesToTimecode(event.recInFrame, rate)} ${framesToTimecode(event.recOutFrame, rate)}`
     );
     lines.push(`* FROM CLIP NAME: ${event.filename}`);
   });
@@ -342,11 +354,16 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
       imagePath: part.job.imagePath,
     }))
   );
-  const events = timelineEvents(
-    chosen.map((part) => ({ filename: part.filename, frames: reviewFrames(part.info) })),
-    seams
+  const target = resolveConformTarget(
+    project,
+    chosen.map((part) => ({ fps: part.info.fps, width: part.info.width, height: part.info.height }))
   );
-  const edl = formatCmx3600(project.name, events);
+  const events = timelineEvents(
+    chosen.map((part) => ({ filename: part.filename, frames: reviewFrames(part.info, target.fps) })),
+    seams,
+    target.fps
+  );
+  const edl = formatCmx3600(project.name, events, target.fps);
   const manifests = chosen.map((part) =>
     manifestFor(part.shot, part.job, part.version, sharedStyle, part.info, shots, jobs)
   );
