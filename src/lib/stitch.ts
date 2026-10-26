@@ -1,13 +1,31 @@
 import fs from "fs";
 import {
+  burnInProblem,
+  cuesOnTimeline,
+  findBurnFont,
+  formatSrt,
+  readSrtFile,
+  subtitlesVideoFilter,
+} from "./captions";
+import {
   HISTORIC_NORMALIZE,
   LOUDNORM_FILTER,
   conformVideoFilter,
   loudnessOn,
+  masterLoudnessOn,
+  masterLoudnormFilter,
   resolveConformTarget,
 } from "./conform";
 import { finishedTake } from "./continuity";
-import { probeClipShape, probeDurationSec, probeVideoStream, runFfmpeg, type ClipShape } from "./ffmpeg";
+import {
+  probeClipShape,
+  probeDurationSec,
+  probeHasAudio,
+  probeVideoStream,
+  runFfmpeg,
+  type ClipShape,
+} from "./ffmpeg";
+import { describeFinish, musicFilter, musicFitsByLoop } from "./music-bed";
 import { absoluteOutputPath, getProject, listJobs, listShots, resolveDataPath } from "./storage";
 import { probeVideoFrames } from "./ffmpeg";
 import {
@@ -15,6 +33,7 @@ import {
   DROPPED_FRAME_NOTE,
   FRAME_BACK_SEAM_NOTE,
   SEAM_PREVIEW_SEC,
+  FinishView,
   Job,
   MIN_SEAM_FADE_SEC,
   Project,
@@ -43,6 +62,8 @@ export interface StitchResult {
   kind: "takes" | "preview";
   seams: StitchSeam[];
   durationSec: number;
+  /** Music bed and captions actually applied. Absent on a seam preview. */
+  finish?: FinishView;
 }
 
 function newestCompleted(jobs: Job[]): Job | undefined {
@@ -518,7 +539,12 @@ async function concatClips(
       await hardCut(counted, outAbs, drops, videoFilter);
     }
   }
-  if (loudnessOn(project.loudnessNormalize, anyAudio)) await applyLoudnorm(outAbs);
+  const decorate = prefix === "stitch" || prefix === "preview";
+  const durationSec = probeDurationSec(outAbs);
+  const finish = decorate
+    ? await applyProgram(project, outAbs, rel, anyAudio, target.fps, durationSec)
+    : undefined;
+  if (!decorate && loudnessOn(project.loudnessNormalize, anyAudio)) await applyLoudnorm(outAbs);
   return {
     outputPath: rel,
     includedShotIds: included.map((part) => part.shotId),
@@ -527,7 +553,152 @@ async function concatClips(
     kind,
     seams,
     durationSec: probeDurationSec(outAbs),
+    finish,
   };
+}
+
+async function applyProgram(
+  project: Project,
+  outAbs: string,
+  rel: string,
+  anyClipAudio: boolean,
+  fps: number,
+  durationSec: number
+): Promise<FinishView> {
+  const musicPath = project.musicBedPath;
+  let hasMusic = false;
+  let musicLoops: boolean | null = null;
+  if (musicPath) {
+    const musicAbs = resolveDataPath(musicPath);
+    if (!fs.existsSync(musicAbs)) {
+      throw new Error("The music bed file is missing. Upload it again.");
+    }
+    if (!probeHasAudio(musicAbs)) {
+      throw new Error("The music bed has no audio stream.");
+    }
+    if (!(durationSec > 0)) {
+      throw new Error("The stitch has no duration, so the music bed was not mixed.");
+    }
+    musicLoops = musicFitsByLoop(probeDurationSec(musicAbs), durationSec);
+    const mixed = `${outAbs}.music.mp4`;
+    try {
+      await runFfmpeg([
+        "-y",
+        "-i",
+        outAbs,
+        "-stream_loop",
+        "-1",
+        "-i",
+        musicAbs,
+        "-filter_complex",
+        musicFilter({
+          durationSec,
+          levelDb: project.musicLevelDb,
+          fadeInSec: project.musicFadeInSec,
+          fadeOutSec: project.musicFadeOutSec,
+          duck: anyClipAudio,
+        }),
+        "-map",
+        "0:v:0",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        mixed,
+      ]);
+      fs.renameSync(mixed, outAbs);
+      hasMusic = true;
+    } catch (error) {
+      fs.rmSync(mixed, { force: true });
+      throw error;
+    }
+  }
+
+  let captionCount = 0;
+  let captionMode = project.captionMode;
+  let sidecarPath: string | undefined;
+  if (project.captionsPath) {
+    const captionsAbs = resolveDataPath(project.captionsPath);
+    if (!fs.existsSync(captionsAbs)) {
+      throw new Error("The SRT file is missing. Import it again.");
+    }
+    const parsed = readSrtFile(captionsAbs);
+    if (parsed.errors.length > 0) {
+      throw new Error(parsed.errors.join(" "));
+    }
+    const cues = cuesOnTimeline(parsed.cues, fps, durationSec);
+    if (cues.length === 0) {
+      throw new Error("Every caption sits past the end of this cut, so nothing was written.");
+    }
+    captionCount = cues.length;
+    if (captionMode !== "burn" && captionMode !== "sidecar") captionMode = "burn";
+    const srtAbs = outAbs.replace(/\.mp4$/i, ".srt");
+    fs.writeFileSync(srtAbs, formatSrt(cues));
+    if (captionMode === "sidecar") {
+      sidecarPath = rel.replace(/\.mp4$/i, ".srt");
+    } else {
+      const problem = burnInProblem();
+      if (problem) {
+        fs.rmSync(srtAbs, { force: true });
+        throw new Error(problem);
+      }
+      const font = findBurnFont();
+      if (!font) {
+        fs.rmSync(srtAbs, { force: true });
+        throw new Error("Burn-in needs DejaVu Sans from the fonts-dejavu-core package.");
+      }
+      const burned = `${outAbs}.burn.mp4`;
+      const audioArgs = probeHasAudio(outAbs) ? ["-c:a", "copy"] : ["-an"];
+      try {
+        await runFfmpeg([
+          "-y",
+          "-i",
+          outAbs,
+          "-vf",
+          subtitlesVideoFilter(srtAbs, font),
+          "-c:v",
+          "libx264",
+          "-pix_fmt",
+          "yuv420p",
+          ...audioArgs,
+          "-movflags",
+          "+faststart",
+          burned,
+        ]);
+        fs.renameSync(burned, outAbs);
+        fs.rmSync(srtAbs, { force: true });
+      } catch (error) {
+        fs.rmSync(burned, { force: true });
+        fs.rmSync(srtAbs, { force: true });
+        const message = error instanceof Error ? error.message : "Burn-in failed.";
+        throw new Error(
+          message.includes("Burn-in") ? message : `Burn-in failed. Captions were not drawn. ${message}`
+        );
+      }
+    }
+  }
+
+  const mastered = masterLoudnessOn(project.loudnessNormalize, anyClipAudio, hasMusic);
+  if (mastered) await applyLoudnorm(outAbs, masterLoudnormFilter(hasMusic));
+  const view = describeFinish({
+    hasMusic,
+    anyClipAudio,
+    captionCount,
+    captionMode: captionCount > 0 ? captionMode : null,
+    loudnessOn: mastered,
+    musicLoops,
+  });
+  if (sidecarPath) view.sidecarPath = sidecarPath;
+  return view;
 }
 
 async function hardCut(
@@ -596,7 +767,7 @@ async function hardCutWithAudio(
   }
 }
 
-async function applyLoudnorm(file: string): Promise<void> {
+async function applyLoudnorm(file: string, filter: string = LOUDNORM_FILTER): Promise<void> {
   const temp = `${file}.loud.mp4`;
   try {
     await runFfmpeg([
@@ -604,7 +775,7 @@ async function applyLoudnorm(file: string): Promise<void> {
       "-i",
       file,
       "-af",
-      LOUDNORM_FILTER,
+      filter,
       "-c:v",
       "copy",
       "-c:a",

@@ -4045,6 +4045,180 @@ async function main() {
   assert(rawLufs > normLufs + 0.5, `loudness off stays louder (${rawLufs}) than EBU R128 (${normLufs})`);
   assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "conform checks did not need a provider key");
 
+  const captions = await import("../src/lib/captions");
+  const musicBed = await import("../src/lib/music-bed");
+  const { FINISH_HONESTY } = await import("../src/lib/types");
+  const { runMockGenerate } = await import("../src/lib/providers/mock");
+  const badSrt = captions.parseSrt(
+    "1\n00:00:02,000 --> 00:00:01,000\nBackwards\n\n2\n1:2:3 --> 4:5:6\nMissing\n"
+  );
+  assert(badSrt.cues.length === 0, "a bad SRT does not import cues");
+  assert(badSrt.errors.some((line) => /not after the start time/.test(line)), `end-before-start error: ${badSrt.errors.join(" | ")}`);
+  assert(badSrt.errors.some((line) => /HH:MM:SS/.test(line)), `timestamp error: ${badSrt.errors.join(" | ")}`);
+  assert(captions.parseSrt("hello").errors[0].includes("not an SRT"), "a plain text file is rejected as SRT");
+  const twoCues = captions.parseSrt(
+    "1\n00:00:00,500 --> 00:00:01,500\nHarbor dusk\n\n2\n00:00:02,500 --> 00:00:03,500\nLanterns\n"
+  );
+  assert(twoCues.errors.length === 0 && twoCues.cues.length === 2, "a 2-cue SRT parses");
+  const snapped = captions.cuesOnTimeline([{ index: 1, startSec: 0.03, endSec: 0.2, text: "Frame" }], 25, 1);
+  assert(Math.abs(snapped[0].startSec - 0.04) < 0.0001, "0.03s snaps to one frame at 25 fps");
+  assert(captions.formatSrt(snapped).includes("00:00:00,040"), "the snapped cue is written at the conformed rate");
+  assert(
+    musicBed.finishLine({ hasMusic: true, anyClipAudio: true, captionCount: 14, captionMode: "burn" }) ===
+      "music bed, ducked; 14 captions burned in",
+    "the stitch line names a ducked bed and burned-in captions"
+  );
+  assert(
+    musicBed.finishLine({ hasMusic: true, anyClipAudio: false, captionCount: 2, captionMode: "sidecar" }) ===
+      "music bed, at its level; 2 captions as a sidecar",
+    "a silent cut does not claim ducking"
+  );
+  const ducked = musicBed.musicFilter({ durationSec: 4, levelDb: -18, fadeInSec: 0.25, fadeOutSec: 1, duck: true });
+  const levelOnly = musicBed.musicFilter({ durationSec: 4, levelDb: -18, fadeInSec: 0, fadeOutSec: 1, duck: false });
+  assert(ducked.includes("sidechaincompress") && ducked.includes("volume=-18.0dB"), "clip audio sidechains the bed");
+  assert(!levelOnly.includes("sidechaincompress") && levelOnly.includes("[1:a]"), "a silent cut plays the bed at its level");
+  assert(
+    captions.burnInProblemFrom("drawtext", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")?.includes("libass"),
+    "burn-in names libass when the subtitles filter is missing"
+  );
+  assert(
+    captions.burnInProblemFrom("subtitles", null)?.includes("DejaVu Sans"),
+    "burn-in names the font when DejaVu Sans is missing"
+  );
+  assert(captions.burnInProblemFrom(" ... subtitles V->V", captions.findBurnFont()) == null, "this ffmpeg can burn captions");
+  assert(conform.masterLoudnormFilter(true).includes("I=-14"), "a music bed masters to -14 LUFS");
+  assert(conform.masterLoudnormFilter(false) === conform.LOUDNORM_FILTER, "clips alone stay on EBU R128");
+  assert(conform.masterLoudnessOn(null, false, true) && !conform.masterLoudnessOn(false, true, true), "music loudness defaults on and can be turned off");
+  assert(!/transcrib/i.test(FINISH_HONESTY) || /does not transcribe/i.test(FINISH_HONESTY), "copy does not promise transcription");
+  assert(/does not transcribe/i.test(FINISH_HONESTY) && /lip-sync/i.test(FINISH_HONESTY) && /does not lock a character/i.test(FINISH_HONESTY), "music and caption copy stays inside the product");
+
+  const bedProject = storage.createProject("Music bed", "");
+  const bedStill = storage.saveUpload(bedProject.id, "bed.png", solidPng(dataDir, "bed-still.png", "red"));
+  const bedShots = [0, 1].map((index) =>
+    storage.createShot({
+      projectId: bedProject.id,
+      prompt: `bed ${index}`,
+      presetId: "slow-zoom-in",
+      durationSec: 2,
+      startImagePath: bedStill,
+    })
+  );
+  for (const [index, shot] of bedShots.entries()) {
+    const job = storage.createJob({
+      projectId: bedProject.id,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: "slow-zoom-in",
+      provider: "mock",
+      status: "queued",
+      imagePath: bedStill,
+      durationSec: 2,
+    });
+    await runMockGenerate(job.id);
+    assert(storage.getJob(job.id)?.status === "completed", `mock clip ${index} rendered`);
+  }
+  const voiced = storage.listJobs(bedProject.id).find((job) => job.shotId === bedShots[0].id);
+  assert(voiced?.outputPath, "the first mock clip has a file");
+  const voicedAbs = storage.resolveDataPath(voiced!.outputPath!);
+  const voicedWithTone = `${voicedAbs}.tone.mp4`;
+  runFfmpegSync([
+    "-y",
+    "-i",
+    voicedAbs,
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:sample_rate=48000",
+    "-c:v",
+    "copy",
+    "-c:a",
+    "aac",
+    "-shortest",
+    voicedWithTone,
+  ]);
+  fs.renameSync(voicedWithTone, voicedAbs);
+  assert(hasAudioStream(voicedAbs), "one mock clip now has sound so the bed can duck");
+  const toneRel = `uploads/${bedProject.id}/bed-tone.wav`;
+  const toneAbs = path.join(dataDir, toneRel);
+  fs.mkdirSync(path.dirname(toneAbs), { recursive: true });
+  runFfmpegSync([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=220:sample_rate=48000:duration=0.4",
+    toneAbs,
+  ]);
+  const tonePath = storage.saveUpload(bedProject.id, "bed-tone.wav", fs.readFileSync(toneAbs));
+  assert(tonePath.startsWith("uploads/"), "the music bed is stored with other local media");
+  const srtBody =
+    "1\n00:00:00,500 --> 00:00:01,500\nHarbor dusk\n\n2\n00:00:02,500 --> 00:00:03,500\nLanterns\n";
+  const srtPath = storage.saveUpload(bedProject.id, "captions.srt", Buffer.from(srtBody));
+  storage.updateProject(bedProject.id, {
+    musicBedPath: tonePath,
+    musicLevelDb: -18,
+    musicFadeInSec: 0.25,
+    musicFadeOutSec: 0.5,
+    captionsPath: srtPath,
+    captionMode: "burn",
+  });
+  const bedStitch = await stitch.stitchProject(bedProject.id);
+  const bedAbs = storage.resolveDataPath(bedStitch.outputPath);
+  const bedDur = mediaDuration(bedAbs);
+  assert(bedDur > 3.6 && bedDur < 4.5, `music-bed stitch duration ${bedDur} stays near 4s`);
+  assert(hasAudioStream(bedAbs), "the stitched mp4 has an audio stream");
+  assert(
+    bedStitch.finish?.line === "music bed, ducked; 2 captions burned in",
+    `finish line: ${bedStitch.finish?.line}`
+  );
+  assert(bedStitch.finish?.fitNote?.includes("loops"), "a short bed loops to the cut");
+  const bedLufs = integratedLufs(bedAbs);
+  assert(bedLufs < -10 && bedLufs > -18, `music bed masters near -14 LUFS, measured ${bedLufs}`);
+  function nearWhiteCount(file: string, atSec: number): number {
+    const png = path.join(dataDir, `cap-${probeSeq++}.png`);
+    runFfmpegSync([
+      "-y",
+      "-ss",
+      String(atSec),
+      "-i",
+      file,
+      "-vf",
+      "crop=in_w:in_h/5:0:in_h*4/5",
+      "-frames:v",
+      "1",
+      png,
+    ]);
+    const raw = spawnSync("ffmpeg", ["-v", "error", "-i", png, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], {
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    fs.rmSync(png, { force: true });
+    const bytes = raw.stdout;
+    if (raw.status !== 0 || !Buffer.isBuffer(bytes)) throw new Error(raw.stderr?.toString() || "caption frame failed");
+    let count = 0;
+    for (let i = 0; i + 2 < bytes.length; i += 3) {
+      if (bytes[i] > 220 && bytes[i + 1] > 220 && bytes[i + 2] > 220) count += 1;
+    }
+    return count;
+  }
+  const onCue = nearWhiteCount(bedAbs, 1);
+  const offCue = nearWhiteCount(bedAbs, 2);
+  assert(onCue > 8, `burned caption pixels at 1s: ${onCue}`);
+  assert(onCue > offCue * 3, `caption gap at 2s (${offCue}) should be quieter than the cue (${onCue})`);
+  storage.updateProject(bedProject.id, { captionMode: "sidecar" });
+  const sideStitch = await stitch.stitchProject(bedProject.id);
+  assert(sideStitch.finish?.line === "music bed, ducked; 2 captions as a sidecar", `sidecar line: ${sideStitch.finish?.line}`);
+  assert(sideStitch.finish?.sidecarPath, "sidecar path is returned");
+  const sideSrt = fs.readFileSync(storage.resolveDataPath(sideStitch.finish!.sidecarPath!), "utf8");
+  assert(sideSrt.includes("Harbor dusk") && sideSrt.includes("Lanterns"), "the sidecar has both cues");
+  assert((sideSrt.match(/-->/g) ?? []).length === 2, "the sidecar has 2 cues");
+  const sideWhite = nearWhiteCount(storage.resolveDataPath(sideStitch.outputPath), 1);
+  assert(sideWhite * 3 < onCue, `sidecar did not burn the cue (${sideWhite} vs ${onCue})`);
+  const bedExport = await edit.buildEditExport(bedProject.id);
+  assert(bedExport.srt?.includes("00:00:00,500") && bedExport.srt.includes("00:00:02,500"), "export SRT keeps the conformed 24 fps times");
+  const bedZip = await JSZip.loadAsync(bedExport.bytes);
+  assert(bedZip.file("captions.srt"), "the edit zip contains captions.srt");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "music bed and captions did not need a provider key");
+
   console.log("provider checks ok");
   console.log(dataDir);
 }

@@ -10,6 +10,12 @@ export const HISTORIC_NORMALIZE =
 /** EBU R128 integrated loudness is −23 LUFS, with a −1 dBTP true-peak ceiling. */
 export const LOUDNORM_FILTER = "loudnorm=I=-23:TP=-1:LRA=11";
 
+/**
+ * Streaming master for a cut that has a music bed. −14 LUFS, −1 dBTP.
+ * Clips with no bed stay on LOUDNORM_FILTER.
+ */
+export const STREAM_LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1:LRA=11";
+
 export const OUTPUT_FPS_MIN = 1;
 export const OUTPUT_FPS_MAX = 60;
 export const OUTPUT_DIM_MIN = 16;
@@ -184,6 +190,23 @@ export function loudnessOn(setting: boolean | null | undefined, anyAudio: boolea
   if (!anyAudio) return false;
   if (setting == null) return true;
   return setting;
+}
+
+/**
+ * A music bed masters to −14 LUFS unless loudness is explicitly off.
+ * Without a bed, loudness stays the EBU R128 rule from the conform step.
+ */
+export function masterLoudnessOn(
+  setting: boolean | null | undefined,
+  anyClipAudio: boolean,
+  hasMusic: boolean
+): boolean {
+  if (hasMusic) return setting !== false;
+  return loudnessOn(setting, anyClipAudio);
+}
+
+export function masterLoudnormFilter(hasMusic: boolean): string {
+  return hasMusic ? STREAM_LOUDNORM_FILTER : LOUDNORM_FILTER;
 }
 
 export function conformShotLabel(

@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import fs from "fs";
 import JSZip from "jszip";
+import { cuesOnTimeline, formatSrt, readSrtFile } from "./captions";
 import { completedTakesFor, cutTake } from "./chain-stale";
 import { resolveConformTarget } from "./conform";
 import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
@@ -293,6 +294,8 @@ export interface EditExport {
   bytes: Buffer;
   edl: string;
   manifests: TakeManifest[];
+  /** Captions snapped to the conformed rate. Null when the project has no SRT. */
+  srt: string | null;
 }
 
 /**
@@ -367,15 +370,29 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
   const manifests = chosen.map((part) =>
     manifestFor(part.shot, part.job, part.version, sharedStyle, part.info, shots, jobs)
   );
+  const cutSec = events.length === 0 ? 0 : events[events.length - 1].recOutFrame / target.fps;
+  let srt: string | null = null;
+  if (project.captionsPath) {
+    const parsed = readSrtFile(resolveDataPath(project.captionsPath));
+    if (parsed.errors.length > 0) throw new Error(parsed.errors.join(" "));
+    const cues = cuesOnTimeline(parsed.cues, target.fps, cutSec);
+    if (cues.length === 0) {
+      throw new Error("Every caption sits past the end of this cut, so the SRT was not exported.");
+    }
+    srt = formatSrt(cues);
+  }
 
   const zip = new JSZip();
   zip.file("cut.edl", edl);
+  if (srt) zip.file("captions.srt", srt);
   chosen.forEach((part, index) => {
     zip.file(part.filename, fs.readFileSync(part.abs));
     zip.file(part.filename.replace(/\.mp4$/i, ".json"), `${JSON.stringify(manifests[index], null, 2)}\n`);
   });
 
-  const text = [edl, ...manifests.map((item) => JSON.stringify(item)), ...Array.from(filenames)].join("\n");
+  const text = [edl, srt ?? "", ...manifests.map((item) => JSON.stringify(item)), ...Array.from(filenames)].join(
+    "\n"
+  );
   assertExportHasNoSecrets(text);
 
   const bytes = await zip.generateAsync({ type: "nodebuffer" });
@@ -384,5 +401,6 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
     bytes,
     edl,
     manifests,
+    srt,
   };
 }

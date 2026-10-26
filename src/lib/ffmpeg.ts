@@ -117,6 +117,37 @@ export function probeVideoFrames(file: string): number {
   return probeVideoStream(file).frames;
 }
 
+let filterList: string | null = null;
+
+/** ffmpeg -filters text. Cached for the process. */
+export function ffmpegFilters(): string {
+  if (filterList != null) return filterList;
+  const probe = spawnSync("ffmpeg", ["-hide_banner", "-filters"], { encoding: "utf8" });
+  if (probe.error) {
+    const code = (probe.error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new Error("ffmpeg is not on PATH. Install ffmpeg and try again.");
+    }
+    throw probe.error;
+  }
+  filterList = `${probe.stdout ?? ""}\n${probe.stderr ?? ""}`;
+  return filterList;
+}
+
+export function probeHasAudio(file: string): boolean {
+  const probe = spawnSync(
+    "ffprobe",
+    ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", file],
+    { encoding: "utf8" }
+  );
+  if (probe.error) {
+    const code = (probe.error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new Error("ffprobe is not on PATH. Install ffmpeg and try again.");
+    throw probe.error;
+  }
+  return String(probe.stdout).includes("audio");
+}
+
 export interface ClipShape {
   durationSec: number;
   fps: number;

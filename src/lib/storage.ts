@@ -24,6 +24,12 @@ import {
   clampChainTrimStartFrames,
   clampSeamFade,
   DEFAULT_CHAIN_TRIM_START_FRAMES,
+  CaptionMode,
+  clampMusicFadeSec,
+  clampMusicLevelDb,
+  DEFAULT_MUSIC_FADE_IN_SEC,
+  DEFAULT_MUSIC_FADE_OUT_SEC,
+  DEFAULT_MUSIC_LEVEL_DB,
   presetById,
   projectChainTrimFromStored,
   shotChainTrimFromStored,
@@ -82,7 +88,13 @@ function openDatabase(): DB {
       output_fps REAL,
       output_width INTEGER,
       output_height INTEGER,
-      loudness_normalize INTEGER
+      loudness_normalize INTEGER,
+      music_bed_path TEXT,
+      music_level_db REAL NOT NULL DEFAULT -18,
+      music_fade_in_sec REAL NOT NULL DEFAULT 0.25,
+      music_fade_out_sec REAL NOT NULL DEFAULT 1,
+      captions_path TEXT,
+      caption_mode TEXT
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -317,6 +329,24 @@ function migrate(db: DB) {
   if (!hasColumn(db, "projects", "loudness_normalize")) {
     db.exec("ALTER TABLE projects ADD COLUMN loudness_normalize INTEGER");
   }
+  if (!hasColumn(db, "projects", "music_bed_path")) {
+    db.exec("ALTER TABLE projects ADD COLUMN music_bed_path TEXT");
+  }
+  if (!hasColumn(db, "projects", "music_level_db")) {
+    db.exec("ALTER TABLE projects ADD COLUMN music_level_db REAL NOT NULL DEFAULT -18");
+  }
+  if (!hasColumn(db, "projects", "music_fade_in_sec")) {
+    db.exec("ALTER TABLE projects ADD COLUMN music_fade_in_sec REAL NOT NULL DEFAULT 0.25");
+  }
+  if (!hasColumn(db, "projects", "music_fade_out_sec")) {
+    db.exec("ALTER TABLE projects ADD COLUMN music_fade_out_sec REAL NOT NULL DEFAULT 1");
+  }
+  if (!hasColumn(db, "projects", "captions_path")) {
+    db.exec("ALTER TABLE projects ADD COLUMN captions_path TEXT");
+  }
+  if (!hasColumn(db, "projects", "caption_mode")) {
+    db.exec("ALTER TABLE projects ADD COLUMN caption_mode TEXT");
+  }
 }
 
 function seedSample(db: DB) {
@@ -408,10 +438,28 @@ function mapProject(row: Record<string, unknown>): Project {
     outputHeight: row.output_height == null ? null : evenDim(Number(row.output_height), OUTPUT_DIM_MIN),
     loudnessNormalize:
       row.loudness_normalize == null ? null : Number(row.loudness_normalize) === 1,
+    musicBedPath: str(row.music_bed_path),
+    musicLevelDb:
+      row.music_level_db == null ? DEFAULT_MUSIC_LEVEL_DB : clampMusicLevelDb(Number(row.music_level_db)),
+    musicFadeInSec:
+      row.music_fade_in_sec == null
+        ? DEFAULT_MUSIC_FADE_IN_SEC
+        : clampMusicFadeSec(Number(row.music_fade_in_sec), DEFAULT_MUSIC_FADE_IN_SEC),
+    musicFadeOutSec:
+      row.music_fade_out_sec == null
+        ? DEFAULT_MUSIC_FADE_OUT_SEC
+        : clampMusicFadeSec(Number(row.music_fade_out_sec), DEFAULT_MUSIC_FADE_OUT_SEC),
+    captionsPath: str(row.captions_path),
+    captionMode: parseCaptionMode(row.caption_mode),
     ...trimFields(
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
   };
+}
+
+function parseCaptionMode(value: unknown): CaptionMode | null {
+  if (value === "burn" || value === "sidecar") return value;
+  return null;
 }
 
 function trimFields(trim: number): { chainTrimStartFrames: number; dropDuplicateFrame: boolean };
@@ -614,6 +662,10 @@ export function createProject(name: string, description = ""): Project {
     outputWidth: null,
     outputHeight: null,
     loudnessNormalize: null,
+    musicLevelDb: DEFAULT_MUSIC_LEVEL_DB,
+    musicFadeInSec: DEFAULT_MUSIC_FADE_IN_SEC,
+    musicFadeOutSec: DEFAULT_MUSIC_FADE_OUT_SEC,
+    captionMode: null,
   };
   getDb()
     .prepare(
@@ -644,9 +696,15 @@ export function updateProject(
       | "outputWidth"
       | "outputHeight"
       | "loudnessNormalize"
+      | "musicLevelDb"
+      | "musicFadeInSec"
+      | "musicFadeOutSec"
+      | "captionMode"
     >
   > & {
     characterSheetPath?: string | null;
+    musicBedPath?: string | null;
+    captionsPath?: string | null;
   }
 ): Project | undefined {
   const current = getProject(id);
@@ -669,6 +727,21 @@ export function updateProject(
     styleBase: patch.styleBase === undefined ? current.styleBase : patch.styleBase.trim(),
     chainTrimStartFrames: nextProjectTrim(current, patch),
     ...nextOutput(current, patch),
+    musicBedPath:
+      patch.musicBedPath === undefined ? current.musicBedPath ?? null : patch.musicBedPath || null,
+    musicLevelDb:
+      patch.musicLevelDb === undefined ? current.musicLevelDb : clampMusicLevelDb(patch.musicLevelDb),
+    musicFadeInSec:
+      patch.musicFadeInSec === undefined
+        ? current.musicFadeInSec
+        : clampMusicFadeSec(patch.musicFadeInSec, DEFAULT_MUSIC_FADE_IN_SEC),
+    musicFadeOutSec:
+      patch.musicFadeOutSec === undefined
+        ? current.musicFadeOutSec
+        : clampMusicFadeSec(patch.musicFadeOutSec, DEFAULT_MUSIC_FADE_OUT_SEC),
+    captionsPath:
+      patch.captionsPath === undefined ? current.captionsPath ?? null : patch.captionsPath || null,
+    captionMode: patch.captionMode === undefined ? current.captionMode : patch.captionMode,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -677,7 +750,9 @@ export function updateProject(
        SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
            comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?,
            style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?,
-           output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?
+           output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
+           music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
+           captions_path = ?, caption_mode = ?
        WHERE id = ?`
     )
     .run(
@@ -696,6 +771,12 @@ export function updateProject(
       next.outputWidth,
       next.outputHeight,
       next.loudnessNormalize == null ? null : next.loudnessNormalize ? 1 : 0,
+      next.musicBedPath,
+      next.musicLevelDb,
+      next.musicFadeInSec,
+      next.musicFadeOutSec,
+      next.captionsPath,
+      next.captionMode,
       id
     );
   return getProject(id);
