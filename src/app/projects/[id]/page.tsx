@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
 import { chainStaleShotIds } from "@/lib/chain-stale";
+import { reviewStitchPasses } from "@/lib/mixed-pass";
 import { resolveComfyChoice } from "@/lib/comfy-choice";
 import {
   CAPABILITY,
@@ -98,6 +99,7 @@ type StitchResponse = {
   durationSec?: number;
   seams?: { position: number; mode: "cut" | "crossfade"; fadeSec: number; note?: string }[];
   finish?: FinishView;
+  contactSheetPath?: string;
 };
 
 type SkippedShot = {
@@ -129,6 +131,7 @@ export default function ProjectStudioPage() {
   const [busy, setBusy] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [stitchGate, setStitchGate] = useState(false);
   const [editExporting, setEditExporting] = useState(false);
   const [stitch, setStitch] = useState<StitchResponse | null>(null);
   const [previewCut, setPreviewCut] = useState<StitchResponse | null>(null);
@@ -201,6 +204,14 @@ export default function ProjectStudioPage() {
       })
     );
   }, [detail, settings]);
+  const stitchReview = useMemo(() => {
+    if (!detail) return null;
+    return reviewStitchPasses({
+      shots: detail.shots,
+      jobs: detail.jobs,
+      staleShotIds,
+    });
+  }, [detail, staleShotIds]);
   const hasActive = jobs.some((job) => job.status === "queued" || job.status === "running");
 
   useEffect(() => {
@@ -836,7 +847,8 @@ export default function ProjectStudioPage() {
             ffmpeg joins the take you chose. An approved take stays in that stitch. Hard cut, or a
             short crossfade. A chained hard cut can trim a few start frames of the next clip. Mixed
             clips are conformed to one frame rate and size first. A music bed and an imported SRT
-            can ride on that same file. The stitch is not a new model.
+            can ride on that same file. The stitch also writes a contact sheet of those shots.
+            The stitch is not a new model.
           </p>
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
             <label className="text-xs text-[var(--muted)]">
@@ -927,19 +939,35 @@ export default function ProjectStudioPage() {
             <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{detail.finish.fitNote}</p>
           )}
           <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{CONFORM_HONESTY}</p>
+          {stitchReview?.warn && (
+            <div className="mt-3 space-y-2 rounded-lg border border-amber-400/40 bg-amber-400/10 p-3" role="status">
+              {stitchReview.paragraphs.map((paragraph, index) => (
+                <p key={index} className="text-xs leading-relaxed text-amber-100">
+                  {paragraph}
+                </p>
+              ))}
+            </div>
+          )}
           <button
             type="button"
             className="btn-ghost mt-3 w-full"
             disabled={exporting || takeClips.length === 0}
-            onClick={() => void onExport()}
+            onClick={() => {
+              if (stitchReview?.warn) {
+                setStitchGate(true);
+                return;
+              }
+              void onExport();
+            }}
           >
             {exporting ? "Stitching…" : "Export stitch"}
           </button>
           <p className="mt-3 text-xs leading-relaxed text-[var(--muted)]">
             Export for edit downloads a zip for an editor: one chosen take per shot, a CMX3600
-            EDL, and a JSON manifest per take. The EDL carries cuts, dissolves, and in/out only.
-            It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering
-            codec. An imported SRT is included, with times snapped to the conformed frame rate.
+            EDL, a JSON manifest per take, and a contact sheet. The EDL carries cuts, dissolves,
+            and in/out only. It is not a Premiere or Resolve project. The mp4 is a review codec,
+            not a mastering codec. An imported SRT is included, with times snapped to the
+            conformed frame rate.
           </p>
           <button
             type="button"
@@ -2133,9 +2161,24 @@ export default function ProjectStudioPage() {
               {previewCut.finish?.line && (
                 <p className="text-xs text-white">{previewCut.finish.line}</p>
               )}
-              <a className="btn-ghost inline-flex" href={`/api/media/${previewCut.outputPath}`} download>
-                Download preview mp4
-              </a>
+              {previewCut.contactSheetPath && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  className="w-full rounded-md bg-black"
+                  src={`/api/media/${previewCut.contactSheetPath}`}
+                  alt="Contact sheet of each shot in this preview cut"
+                />
+              )}
+              <div className="flex flex-wrap gap-2">
+                <a className="btn-ghost inline-flex" href={`/api/media/${previewCut.outputPath}`} download>
+                  Download preview mp4
+                </a>
+                {previewCut.contactSheetPath && (
+                  <a className="btn-ghost inline-flex" href={`/api/media/${previewCut.contactSheetPath}`} download>
+                    Download contact sheet
+                  </a>
+                )}
+              </div>
             </div>
           </article>
         ) : (
@@ -2164,6 +2207,14 @@ export default function ProjectStudioPage() {
               controls
               playsInline
             />
+            {stitch.contactSheetPath && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                className="w-full bg-black"
+                src={`/api/media/${stitch.contactSheetPath}`}
+                alt="Contact sheet of each shot in this stitch"
+              />
+            )}
             <div className="space-y-2 p-4">
               <p className="text-sm text-white">
                 Stitch of {stitch.includedShotIds.length} completed shot
@@ -2194,6 +2245,11 @@ export default function ProjectStudioPage() {
                 <a className="btn-primary inline-flex" href={`/api/media/${stitch.outputPath}`} download>
                   Download stitched mp4
                 </a>
+                {stitch.contactSheetPath && (
+                  <a className="btn-ghost inline-flex" href={`/api/media/${stitch.contactSheetPath}`} download>
+                    Download contact sheet
+                  </a>
+                )}
                 {stitch.finish?.sidecarPath && (
                   <a className="btn-ghost inline-flex" href={`/api/media/${stitch.finish.sidecarPath}`} download>
                     Download sidecar .srt
@@ -2236,6 +2292,52 @@ export default function ProjectStudioPage() {
           </div>
         )}
       </section>
+
+      {stitchGate && stitchReview?.warn && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
+          <div
+            className="panel w-full max-w-xl p-5"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mixed-pass-title"
+          >
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200">
+              {stitchReview.mixed ? "Mixed passes" : "Out of date"}
+            </p>
+            <h2 id="mixed-pass-title" className="mt-2 text-xl font-semibold text-white">
+              Review this cut before the stitch
+            </h2>
+            <div className="mt-3 space-y-3">
+              {stitchReview.paragraphs.map((paragraph, index) => (
+                <p key={index} className="text-sm leading-relaxed text-white">
+                  {paragraph}
+                </p>
+              ))}
+            </div>
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={exporting}
+                onClick={() => setStitchGate(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={exporting}
+                onClick={() => {
+                  setStitchGate(false);
+                  void onExport();
+                }}
+              >
+                {exporting ? "Stitching…" : "Stitch anyway"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {pending && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">

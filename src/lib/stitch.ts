@@ -16,6 +16,7 @@ import {
   masterLoudnormFilter,
   resolveConformTarget,
 } from "./conform";
+import { contactVersion, writeContactSheet } from "./contact-sheet";
 import { finishedTake } from "./continuity";
 import {
   probeClipShape,
@@ -62,6 +63,8 @@ export interface StitchResult {
   kind: "takes" | "preview";
   seams: StitchSeam[];
   durationSec: number;
+  /** PNG next to the mp4. One labelled thumbnail per shot, in order. */
+  contactSheetPath: string;
   /** Music bed and captions actually applied. Absent on a seam preview. */
   finish?: FinishView;
 }
@@ -545,6 +548,32 @@ async function concatClips(
     ? await applyProgram(project, outAbs, rel, anyAudio, target.fps, durationSec)
     : undefined;
   if (!decorate && loudnessOn(project.loudnessNormalize, anyAudio)) await applyLoudnorm(outAbs);
+  const jobs = listJobs(projectId);
+  const { abs: sheetAbs, rel: sheetRel } = absoluteOutputPath(projectId, `${prefix}-${stamp}-contact.png`);
+  await writeContactSheet(
+    counted.map((part, index) => {
+      const job = jobs.find((item) => item.id === part.jobId);
+      if (!job) {
+        throw new Error("A clip in this stitch has no take record, so the contact sheet was not written.");
+      }
+      const preview = job.kind === "preview";
+      const pool = jobs.filter((item) => {
+        if (item.shotId !== part.shotId || item.status !== "completed" || !item.outputPath) return false;
+        return preview ? item.kind === "preview" : item.kind !== "preview";
+      });
+      const probed = shapes[index]?.durationSec ?? 0;
+      return {
+        abs: part.abs,
+        shotId: part.shotId,
+        version: contactVersion(pool, part.jobId),
+        preview,
+        provider: job.provider,
+        seed: job.seed ?? null,
+        durationSec: probed > 0 ? probed : job.durationSec ?? 0,
+      };
+    }),
+    sheetAbs
+  );
   return {
     outputPath: rel,
     includedShotIds: included.map((part) => part.shotId),
@@ -553,6 +582,7 @@ async function concatClips(
     kind,
     seams,
     durationSec: probeDurationSec(outAbs),
+    contactSheetPath: sheetRel,
     finish,
   };
 }
