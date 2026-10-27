@@ -1,7 +1,10 @@
 import { createHash } from "crypto";
 import fs from "fs";
+import os from "os";
+import path from "path";
 import JSZip from "jszip";
 import { cuesOnTimeline, formatSrt, readSrtFile } from "./captions";
+import { writeContactSheet } from "./contact-sheet";
 import { completedTakesFor, cutTake } from "./chain-stale";
 import { resolveConformTarget } from "./conform";
 import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
@@ -301,7 +304,8 @@ export interface EditExport {
 /**
  * Zip of the take each shot would stitch: the approved take when one is set,
  * otherwise the current take. One mp4 and one JSON manifest per take, plus a
- * CMX3600 EDL. API keys, auth headers, and environment values are not written.
+ * CMX3600 EDL and contact-sheet.png. API keys, auth headers, and environment
+ * values are not written.
  */
 export async function buildEditExport(projectId: string): Promise<EditExport> {
   const project = getProject(projectId);
@@ -385,6 +389,25 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
   const zip = new JSZip();
   zip.file("cut.edl", edl);
   if (srt) zip.file("captions.srt", srt);
+  const sheetDir = fs.mkdtempSync(path.join(os.tmpdir(), "star-dust-contact-"));
+  try {
+    const sheetAbs = path.join(sheetDir, "contact-sheet.png");
+    await writeContactSheet(
+      chosen.map((part) => ({
+        abs: part.abs,
+        shotId: part.shot.id,
+        version: part.version,
+        preview: false,
+        provider: part.job.provider,
+        seed: part.job.seed ?? null,
+        durationSec: part.info.durationSec,
+      })),
+      sheetAbs
+    );
+    zip.file("contact-sheet.png", fs.readFileSync(sheetAbs));
+  } finally {
+    fs.rmSync(sheetDir, { recursive: true, force: true });
+  }
   chosen.forEach((part, index) => {
     zip.file(part.filename, fs.readFileSync(part.abs));
     zip.file(part.filename.replace(/\.mp4$/i, ".json"), `${JSON.stringify(manifests[index], null, 2)}\n`);

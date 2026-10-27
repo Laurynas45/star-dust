@@ -3587,7 +3587,7 @@ async function main() {
     const names = entryNames(zip);
     const againNames = entryNames(againZip);
     assert(
-      JSON.stringify(names) === JSON.stringify(["SH010_v03.json", "SH010_v03.mp4", "SH020_v01.json", "SH020_v01.mp4", "SH030_v01.json", "SH030_v01.mp4", "cut.edl"]),
+      JSON.stringify(names) === JSON.stringify(["SH010_v03.json", "SH010_v03.mp4", "SH020_v01.json", "SH020_v01.mp4", "SH030_v01.json", "SH030_v01.mp4", "contact-sheet.png", "cut.edl"]),
       `edit zip names: ${names.join(", ")}`
     );
     assert(JSON.stringify(againNames) === JSON.stringify(names), "a second export keeps the same names");
@@ -4218,6 +4218,299 @@ async function main() {
   const bedZip = await JSZip.loadAsync(bedExport.bytes);
   assert(bedZip.file("captions.srt"), "the edit zip contains captions.srt");
   assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "music bed and captions did not need a provider key");
+
+  const mixedPass = await import("../src/lib/mixed-pass");
+  const sheet = await import("../src/lib/contact-sheet");
+  assert(mixedPass.providerContactName("mock") === "mock", "mock label");
+  assert(mixedPass.providerContactName("fal") === "fal", "fal label");
+  assert(mixedPass.providerContactName("replicate") === "Replicate", "Replicate label");
+  assert(mixedPass.providerContactName("comfyui") === "ComfyUI", "ComfyUI label");
+  const labelled = sheet.contactLabelLines({
+    shotId: "shot-label",
+    version: 3,
+    preview: false,
+    provider: "comfyui",
+    seed: 99,
+    durationSec: 4,
+  });
+  assert(labelled.join("\n") === "shot-label\ntake v03\nComfyUI\nseed 99\n4.00s", `contact label lines: ${labelled.join(" | ")}`);
+  const previewLines = sheet.contactLabelLines({
+    shotId: "shot-preview",
+    version: 1,
+    preview: true,
+    provider: "mock",
+    seed: null,
+    durationSec: 1.5,
+  });
+  assert(previewLines[1] === "preview v01" && previewLines[3] === "seed unset", "a preview cell says preview and leaves the seed unset");
+  const twoGrid = sheet.contactGrid(2);
+  assert(twoGrid.cols === 2 && twoGrid.rows === 1 && twoGrid.width === 960 && twoGrid.height === 390, "two shots sit on one row");
+  const fourGrid = sheet.contactGrid(4);
+  assert(fourGrid.cols === 3 && fourGrid.rows === 2 && fourGrid.width === 1440 && fourGrid.height === 780, "four shots wrap to two rows");
+  assert(sheet.contactSheetProblem("drawtext", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf") === null, "drawtext and DejaVu can label a sheet");
+  assert(sheet.contactSheetProblem("scale", "/font") === sheet.CONTACT_DRAWTEXT_MISSING, "a missing drawtext filter is named");
+  assert(sheet.contactSheetProblem("drawtext", null) === sheet.CONTACT_FONT_MISSING, "a missing font is named");
+
+  const uniform = mixedPass.describeMixedPass([
+    { shotId: "only-mock", position: 1, jobId: "m", provider: "mock", kind: "take", stale: false },
+    { shotId: "also-mock", position: 2, jobId: "m2", provider: "mock", kind: "take", stale: false },
+  ]);
+  assert(!uniform.warn && uniform.text === "", "a mock-only cut does not warn");
+  const realOnly = mixedPass.describeMixedPass([
+    { shotId: "only-fal", position: 1, jobId: "f", provider: "fal", kind: "take", stale: false },
+  ]);
+  assert(!realOnly.warn, "one real provider does not warn");
+  const staleOnly = mixedPass.describeMixedPass([
+    { shotId: "stale-shot", position: 3, jobId: "c", provider: "comfyui", kind: "take", stale: true },
+  ]);
+  assert(staleOnly.warn && !staleOnly.mixed, "an out-of-date shot warns without calling it mixed");
+  assert(!staleOnly.text.includes("MIXED PASSES"), "an out-of-date-only cut is not labelled MIXED PASSES");
+  assert(staleOnly.text.includes("stale-shot") && staleOnly.text.includes("Out of date"), "the out-of-date shot is named");
+  assert(staleOnly.text.includes("does not promise quality"), "the out-of-date note does not promise quality");
+  const previewMix = mixedPass.describeMixedPass([
+    { shotId: "prev-shot", position: 1, jobId: "p", provider: "mock", kind: "preview", stale: false },
+    { shotId: "rep-shot", position: 2, jobId: "r", provider: "replicate", kind: "take", stale: false },
+  ]);
+  assert(previewMix.warn && previewMix.mixed, "a preview clip beside a real take is mixed");
+  assert(previewMix.text.includes("MIXED PASSES"), "the mixed cut is labelled MIXED PASSES");
+  assert(previewMix.text.includes("prev-shot") && previewMix.text.includes("preview clip"), "the preview shot is named");
+  assert(previewMix.text.includes("rep-shot") && previewMix.text.includes("Replicate"), "the Replicate shot is named");
+  assert(previewMix.fallback.some((pass) => pass.shotId === "prev-shot"), "the free clip is the fallback");
+  assert(previewMix.text.includes("does not promise quality"), "the mixed note does not promise quality");
+  assert(previewMix.text.includes("does not lock a character"), "the mixed note does not claim a character lock");
+  assert(!/\bguarantee\b|broadcast quality|will look the same|perfect match/i.test(previewMix.text), "the mixed note makes no quality promise");
+  assert(!/FAL_KEY|REPLICATE_API_TOKEN|COMFYUI_AUTH/.test(previewMix.text), "the mixed note does not print a key");
+  const chosenPass = mixedPass.reviewStitchPasses({
+    shots: [
+      { id: "s-mix", position: 1, approvedJobId: "j-mock", selectedJobId: "j-newer" },
+      { id: "s-real", position: 2 },
+    ],
+    jobs: [
+      {
+        id: "j-mock",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        imagePath: "uploads/a.png",
+        shotId: "s-mix",
+        kind: "take",
+        status: "completed",
+        outputPath: "outputs/a.mp4",
+        provider: "mock",
+      },
+      {
+        id: "j-newer",
+        createdAt: "2026-01-02T00:00:00.000Z",
+        imagePath: "uploads/a.png",
+        shotId: "s-mix",
+        kind: "take",
+        status: "completed",
+        outputPath: "outputs/b.mp4",
+        provider: "fal",
+      },
+      {
+        id: "j-real",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        imagePath: "uploads/a.png",
+        shotId: "s-real",
+        kind: "take",
+        status: "completed",
+        outputPath: "outputs/c.mp4",
+        provider: "comfyui",
+      },
+    ],
+    staleShotIds: new Set(["s-real"]),
+  });
+  assert(chosenPass.mixed && chosenPass.fallback.some((pass) => pass.jobId === "j-mock"), "the approved mock take is the free clip");
+  assert(!chosenPass.fallback.some((pass) => pass.jobId === "j-newer"), "a newer take is not the cut when an approved take is set");
+  assert(chosenPass.text.includes("s-mix") && chosenPass.text.includes("s-real"), "both shots in the mixed cut are named");
+  assert(chosenPass.stale.some((pass) => pass.shotId === "s-real"), "the out-of-date shot in the cut is named");
+  assert(chosenPass.text.includes("ComfyUI"), "the ComfyUI take is named with that provider");
+  const noTake = mixedPass.reviewStitchPasses({
+    shots: [{ id: "missing-take", position: 1 }],
+    jobs: [],
+    staleShotIds: new Set(["missing-take"]),
+  });
+  assert(!noTake.warn, "a shot with no completed take is not in the cut");
+
+  function imageSize(file: string): { width: number; height: number } {
+    const probe = spawnSync(
+      "ffprobe",
+      ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", file],
+      { encoding: "utf8" }
+    );
+    if (probe.status !== 0) throw new Error(probe.stderr || "image probe failed");
+    const [width, height] = String(probe.stdout).trim().split(",").map(Number);
+    return { width, height };
+  }
+  function isPng(file: string): boolean {
+    const buf = fs.readFileSync(file);
+    return buf.length > 8 && buf[0] === 0x89 && buf.toString("ascii", 1, 4) === "PNG";
+  }
+  function labelWhites(file: string): number {
+    const raw = spawnSync(
+      "ffmpeg",
+      [
+        "-v",
+        "error",
+        "-i",
+        file,
+        "-vf",
+        `crop=iw:${sheet.CONTACT_LABEL_H}:0:ih-${sheet.CONTACT_LABEL_H}`,
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-",
+      ],
+      { maxBuffer: 32 * 1024 * 1024 }
+    );
+    const bytes = raw.stdout;
+    if (raw.status !== 0 || !Buffer.isBuffer(bytes)) throw new Error(raw.stderr?.toString() || "label crop failed");
+    let count = 0;
+    for (let i = 0; i + 2 < bytes.length; i += 3) {
+      if (bytes[i] > 220 && bytes[i + 1] > 220 && bytes[i + 2] > 220) count += 1;
+    }
+    return count;
+  }
+
+  const quadDir = path.join(dataDir, "quad");
+  fs.mkdirSync(quadDir, { recursive: true });
+  const quadClips = ["red", "green", "blue", "yellow"].map((color, index) => {
+    const file = path.join(quadDir, `${color}.mp4`);
+    runFfmpegSync([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=${color}:s=320x180:r=24:d=0.2`,
+      "-frames:v",
+      "4",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-an",
+      file,
+    ]);
+    return {
+      abs: file,
+      shotId: `quad-${color}`,
+      version: index + 1,
+      preview: false,
+      provider: (["mock", "fal", "replicate", "comfyui"] as const)[index],
+      seed: 10 + index,
+      durationSec: 0.2,
+    };
+  });
+  const quadPng = path.join(quadDir, "contact.png");
+  await sheet.writeContactSheet(quadClips, quadPng);
+  assert(isPng(quadPng), "the four-shot contact sheet is a PNG");
+  const quadSize = imageSize(quadPng);
+  assert(quadSize.width === fourGrid.width && quadSize.height === fourGrid.height, `four-shot sheet is ${quadSize.width}x${quadSize.height}`);
+  assert(labelWhites(quadPng) > 20, "the contact sheet draws light label text");
+
+  const sheetProject = storage.createProject("Contact sheet", "");
+  const sheetStill = storage.saveUpload(sheetProject.id, "still.png", solidPng(dataDir, "contact-still.png", "navy"));
+  const sheetShots = [0, 1].map((index) =>
+    storage.createShot({
+      projectId: sheetProject.id,
+      prompt: `contact ${index}`,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: sheetStill,
+    })
+  );
+  const sheetJobs = sheetShots.map((shot, index) => {
+    const made = storage.createJob({
+      projectId: sheetProject.id,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: shot.presetId,
+      provider: "mock",
+      status: "completed",
+      imagePath: sheetStill,
+      durationSec: 1,
+      seed: 100 + index,
+    });
+    const { abs, rel } = storage.absoluteOutputPath(sheetProject.id, `contact-${index}.mp4`);
+    runFfmpegSync([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=${index === 0 ? "teal" : "orange"}:s=640x360:r=24:d=1`,
+      "-frames:v",
+      "24",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-an",
+      abs,
+    ]);
+    storage.updateJob(made.id, { status: "completed", outputPath: rel });
+    return made.id;
+  });
+  const mockReview = mixedPass.reviewStitchPasses({
+    shots: storage.listShots(sheetProject.id),
+    jobs: storage.listJobs(sheetProject.id),
+    staleShotIds: new Set(),
+  });
+  assert(!mockReview.warn, "two mock takes do not warn");
+  const mockStitch = await stitch.stitchProject(sheetProject.id);
+  const mockMp4 = storage.resolveDataPath(mockStitch.outputPath);
+  const mockSheet = storage.resolveDataPath(mockStitch.contactSheetPath);
+  assert(fs.existsSync(mockMp4), "the mock stitch still writes an mp4");
+  assert(mockStitch.contactSheetPath.endsWith(".png") && isPng(mockSheet), "the mock stitch writes a PNG contact sheet");
+  const mockSheetSize = imageSize(mockSheet);
+  assert(
+    mockSheetSize.width === twoGrid.width && mockSheetSize.height === twoGrid.height,
+    `mock contact sheet is ${mockSheetSize.width}x${mockSheetSize.height}`
+  );
+  assert(labelWhites(mockSheet) > 20, "the mock contact sheet has label text");
+  assert(mockStitch.includedShotIds[0] === sheetShots[0].id && mockStitch.includedShotIds[1] === sheetShots[1].id, "sheet order follows the shot list");
+  storage.updateJob(sheetJobs[1], { provider: "fal" });
+  const falReview = mixedPass.reviewStitchPasses({
+    shots: storage.listShots(sheetProject.id),
+    jobs: storage.listJobs(sheetProject.id),
+    staleShotIds: new Set([sheetShots[0].id]),
+  });
+  assert(falReview.warn && falReview.mixed, "mock beside fal warns");
+  assert(falReview.text.includes("MIXED PASSES"), "the studio warning says MIXED PASSES");
+  assert(falReview.text.includes(sheetShots[0].id) && falReview.text.includes(sheetShots[1].id), "the warning names both shot ids");
+  assert(falReview.text.includes("mock") && falReview.text.includes("fal"), "the warning names mock and fal");
+  assert(falReview.stale.some((pass) => pass.shotId === sheetShots[0].id), "the out-of-date shot is included");
+  assert(falReview.text.includes("does not promise quality"), "the stitch warning does not promise quality");
+  const mixedStitch = await stitch.stitchProject(sheetProject.id);
+  assert(fs.existsSync(storage.resolveDataPath(mixedStitch.outputPath)), "stitch anyway still writes the mp4");
+  assert(isPng(storage.resolveDataPath(mixedStitch.contactSheetPath)), "stitch anyway still writes the contact sheet");
+  const previewJob = storage.createJob({
+    projectId: sheetProject.id,
+    shotId: sheetShots[0].id,
+    prompt: "preview",
+    presetId: "slow-zoom-in",
+    provider: "mock",
+    kind: "preview",
+    status: "completed",
+    imagePath: sheetStill,
+    durationSec: 1,
+    seed: 7,
+  });
+  storage.updateJob(previewJob.id, {
+    status: "completed",
+    outputPath: storage.getJob(sheetJobs[0])?.outputPath,
+  });
+  const previewCut = await stitch.stitchPreview(sheetProject.id, [previewJob.id]);
+  assert(previewCut.kind === "preview" && previewCut.includedJobIds.length === 1, "preview stitch stays one clip");
+  assert(isPng(storage.resolveDataPath(previewCut.contactSheetPath)), "a preview stitch writes a contact sheet");
+  const previewSize = imageSize(storage.resolveDataPath(previewCut.contactSheetPath));
+  assert(previewSize.width === sheet.contactGrid(1).width && previewSize.height === sheet.contactGrid(1).height, "one preview cell is one column");
+  const packedSheet = await edit.buildEditExport(sheetProject.id);
+  const packedZip = await JSZip.loadAsync(packedSheet.bytes);
+  const packedPng = await packedZip.file("contact-sheet.png")?.async("nodebuffer");
+  assert(packedPng && packedPng[0] === 0x89 && packedPng.toString("ascii", 1, 4) === "PNG", "the edit zip contains a PNG contact sheet");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "the contact sheet did not need a provider key");
 
   console.log("provider checks ok");
   console.log(dataDir);

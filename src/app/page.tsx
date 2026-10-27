@@ -83,7 +83,7 @@ export default function StudioHome() {
           {[
             ["01", "Shot list", "Start still, optional end still, prompt, duration, preset. A later shot can continue from the previous last frame."],
             ["02", "Render all", "Shots run in order. A matching completed take is skipped."],
-            ["03", "Export stitch", "ffmpeg writes one mp4. Export for edit writes a zip of versioned clips, a CMX3600 EDL of cuts and dissolves, and a manifest. That EDL is not a Premiere or Resolve project."],
+            ["03", "Export stitch", "ffmpeg writes one mp4 and a contact sheet. Export for edit writes a zip of versioned clips, a CMX3600 EDL of cuts and dissolves, a manifest, and that contact sheet. That EDL is not a Premiere or Resolve project."],
           ].map(([index, title, copy]) => (
             <li key={index} className="panel flex gap-3 p-3">
               <span className="font-mono text-xs text-violet-300">{index}</span>
