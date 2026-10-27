@@ -2,6 +2,7 @@ import fs from "fs";
 import { NextRequest, NextResponse } from "next/server";
 import { approvedTakeMismatch } from "@/lib/approve";
 import { planTakeConform } from "@/lib/conform";
+import { planProjectFinish } from "@/lib/finish-plan";
 import { finishedTake } from "@/lib/continuity";
 import { probeClipShape } from "@/lib/ffmpeg";
 import { desiredClipKey } from "@/lib/input-key";
@@ -16,9 +17,12 @@ import {
 } from "@/lib/storage";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import {
+  CaptionMode,
   ComfyWorkflowId,
   SeamMode,
   clampChainTrimStartFrames,
+  clampMusicFadeSec,
+  clampMusicLevelDb,
   clampSeamFade,
   effectivePrompt,
   isComfyWorkflowId,
@@ -55,6 +59,13 @@ function nullableFlag(value: unknown): boolean | null | undefined {
   return undefined;
 }
 
+function captionModeField(value: unknown): CaptionMode | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (value === "burn" || value === "sidecar") return value;
+  return undefined;
+}
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -80,9 +91,19 @@ export async function GET(
       continue;
     }
   }
+  const cutSec = conformClips.reduce((sum, clip) => sum + (clip.durationSec > 0 ? clip.durationSec : 0), 0);
+  const previewSec = shots.reduce((sum, shot) => sum + (shot.durationSec > 0 ? shot.durationSec : 0), 0);
   return NextResponse.json({
     project,
     conform: planTakeConform(project, conformClips),
+    finish: planProjectFinish(project, {
+      anyClipAudio: conformClips.some((clip) => clip.hasAudio),
+      cutSec: cutSec > 0 ? cutSec : null,
+    }),
+    previewFinish: planProjectFinish(project, {
+      anyClipAudio: false,
+      cutSec: previewSec > 0 ? previewSec : null,
+    }),
     shots: shots.map((shot) => ({
       ...shot,
       currentInputKey: desiredClipKey(shot),
@@ -130,6 +151,11 @@ export async function PATCH(
     outputWidth: nullableNumber(body.outputWidth),
     outputHeight: nullableNumber(body.outputHeight),
     loudnessNormalize: nullableFlag(body.loudnessNormalize),
+    musicLevelDb: typeof body.musicLevelDb === "number" ? clampMusicLevelDb(body.musicLevelDb) : undefined,
+    musicFadeInSec: typeof body.musicFadeInSec === "number" ? clampMusicFadeSec(body.musicFadeInSec) : undefined,
+    musicFadeOutSec:
+      typeof body.musicFadeOutSec === "number" ? clampMusicFadeSec(body.musicFadeOutSec) : undefined,
+    captionMode: captionModeField(body.captionMode),
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

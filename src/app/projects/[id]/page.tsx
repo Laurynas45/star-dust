@@ -21,6 +21,8 @@ import {
   APPROVE_HONESTY,
   APPROVED_LABEL,
   CONFORM_HONESTY,
+  FINISH_HONESTY,
+  FinishView,
   APPROVED_MISMATCH_NOTE,
   EDIT_EXPORT_HONESTY,
   AppSettings,
@@ -38,6 +40,9 @@ import {
   MAX_SHOT_SECONDS,
   MIN_SHOT_SECONDS,
   MOTION_PRESETS,
+  MUSIC_FADE_CHOICES,
+  MUSIC_LEVEL_CHOICES,
+  CaptionMode,
   Project,
   ProviderId,
   REUSE_HONESTY,
@@ -71,6 +76,8 @@ type Detail = {
     summary: string;
     shots: { shotId: string; label: string | null }[];
   };
+  finish?: FinishView;
+  previewFinish?: FinishView;
 };
 
 const OUTPUT_FPS_CHOICES = [16, 24, 25, 30] as const;
@@ -90,6 +97,7 @@ type StitchResponse = {
   kind?: "takes" | "preview";
   durationSec?: number;
   seams?: { position: number; mode: "cut" | "crossfade"; fadeSec: number; note?: string }[];
+  finish?: FinishView;
 };
 
 type SkippedShot = {
@@ -646,6 +654,10 @@ export default function ProjectStudioPage() {
     outputWidth?: number | null;
     outputHeight?: number | null;
     loudnessNormalize?: boolean | null;
+    musicLevelDb?: number;
+    musicFadeInSec?: number;
+    musicFadeOutSec?: number;
+    captionMode?: CaptionMode | null;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -689,6 +701,53 @@ export default function ProjectStudioPage() {
   async function clearSheet() {
     await fetch(`/api/projects/${projectId}/character-sheet`, { method: "DELETE" });
     await load();
+  }
+
+  async function onMusic(file: File | null) {
+    if (!file) return;
+    setError(null);
+    const form = new FormData();
+    form.set("audio", file);
+    const res = await fetch(`/api/projects/${projectId}/music`, { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not add the music bed");
+      return;
+    }
+    await load();
+  }
+
+  async function clearMusic() {
+    setError(null);
+    await fetch(`/api/projects/${projectId}/music`, { method: "DELETE" });
+    await load();
+  }
+
+  async function onCaptions(file: File | null) {
+    if (!file) return;
+    setError(null);
+    const form = new FormData();
+    form.set("srt", file);
+    const res = await fetch(`/api/projects/${projectId}/captions`, { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const details = Array.isArray(data.errors) ? data.errors.join(" ") : "";
+      setError(details || data.error || "Could not import the SRT");
+      return;
+    }
+    await load();
+  }
+
+  async function clearCaptions() {
+    setError(null);
+    await fetch(`/api/projects/${projectId}/captions`, { method: "DELETE" });
+    await load();
+  }
+
+  function storedName(rel?: string): string {
+    if (!rel) return "";
+    const base = rel.split("/").pop() ?? rel;
+    return base.replace(/^\d+_/, "");
   }
 
   if (loading) {
@@ -776,7 +835,8 @@ export default function ProjectStudioPage() {
           <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
             ffmpeg joins the take you chose. An approved take stays in that stitch. Hard cut, or a
             short crossfade. A chained hard cut can trim a few start frames of the next clip. Mixed
-            clips are conformed to one frame rate and size first. The stitch is not a new model.
+            clips are conformed to one frame rate and size first. A music bed and an imported SRT
+            can ride on that same file. The stitch is not a new model.
           </p>
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
             <label className="text-xs text-[var(--muted)]">
@@ -848,13 +908,24 @@ export default function ProjectStudioPage() {
                   });
                 }}
               >
-                <option value="">On when a clip has audio</option>
-                <option value="on">EBU R128 on</option>
+                <option value="">
+                  {project.musicBedPath ? "On — −14 LUFS with the music bed" : "On when a clip has audio"}
+                </option>
+                <option value="on">{project.musicBedPath ? "On — −14 LUFS" : "EBU R128 on"}</option>
                 <option value="off">Off</option>
               </select>
             </label>
           </div>
           <p className="mt-3 text-xs leading-relaxed text-white">{detail.conform?.summary}</p>
+          {detail.finish?.line && (
+            <p className="mt-2 text-xs leading-relaxed text-white">{detail.finish.line}</p>
+          )}
+          {detail.finish?.loudnessNote && (
+            <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{detail.finish.loudnessNote}</p>
+          )}
+          {detail.finish?.fitNote && (
+            <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{detail.finish.fitNote}</p>
+          )}
           <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{CONFORM_HONESTY}</p>
           <button
             type="button"
@@ -868,7 +939,7 @@ export default function ProjectStudioPage() {
             Export for edit downloads a zip for an editor: one chosen take per shot, a CMX3600
             EDL, and a JSON manifest per take. The EDL carries cuts, dissolves, and in/out only.
             It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering
-            codec.
+            codec. An imported SRT is included, with times snapped to the conformed frame rate.
           </p>
           <button
             type="button"
@@ -880,6 +951,148 @@ export default function ProjectStudioPage() {
           </button>
           <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{EDIT_EXPORT_HONESTY}</p>
         </article>
+      </section>
+
+      <section className="panel space-y-3 p-4">
+        <div>
+          <p className="font-mono text-[11px] text-violet-300">Music and captions</p>
+          <h2 className="mt-1 text-lg font-medium text-white">A bed under the cut, and an SRT you wrote</h2>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted)]">{FINISH_HONESTY}</p>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="space-y-3">
+            <p className="text-xs font-medium text-white">Music bed</p>
+            <div className="flex flex-wrap gap-2">
+              <label className="btn-ghost cursor-pointer">
+                {project.musicBedPath ? "Replace audio" : "Upload audio"}
+                <input
+                  type="file"
+                  accept=".wav,.mp3,.m4a,.aac,.ogg,.flac,.aiff,.aif,audio/*"
+                  className="sr-only"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null;
+                    e.target.value = "";
+                    void onMusic(file);
+                  }}
+                />
+              </label>
+              {project.musicBedPath && (
+                <button type="button" className="btn-ghost" onClick={() => void clearMusic()}>
+                  Remove
+                </button>
+              )}
+            </div>
+            {project.musicBedPath && (
+              <p className="text-[11px] text-[var(--muted)]">{storedName(project.musicBedPath)}</p>
+            )}
+            <div className="grid gap-3 sm:grid-cols-3">
+              <label className="text-xs text-[var(--muted)]">
+                Level
+                <select
+                  className="input mt-1"
+                  value={String(project.musicLevelDb)}
+                  disabled={!project.musicBedPath}
+                  onChange={(e) => void saveProjectPatch({ musicLevelDb: Number(e.target.value) })}
+                >
+                  {(MUSIC_LEVEL_CHOICES.includes(project.musicLevelDb as (typeof MUSIC_LEVEL_CHOICES)[number])
+                    ? MUSIC_LEVEL_CHOICES
+                    : [project.musicLevelDb, ...MUSIC_LEVEL_CHOICES]
+                  ).map((level) => (
+                    <option key={level} value={level}>
+                      {level} dB
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-[var(--muted)]">
+                Fade in
+                <select
+                  className="input mt-1"
+                  value={String(project.musicFadeInSec)}
+                  disabled={!project.musicBedPath}
+                  onChange={(e) => void saveProjectPatch({ musicFadeInSec: Number(e.target.value) })}
+                >
+                  {(MUSIC_FADE_CHOICES.includes(project.musicFadeInSec as (typeof MUSIC_FADE_CHOICES)[number])
+                    ? MUSIC_FADE_CHOICES
+                    : [project.musicFadeInSec, ...MUSIC_FADE_CHOICES]
+                  ).map((seconds) => (
+                    <option key={`in-${seconds}`} value={seconds}>
+                      {seconds}s
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs text-[var(--muted)]">
+                Fade out
+                <select
+                  className="input mt-1"
+                  value={String(project.musicFadeOutSec)}
+                  disabled={!project.musicBedPath}
+                  onChange={(e) => void saveProjectPatch({ musicFadeOutSec: Number(e.target.value) })}
+                >
+                  {(MUSIC_FADE_CHOICES.includes(project.musicFadeOutSec as (typeof MUSIC_FADE_CHOICES)[number])
+                    ? MUSIC_FADE_CHOICES
+                    : [project.musicFadeOutSec, ...MUSIC_FADE_CHOICES]
+                  ).map((seconds) => (
+                    <option key={`out-${seconds}`} value={seconds}>
+                      {seconds}s
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+          <div className="space-y-3">
+            <p className="text-xs font-medium text-white">SRT captions</p>
+            <div className="flex flex-wrap gap-2">
+              <label className="btn-ghost cursor-pointer">
+                {project.captionsPath ? "Replace SRT" : "Import SRT"}
+                <input
+                  type="file"
+                  accept=".srt,text/plain"
+                  className="sr-only"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null;
+                    e.target.value = "";
+                    void onCaptions(file);
+                  }}
+                />
+              </label>
+              {project.captionsPath && (
+                <button type="button" className="btn-ghost" onClick={() => void clearCaptions()}>
+                  Remove
+                </button>
+              )}
+            </div>
+            {project.captionsPath && (
+              <p className="text-[11px] text-[var(--muted)]">
+                {storedName(project.captionsPath)}
+                {detail.finish?.captions
+                  ? ` · ${detail.finish.captions.count} cue${detail.finish.captions.count === 1 ? "" : "s"}`
+                  : ""}
+              </p>
+            )}
+            {detail.finish?.captionErrors && detail.finish.captionErrors.length > 0 && (
+              <p className="text-[11px] leading-relaxed text-rose-200">
+                {detail.finish.captionErrors.join(" ")}
+              </p>
+            )}
+            <label className="block max-w-xs text-xs text-[var(--muted)]">
+              How captions go out
+              <select
+                className="input mt-1"
+                value={project.captionMode ?? "burn"}
+                disabled={!project.captionsPath}
+                onChange={(e) =>
+                  void saveProjectPatch({ captionMode: e.target.value === "sidecar" ? "sidecar" : "burn" })
+                }
+              >
+                <option value="burn">Burn in</option>
+                <option value="sidecar">Sidecar .srt</option>
+              </select>
+            </label>
+          </div>
+        </div>
       </section>
 
       <section className="panel space-y-3 p-4">
@@ -947,8 +1160,15 @@ export default function ProjectStudioPage() {
             motion. Those preview clips are conformed before they join, the same way as Export
             stitch. Last-frame chaining, and the start-frame trim, apply when you render a take
             and export the stitch, not in this preview. Preview clips do not replace or count as
-            the shot&apos;s takes.
+            the shot&apos;s takes. Those preview clips have no audio, so a music bed plays at its
+            level instead of ducking.
           </p>
+          {detail.previewFinish?.line && (
+            <p className="mt-2 text-xs leading-relaxed text-white">{detail.previewFinish.line}</p>
+          )}
+          {detail.previewFinish?.fitNote && (
+            <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{detail.previewFinish.fitNote}</p>
+          )}
         </div>
         <button
           type="button"
@@ -1910,6 +2130,9 @@ export default function ProjectStudioPage() {
                 Camera motion on stills, not AI motion. {previewCut.includedShotIds.length} shot
                 {previewCut.includedShotIds.length === 1 ? "" : "s"}. This is not a take.
               </p>
+              {previewCut.finish?.line && (
+                <p className="text-xs text-white">{previewCut.finish.line}</p>
+              )}
               <a className="btn-ghost inline-flex" href={`/api/media/${previewCut.outputPath}`} download>
                 Download preview mp4
               </a>
@@ -1947,6 +2170,10 @@ export default function ProjectStudioPage() {
                 {stitch.includedShotIds.length === 1 ? "" : "s"}
                 {typeof stitch.durationSec === "number" ? ` · ${stitch.durationSec.toFixed(2)}s` : ""}.
               </p>
+              {stitch.finish?.line && <p className="text-xs text-white">{stitch.finish.line}</p>}
+              {stitch.finish?.loudnessNote && (
+                <p className="text-xs text-[var(--muted)]">{stitch.finish.loudnessNote}</p>
+              )}
               {stitch.seams && stitch.seams.length > 0 && (
                 <p className="text-xs text-[var(--muted)]">
                   {stitch.seams
@@ -1963,9 +2190,16 @@ export default function ProjectStudioPage() {
                   {stitch.skipped.map((item) => `Shot ${item.position}: ${item.reason}`).join(" · ")}
                 </p>
               )}
-              <a className="btn-primary inline-flex" href={`/api/media/${stitch.outputPath}`} download>
-                Download stitched mp4
-              </a>
+              <div className="flex flex-wrap gap-2">
+                <a className="btn-primary inline-flex" href={`/api/media/${stitch.outputPath}`} download>
+                  Download stitched mp4
+                </a>
+                {stitch.finish?.sidecarPath && (
+                  <a className="btn-ghost inline-flex" href={`/api/media/${stitch.finish.sidecarPath}`} download>
+                    Download sidecar .srt
+                  </a>
+                )}
+              </div>
             </div>
           </article>
         )}

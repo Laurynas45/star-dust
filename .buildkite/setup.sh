@@ -76,12 +76,14 @@ ensure_build_tools() {
 }
 
 install_ffmpeg() {
-  if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
-    echo "ffmpeg: $(command -v ffmpeg)"
-    echo "ffprobe: $(command -v ffprobe)"
-    return 0
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+    apt_install ffmpeg
   fi
-  apt_install ffmpeg
+  if [ ! -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ]; then
+    apt_install fonts-dejavu-core
+  fi
+  echo "ffmpeg: $(command -v ffmpeg)"
+  echo "ffprobe: $(command -v ffprobe)"
   command -v ffmpeg
   command -v ffprobe
 }

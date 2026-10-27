@@ -2,6 +2,9 @@ export type ProviderId = "mock" | "fal" | "replicate" | "comfyui";
 
 export type SeamMode = "cut" | "crossfade";
 
+/** Burn draws the SRT into the picture. Sidecar writes a .srt next to the mp4. */
+export type CaptionMode = "burn" | "sidecar";
+
 export type JobKind = "take" | "preview";
 
 export const COMFY_WORKFLOW_IDS = ["svd", "wan", "wan-flf", "ltx"] as const;
@@ -69,8 +72,21 @@ export interface Project {
   /**
    * EBU R128 on the final file. Null means on only when a clip has audio.
    * Off when every clip is silent, even if this is true.
+   * A music bed masters to −14 LUFS instead when this is on or left at the default.
    */
   loudnessNormalize: boolean | null;
+  /** Local audio file. Never sent to a provider. Unset means no music bed. */
+  musicBedPath?: string;
+  /** Bed level in dB before ducking and before the final master. Default −18. */
+  musicLevelDb: number;
+  /** Fade in at the start of the cut. 0 is no fade. */
+  musicFadeInSec: number;
+  /** Fade out at the end of the cut. 0 is no fade. */
+  musicFadeOutSec: number;
+  /** Local SRT. Never sent to a provider. Unset means no captions. */
+  captionsPath?: string;
+  /** Null until an SRT is imported. Burn-in or a sidecar file. */
+  captionMode: CaptionMode | null;
 }
 
 export interface Shot {
@@ -345,11 +361,35 @@ export const APPROVED_HOLD_REASON = "Approved take kept. Not rendered again.";
 export const APPROVE_HONESTY =
   "Approve keeps this take in the stitch. Render all, Retake, and out-of-date updates do not replace it. Only unapproved shots between approved takes are marked out of date. This does not lock a character, lip-sync, or build a long film.";
 
+export const DEFAULT_MUSIC_LEVEL_DB = -18;
+export const MIN_MUSIC_LEVEL_DB = -40;
+export const MAX_MUSIC_LEVEL_DB = 0;
+export const DEFAULT_MUSIC_FADE_IN_SEC = 0.25;
+export const DEFAULT_MUSIC_FADE_OUT_SEC = 1;
+export const MAX_MUSIC_FADE_SEC = 5;
+export const MUSIC_LEVEL_CHOICES = [-12, -18, -24, -30] as const;
+export const MUSIC_FADE_CHOICES = [0, 0.25, 0.5, 1, 2] as const;
+
+export const FINISH_HONESTY =
+  "The music file stays on this machine. It is not sent to a provider. Captions come from the SRT you import. Star Dust does not transcribe speech, does not lip-sync, and does not lock a character or build a long film.";
+
+export interface FinishView {
+  /** "music bed, ducked; 14 captions burned in" when that is what the cut will add. */
+  line: string;
+  music: "ducked" | "level" | null;
+  captions: { count: number; mode: CaptionMode } | null;
+  captionErrors: string[];
+  loudnessNote: string | null;
+  fitNote: string | null;
+  /** Set when a sidecar .srt was written next to the mp4. */
+  sidecarPath?: string;
+}
+
 export const CONFORM_HONESTY =
   "Frame rate changes by duplicating or dropping frames, not by speeding a clip up. Letterbox and pillarbox keep the picture from being stretched. This does not lock a character, lip-sync, or build a long film.";
 
 export const EDIT_EXPORT_HONESTY =
-  "Export for edit zips the chosen take of each shot: the approved take when one is set, otherwise the current take. Names look like SH010_v03.mp4, so a newer version does not overwrite an earlier file. The CMX3600 EDL follows the shot list, with the same hard cuts and crossfade lengths as the stitch, at the conformed frame rate. It carries cuts, dissolves, and in/out only. It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering codec. This does not lock a character, lip-sync, or build a long film.";
+  "Export for edit zips the chosen take of each shot: the approved take when one is set, otherwise the current take. Names look like SH010_v03.mp4, so a newer version does not overwrite an earlier file. The CMX3600 EDL follows the shot list, with the same hard cuts and crossfade lengths as the stitch, at the conformed frame rate. It carries cuts, dissolves, and in/out only. It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering codec. When the project has an SRT, the zip includes captions.srt with times snapped to that conformed frame rate. This does not lock a character, lip-sync, or build a long film.";
 
 export const HUNT_NOTE =
   "Try 2, 3, or 4 seeds of this one shot and pick a winner. Each candidate stays as a take. The estimate is shown first. A paid run above your typed rate is blocked. It does not lock a character.";
@@ -409,6 +449,18 @@ export function effectivePrompt(styleBase: string | null | undefined, shotPrompt
   const action = shotPrompt.trim().replace(/^[,\s]+/, "");
   if (!action) return base;
   return `${base}, ${action}`;
+}
+
+export function clampMusicLevelDb(value: number, fallback = DEFAULT_MUSIC_LEVEL_DB): number {
+  if (!Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value * 10) / 10;
+  return Math.min(MAX_MUSIC_LEVEL_DB, Math.max(MIN_MUSIC_LEVEL_DB, rounded));
+}
+
+export function clampMusicFadeSec(value: number, fallback = 0): number {
+  if (!Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value * 1000) / 1000;
+  return Math.min(MAX_MUSIC_FADE_SEC, Math.max(0, rounded));
 }
 
 export function clampSeamFade(value: number, fallback = DEFAULT_SEAM_FADE_SEC): number {
