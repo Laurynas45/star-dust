@@ -61,6 +61,37 @@ function parseFrameRate(rate: string): number {
   return num / den;
 }
 
+/** Pixel size of a still. Null when the file cannot be read. Does not invent a size. */
+export function probeImageSize(file: string): { width: number; height: number } | null {
+  const probe = spawnSync(
+    "ffprobe",
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "json",
+      file,
+    ],
+    { encoding: "utf8" }
+  );
+  if (probe.status !== 0 || probe.error) return null;
+  try {
+    const parsed = JSON.parse(String(probe.stdout)) as {
+      streams?: { width?: unknown; height?: unknown }[];
+    };
+    const width = Number(parsed.streams?.[0]?.width);
+    const height = Number(parsed.streams?.[0]?.height);
+    if (!Number.isFinite(width) || width < 1 || !Number.isFinite(height) || height < 1) return null;
+    return { width: Math.round(width), height: Math.round(height) };
+  } catch {
+    return null;
+  }
+}
+
 /** Width, height, frame rate, and frame count of the first video stream. */
 export function probeVideoStream(file: string): VideoStreamInfo {
   const probe = spawnSync(

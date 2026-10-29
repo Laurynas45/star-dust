@@ -193,9 +193,50 @@ export interface Job {
   inputKey?: string;
 }
 
+/** How the user's own rate is applied. There is no built-in vendor price. */
+export const BILLING_UNITS = ["second", "clip", "megapixel", "million-tokens"] as const;
+
+export type BillingUnit = (typeof BILLING_UNITS)[number];
+
+/** Fixed frame rate for a video-token or megapixel estimate. Not the stitch rate. */
+export const ESTIMATE_FPS = 24;
+
+export interface ModelRate {
+  amount: number;
+  unit: BillingUnit;
+}
+
+/**
+ * A bare number is an older rate with no unit. Those stay per second.
+ * A unit other than per second is stored with the amount.
+ */
+export type StoredRate = number | ModelRate;
+
 export interface RateTable {
-  fal: Record<string, number>;
-  replicate: Record<string, number>;
+  fal: Record<string, StoredRate>;
+  replicate: Record<string, StoredRate>;
+}
+
+export function isBillingUnit(value: unknown): value is BillingUnit {
+  return value === "second" || value === "clip" || value === "megapixel" || value === "million-tokens";
+}
+
+export function billingUnitOf(rate: StoredRate | null | undefined): BillingUnit {
+  if (rate == null || typeof rate === "number") return "second";
+  return isBillingUnit(rate.unit) ? rate.unit : "second";
+}
+
+export function billingAmountOf(rate: StoredRate | null | undefined): number | null {
+  if (typeof rate === "number" && Number.isFinite(rate) && rate >= 0) return rate;
+  if (rate && typeof rate === "object" && Number.isFinite(rate.amount) && rate.amount >= 0) return rate.amount;
+  return null;
+}
+
+export function billingUnitLabel(unit: BillingUnit): string {
+  if (unit === "second") return "per second";
+  if (unit === "clip") return "per clip";
+  if (unit === "megapixel") return "per megapixel of video";
+  return "per 1M video tokens";
 }
 
 /** Hosted credit meter. Present only when Stripe or PayPal packs are configured. */
@@ -208,11 +249,30 @@ export interface CreditEstimate {
   label: string;
 }
 
+/** One shot on the cost line. Amounts are the user's rate applied to this shot. */
+export interface ShotCostLine {
+  shotId: string;
+  position: number;
+  durationSec: number;
+  width: number | null;
+  height: number | null;
+  /** This shot priced on its own. Null when the rate or the still size is missing. */
+  amount: number | null;
+  /** Render all would send this shot. */
+  remaining: boolean;
+  /** A finished take is already on disk. */
+  hasClip: boolean;
+  /** What rendering that existing clip again would add. Null when there is no clip. */
+  retakeAdd: number | null;
+}
+
 /** User-entered arithmetic. Never a vendor quote. */
 export interface CostEstimate {
   paid: boolean;
   seconds: number;
+  /** Set when the rate is per second, including an older rate with no unit. */
   ratePerSecond: number | null;
+  /** Amount the budget cap compares. For the shot list, that is what remaining takes add. */
   total: number | null;
   unknown: boolean;
   budgetCap: number | null;
@@ -220,6 +280,18 @@ export interface CostEstimate {
   label: string;
   /** Omitted when Stripe and PayPal are unset, so the free studio stays on the Phase 1 shape. */
   credits?: CreditEstimate;
+  billingUnit?: BillingUnit | null;
+  /** The rate the user typed, in billingUnit. */
+  rate?: number | null;
+  /** Billed quantity behind total: seconds, clips, megapixels, or millions of video tokens. */
+  quantity?: number | null;
+  /** Every shot on the list, priced with the same rate. */
+  projectTotal?: number | null;
+  /** What Render all would newly send. Same number the budget cap uses. */
+  remainingTotal?: number | null;
+  /** Sum of a retake of each existing clip, each clip on its own. */
+  retakeTotal?: number | null;
+  shots?: ShotCostLine[];
 }
 
 export interface PublicCreditPack {

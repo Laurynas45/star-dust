@@ -16,6 +16,8 @@ import {
   Project,
   ProviderId,
   RateTable,
+  StoredRate,
+  isBillingUnit,
   SAMPLE_PROJECT_ID,
   SeamMode,
   Shot,
@@ -1188,14 +1190,28 @@ export function updateJob(id: string, patch: Partial<Job>): Job | undefined {
   return getJob(id);
 }
 
-function cleanRateMap(value: unknown): Record<string, number> {
+function cleanRateMap(value: unknown): Record<string, StoredRate> {
   if (!value || typeof value !== "object") return {};
-  const out: Record<string, number> = {};
+  const out: Record<string, StoredRate> = {};
   for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
     const model = key.trim();
-    const rate = typeof raw === "number" ? raw : Number(raw);
-    if (!model || !Number.isFinite(rate) || rate < 0) continue;
-    out[model] = rate;
+    if (!model) continue;
+    if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+      out[model] = raw;
+      continue;
+    }
+    if (typeof raw === "string" && raw.trim() !== "") {
+      const rate = Number(raw);
+      if (Number.isFinite(rate) && rate >= 0) out[model] = rate;
+      continue;
+    }
+    if (raw && typeof raw === "object") {
+      const amount = Number((raw as { amount?: unknown }).amount);
+      const unit = (raw as { unit?: unknown }).unit;
+      if (!Number.isFinite(amount) || amount < 0) continue;
+      if (unit == null || unit === "second") out[model] = amount;
+      else if (isBillingUnit(unit)) out[model] = { amount, unit };
+    }
   }
   return out;
 }

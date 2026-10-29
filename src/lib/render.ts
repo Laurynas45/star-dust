@@ -3,7 +3,7 @@ import { resolveComfyChoice } from "./comfy-choice";
 import { chainStaleMarks, completedTakesFor, cutTake } from "./chain-stale";
 import { chainProviderNote, planChain, previousShot } from "./continuity";
 import { creditEstimate, deductCredits } from "./credits";
-import { buildEstimate, quoteRun, withCredits } from "./cost";
+import { buildEstimate, quoteRun, shotBill, withCredits } from "./cost";
 import { clipKeyForSeed, effectiveSeed, freshSeed, upstreamCutKey } from "./input-key";
 import {
   CLOUD_RISK_NOTE,
@@ -430,8 +430,10 @@ export function renderAll(
   }
 
   const seconds = runnable.reduce((sum, item) => sum + (Number(item.shot.durationSec) || 0), 0);
+  const runnableIds = new Set(runnable.map((item) => item.shot.id));
+  const bills = shots.map((shot) => shotBill(shot, existing, runnableIds.has(shot.id)));
   const cost = withCredits(
-    buildEstimate({ provider, modelName, seconds, settings }),
+    buildEstimate({ provider, modelName, settings, shots: bills, scope: "project" }),
     provider,
     seconds
   );
@@ -561,9 +563,16 @@ function chargeRun(
   inspected: InspectedRun,
   unpaidLabel: string,
   detail: string,
-  acknowledgeModel?: string
+  acknowledgeModel?: string,
+  repeat?: number
 ): { ok: true; cost: CostEstimate } | RenderFailure {
-  const cost = quoteRun({ seconds: inspected.seconds, unpaidLabel });
+  const cost = quoteRun({
+    seconds: inspected.seconds,
+    unpaidLabel,
+    shots: inspected.shots,
+    jobs: inspected.shots[0] ? listJobs(inspected.shots[0].projectId) : [],
+    repeat,
+  });
   const ack = ackFailure(inspected.provider, acknowledgeModel);
   if (ack) return { ...ack, cost };
   if (cost.overBudget) {
@@ -593,7 +602,15 @@ export function quoteRetake(shotId: string): { ok: true; cost: CostEstimate } | 
   const inspected = inspectShots(chain, new Set(chain.map((shot) => shot.id)));
   if (!("runnable" in inspected)) return inspected;
   const label = `Retake renders ${chain.length} shot${chain.length === 1 ? "" : "s"}, ${inspected.seconds} seconds. No charge. Earlier takes stay on disk.`;
-  return { ok: true, cost: quoteRun({ seconds: inspected.seconds, unpaidLabel: label }) };
+  return {
+    ok: true,
+    cost: quoteRun({
+      seconds: inspected.seconds,
+      unpaidLabel: label,
+      shots: chain,
+      jobs: listJobs(chain[0].projectId),
+    }),
+  };
 }
 
 /**
@@ -640,7 +657,16 @@ export function quoteHunt(
   const seconds = inspected.seconds * count;
   const each = inspected.seconds;
   const label = `Try ${count} seeds: ${each} seconds each, ${seconds} seconds in total. No charge. This is not a vendor quote.`;
-  return { ok: true, cost: quoteRun({ seconds, unpaidLabel: label }) };
+  return {
+    ok: true,
+    cost: quoteRun({
+      seconds,
+      unpaidLabel: label,
+      shots: [shot],
+      jobs: listJobs(shot.projectId),
+      repeat: count,
+    }),
+  };
 }
 
 /**
@@ -666,7 +692,8 @@ export function huntShot(
     { ...inspected, seconds },
     label,
     `hunt ${shotId} x${count}`,
-    opts?.acknowledgeModel
+    opts?.acknowledgeModel,
+    count
   );
   if (!paid.ok) return paid;
   const takes = completedTakesFor(listJobs(shot.projectId), shot.id);
