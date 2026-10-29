@@ -1398,6 +1398,186 @@ async function main() {
   assert(!JSON.stringify(saved).includes("FAL_KEY"), "settings have no key");
   assert(saved.budgetCap === 1000, "budget cap stored");
 
+  const billingProject = storage.createProject("Billing units");
+  const billingShot = storage.createShot({
+    projectId: billingProject.id,
+    prompt: "A lantern on the pier.",
+    presetId: "slow-zoom-in",
+    durationSec: 4,
+    startImagePath: shot.startImagePath,
+  });
+  const billingExtra = storage.createShot({
+    projectId: billingProject.id,
+    prompt: "The pier from the water.",
+    presetId: "pan-right",
+    durationSec: 2,
+    startImagePath: shot.startImagePath,
+  });
+  const { probeImageSize } = await import("../src/lib/ffmpeg");
+  const stillSize = probeImageSize(storage.resolveDataPath(shot.startImagePath!));
+  assert(stillSize != null && stillSize.width > 0 && stillSize.height > 0, "the still has a size");
+  const round4 = (value: number) => Math.round(value * 10000) / 10000;
+  const samples = (seconds: number) => stillSize!.width * stillSize!.height * 24 * seconds;
+
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": { amount: 0.5, unit: "clip" } }, replicate: {} },
+    budgetCap: null,
+  });
+  const reloadedClip = storage.getSettings();
+  assert(
+    reloadedClip.rates.fal["fal-ai/test-model"] &&
+      typeof reloadedClip.rates.fal["fal-ai/test-model"] === "object" &&
+      reloadedClip.rates.fal["fal-ai/test-model"].unit === "clip",
+    "a clip rate keeps its unit"
+  );
+  const clipEstimate = cost.estimateRenderAll(billingProject.id);
+  assert(clipEstimate.billingUnit === "clip", "clip unit is used");
+  assert(clipEstimate.total === 1, "two clips at 0.5");
+  assert(clipEstimate.remainingTotal === 1, "remaining takes add both clips");
+  assert(clipEstimate.projectTotal === 1, "total is both clips");
+  assert(clipEstimate.retakeTotal === 0, "no clip yet, so a retake adds nothing");
+  assert(/your own estimate, not a vendor quote/i.test(clipEstimate.label), "clip estimate is the user's");
+  assert(/no vendor price table/i.test(clipEstimate.label), "clip estimate names the missing price table");
+  assert(clipEstimate.shots?.length === 2, "the shot list has a line per shot");
+  const fourSec = clipEstimate.shots?.find((line) => line.shotId === billingShot.id);
+  assert(
+    fourSec?.remaining === true && fourSec.amount === 0.5 && fourSec.retakeAdd == null,
+    "a remaining clip adds the per-clip rate"
+  );
+
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": { amount: 0.02, unit: "megapixel" } }, replicate: {} },
+    budgetCap: null,
+  });
+  const megapixels = cost.estimateRenderAll(billingProject.id);
+  const expectedMegapixels = round4(((samples(4) + samples(2)) / 1_000_000) * 0.02);
+  assert(
+    megapixels.billingUnit === "megapixel" && megapixels.total === expectedMegapixels,
+    `megapixels use the still at 24 fps: ${megapixels.total} vs ${expectedMegapixels}`
+  );
+  assert(
+    megapixels.shots?.every((line) => line.width === stillSize!.width && line.height === stillSize!.height),
+    "each line records the still size"
+  );
+
+  storage.saveSettings({
+    rates: { fal: { "fal-ai/test-model": { amount: 3, unit: "million-tokens" } }, replicate: {} },
+  });
+  const tokenEstimate = cost.estimateRenderAll(billingProject.id);
+  const expectedTokens = round4(((samples(4) + samples(2)) / 1024 / 1_000_000) * 3);
+  assert(
+    tokenEstimate.billingUnit === "million-tokens" && tokenEstimate.total === expectedTokens,
+    `video tokens are width × height × 24 × seconds ÷ 1024: ${tokenEstimate.total} vs ${expectedTokens}`
+  );
+
+  storage.saveSettings({
+    rates: { fal: { "fal-ai/test-model": 0.25 }, replicate: {} },
+    budgetCap: null,
+  });
+  const legacyUnit = storage.getSettings().rates.fal["fal-ai/test-model"];
+  assert(legacyUnit === 0.25, "an older rate with no unit stays a per-second number");
+  const legacyEstimate = cost.estimateRenderAll(billingProject.id);
+  assert(legacyEstimate.billingUnit === "second", "a bare number is per second");
+  assert(
+    legacyEstimate.total === round4(legacyEstimate.seconds * 0.25),
+    "legacy total is still seconds times the rate"
+  );
+  assert(legacyEstimate.seconds === 6, "both new shots are remaining");
+
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  const billingTake = render.renderShot(billingShot.id);
+  assert(billingTake.ok && billingTake.jobs.length === 1, "mock take for the billing shot");
+  if (billingTake.ok) await mock.runMockGenerate(billingTake.jobs[0].id);
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": { amount: 0.4, unit: "clip" } }, replicate: {} },
+    budgetCap: 0.3,
+  });
+  const mixedEstimate = cost.estimateRenderAll(billingProject.id);
+  assert(mixedEstimate.remainingTotal === 0.8, "remaining takes add both clips on a new backend");
+  assert(mixedEstimate.projectTotal === 0.8, "total prices every shot");
+  const existingClip = mixedEstimate.shots?.find((line) => line.shotId === billingShot.id);
+  const openShot = mixedEstimate.shots?.find((line) => line.shotId === billingExtra.id);
+  assert(existingClip?.hasClip === true && existingClip.retakeAdd === 0.4, "a retake of the existing clip adds one clip");
+  assert(openShot?.retakeAdd == null && openShot?.remaining === true, "a shot with no clip is only a remaining take");
+  assert(mixedEstimate.retakeTotal === 0.4, "retake total counts only the existing clip");
+  assert(mixedEstimate.overBudget, "the budget cap uses the billing-unit estimate");
+  const blockedUnits = render.renderAll(billingProject.id, { acknowledgeModel: "fal-ai/test-model" });
+  assert(!blockedUnits.ok && blockedUnits.overBudget, "budget cap blocks that estimate");
+  assert(blockedUnits.cost?.total === mixedEstimate.total, "the block carries the same estimate");
+  assert(
+    storage.listJobs(billingProject.id).every((job) => job.provider !== "fal"),
+    "the blocked billing-unit render did not call fal"
+  );
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "billing-unit estimate did not need a key");
+
+  const blind = storage.createProject("Blind still");
+  storage.createShot({
+    projectId: blind.id,
+    prompt: "No file.",
+    presetId: "slow-zoom-in",
+    durationSec: 3,
+    startImagePath: "uploads/missing-still.png",
+  });
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": { amount: 1, unit: "megapixel" } }, replicate: {} },
+    budgetCap: null,
+  });
+  const unknownSize = cost.estimateRenderAll(blind.id);
+  assert(unknownSize.unknown === true && unknownSize.total == null, "megapixels without a still size stay unknown");
+  assert(unknownSize.label != null && !/\d/.test(unknownSize.label), "unknown size shows no number");
+
+  const { NextRequest: SettingsRequest } = await import("next/server");
+  const settingsRouteEarly = await import("../src/app/api/settings/route");
+  const putTokens = await settingsRouteEarly.PUT(
+    new SettingsRequest("http://127.0.0.1:3000/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rateUpdate: { provider: "fal", model: "fal-ai/test-model", perSecond: 1.25, unit: "million-tokens" },
+      }),
+    })
+  );
+  const tokenBody = await putTokens.json();
+  assert(putTokens.status === 200, "a billing unit saves");
+  assert(tokenBody.rates.fal["fal-ai/test-model"].unit === "million-tokens", "the saved unit is per 1M video tokens");
+  assert(tokenBody.rates.fal["fal-ai/test-model"].amount === 1.25, "the saved amount is the typed rate");
+  const putBadUnit = await settingsRouteEarly.PUT(
+    new SettingsRequest("http://127.0.0.1:3000/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rateUpdate: { provider: "fal", model: "fal-ai/test-model", perSecond: 1, unit: "per-image" },
+      }),
+    })
+  );
+  assert(putBadUnit.status === 400, "an unknown billing unit is refused");
+  const putSecond = await settingsRouteEarly.PUT(
+    new SettingsRequest("http://127.0.0.1:3000/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        rateUpdate: { provider: "fal", model: "fal-ai/test-model", perSecond: 0.25, unit: "second" },
+      }),
+    })
+  );
+  const secondBody = await putSecond.json();
+  assert(secondBody.rates.fal["fal-ai/test-model"] === 0.25, "per second stays a bare number");
+
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": 0.25 }, replicate: {} },
+    budgetCap: 1000,
+  });
+
   const credits = await import("../src/lib/credits");
   const billing = await import("../src/lib/stripe-billing");
   const paypal = await import("../src/lib/paypal-billing");

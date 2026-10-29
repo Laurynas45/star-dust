@@ -123,7 +123,7 @@ export const CHARACTER_SHEET_HONESTY =
 
 /** Shown before a fal or Replicate job is created. No vendor price is included. */
 export const CLOUD_RISK_NOTE =
-  "A key is required. Some vendors bill failed generations, and unused credits can expire. Star Dust does not fetch a vendor price. A total appears only when you set a per-second rate, and that total is your own estimate.";
+  "A key is required. Some vendors bill failed generations, and unused credits can expire. Star Dust does not fetch a vendor price and has no vendor price table. A total appears only from the rate and billing unit you enter, and that total is your own estimate.";
 
 export const CAPABILITY: Record<
   ProviderId,

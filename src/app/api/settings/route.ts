@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { studioEnv } from "@/lib/studio-env";
 import { getSettings, saveSettings } from "@/lib/storage";
-import { AppSettings, ProviderId, RateTable, isComfyWorkflowId } from "@/lib/types";
+import { AppSettings, BillingUnit, ProviderId, RateTable, StoredRate, isBillingUnit, isComfyWorkflowId } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,18 +47,30 @@ export async function PUT(req: NextRequest) {
         fal: { ...current.rates.fal },
         replicate: { ...current.rates.replicate },
       };
-      const raw = body.rateUpdate.perSecond;
+      const raw = body.rateUpdate.amount !== undefined ? body.rateUpdate.amount : body.rateUpdate.perSecond;
+      const unitRaw = body.rateUpdate.unit;
+      if (unitRaw !== undefined && !isBillingUnit(unitRaw)) {
+        return NextResponse.json(
+          {
+            error:
+              "Billing unit must be per second, per clip, per 1M video tokens, or per megapixel of video.",
+          },
+          { status: 400 }
+        );
+      }
+      const unit: BillingUnit = isBillingUnit(unitRaw) ? unitRaw : "second";
       if (raw === null || raw === "") {
         delete rates[rateProvider][model];
       } else {
         const rate = Number(raw);
         if (!Number.isFinite(rate) || rate < 0) {
           return NextResponse.json(
-            { error: "Per-second rate must be a number that is zero or more." },
+            { error: "Rate must be a number that is zero or more." },
             { status: 400 }
           );
         }
-        rates[rateProvider][model] = rate;
+        const stored: StoredRate = unit === "second" ? rate : { amount: rate, unit };
+        rates[rateProvider][model] = stored;
       }
       patch.rates = rates;
     }

@@ -3,7 +3,16 @@
 import { useEffect, useState } from "react";
 import { ComfyWorkflowCards } from "@/components/ComfyWorkflowCards";
 import { CAPABILITY, CLOUD_RISK_NOTE, COMFY_WORKFLOWS } from "@/lib/provider-info";
-import { AppSettings, ProviderId, StudioEnv } from "@/lib/types";
+import {
+  AppSettings,
+  BillingUnit,
+  ProviderId,
+  StoredRate,
+  StudioEnv,
+  billingAmountOf,
+  billingUnitLabel,
+  billingUnitOf,
+} from "@/lib/types";
 
 type SettingsResponse = AppSettings & { env: StudioEnv };
 
@@ -23,6 +32,80 @@ const EMPTY_ENV: StudioEnv = {
 };
 
 const ORDER: ProviderId[] = ["mock", "fal", "replicate", "comfyui"];
+
+const UNIT_OPTIONS: { id: BillingUnit; label: string }[] = [
+  { id: "second", label: "Per second" },
+  { id: "clip", label: "Per clip" },
+  { id: "million-tokens", label: "Per 1M video tokens" },
+  { id: "megapixel", label: "Per megapixel of video" },
+];
+
+function RateFields(props: {
+  provider: "fal" | "replicate";
+  model: string;
+  rate: StoredRate | undefined;
+  onDraft: (next: StoredRate | null) => void;
+  onSave: (raw: string, unit: BillingUnit) => void;
+}) {
+  const title = props.provider === "fal" ? "fal" : "Replicate";
+  const amount = billingAmountOf(props.rate);
+  const storedUnit = billingUnitOf(props.rate);
+  const [unit, setUnit] = useState<BillingUnit>(storedUnit);
+  useEffect(() => {
+    setUnit(storedUnit);
+  }, [storedUnit, props.model]);
+  const amountText = amount == null ? "" : String(amount);
+  return (
+    <div className="grid gap-3 sm:grid-cols-[1fr_16rem]">
+      <div>
+        <label className="label" htmlFor={`${props.provider}-rate`}>
+          {title} rate
+        </label>
+        <input
+          id={`${props.provider}-rate`}
+          className="input"
+          type="number"
+          min={0}
+          step="0.01"
+          placeholder="Blank if unknown"
+          value={amountText}
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            if (raw === "") props.onDraft(null);
+            else props.onDraft(unit === "second" ? Number(raw) : { amount: Number(raw), unit });
+          }}
+          onBlur={(e) => props.onSave(e.target.value, unit)}
+        />
+        <p className="mt-1 text-[11px] text-[var(--muted)]">
+          For {props.model}. {billingUnitLabel(unit)}. Your number, not a vendor price.
+        </p>
+      </div>
+      <div>
+        <label className="label" htmlFor={`${props.provider}-unit`}>
+          Billing unit
+        </label>
+        <select
+          id={`${props.provider}-unit`}
+          className="input"
+          value={unit}
+          onChange={(e) => {
+            const next = e.target.value as BillingUnit;
+            setUnit(next);
+            if (amount == null) return;
+            props.onDraft(next === "second" ? amount : { amount, unit: next });
+            props.onSave(String(amount), next);
+          }}
+        >
+          {UNIT_OPTIONS.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
@@ -127,10 +210,10 @@ export default function SettingsPage() {
     }
   }
 
-  function saveRate(provider: "fal" | "replicate", model: string, raw: string) {
+  function saveRate(provider: "fal" | "replicate", model: string, raw: string, unit: BillingUnit) {
     const trimmed = raw.trim();
     if (trimmed !== "" && (!Number.isFinite(Number(trimmed)) || Number(trimmed) < 0)) {
-      setMessage("Per-second rate must be a number that is zero or more.");
+      setMessage("Rate must be a number that is zero or more.");
       return;
     }
     void save({
@@ -138,6 +221,7 @@ export default function SettingsPage() {
         provider,
         model,
         perSecond: trimmed === "" ? null : Number(trimmed),
+        unit,
       },
     });
   }
@@ -155,8 +239,8 @@ export default function SettingsPage() {
         <p className="mt-2 max-w-2xl text-sm text-[var(--muted)]">
           Mock is the default and needs no key. API keys live in{" "}
           <code className="text-violet-300">.env.local</code> only — never in
-          this page and never in the database. Per-second rates are plain
-          settings you type yourself.
+          this page and never in the database. Rates are plain settings you type
+          yourself, in the billing unit you pick.
         </p>
       </div>
 
@@ -268,62 +352,47 @@ export default function SettingsPage() {
       <section className="panel space-y-4 p-6">
         <h2 className="text-sm font-semibold text-violet-200">Your rates</h2>
         <p className="text-xs leading-relaxed text-[var(--muted)]">
-          Enter a per-second rate for the fal or Replicate model you selected.
-          Star Dust multiplies shot seconds by that number before a paid Render
-          all. It is your own estimate, not a vendor quote. Leave a rate blank
-          and the cost stays unknown. An optional budget cap blocks a paid
-          Render all whose estimate is over it.
+          Enter a rate for the fal or Replicate model you selected, and pick how
+          that model bills: per second, per clip, per 1M video tokens, or per
+          megapixel of video. Before a paid render, Star Dust estimates each shot
+          from that shot&apos;s still size, its duration, and 24 fps. Per second
+          uses the duration. Per clip counts one clip. Video tokens are width ×
+          height × 24 × seconds ÷ 1024. Megapixels of video are width × height ×
+          24 × seconds ÷ 1,000,000. An older rate with no unit stays per second.
+          This is your own estimate, not a vendor quote. Star Dust has no vendor
+          price table. Leave a rate blank and the cost stays unknown. An optional
+          budget cap blocks a paid render whose estimate is over it.
         </p>
-        <div>
-          <label className="label" htmlFor="fal-rate">
-            fal per-second rate
-          </label>
-          <input
-            id="fal-rate"
-            className="input"
-            type="number"
-            min={0}
-            step="0.01"
-            placeholder="Blank if unknown"
-            value={falRate === undefined ? "" : String(falRate)}
-            onChange={(e) => {
-              const rates = {
-                fal: { ...settings.rates.fal },
-                replicate: { ...settings.rates.replicate },
-              };
-              if (e.target.value.trim() === "") delete rates.fal[settings.falModel];
-              else rates.fal[settings.falModel] = Number(e.target.value);
-              setSettings({ ...settings, rates });
-            }}
-            onBlur={(e) => saveRate("fal", settings.falModel, e.target.value)}
-          />
-          <p className="mt-1 text-[11px] text-[var(--muted)]">For {settings.falModel}</p>
-        </div>
-        <div>
-          <label className="label" htmlFor="replicate-rate">
-            Replicate per-second rate
-          </label>
-          <input
-            id="replicate-rate"
-            className="input"
-            type="number"
-            min={0}
-            step="0.01"
-            placeholder="Blank if unknown"
-            value={replicateRate === undefined ? "" : String(replicateRate)}
-            onChange={(e) => {
-              const rates = {
-                fal: { ...settings.rates.fal },
-                replicate: { ...settings.rates.replicate },
-              };
-              if (e.target.value.trim() === "") delete rates.replicate[settings.replicateModel];
-              else rates.replicate[settings.replicateModel] = Number(e.target.value);
-              setSettings({ ...settings, rates });
-            }}
-            onBlur={(e) => saveRate("replicate", settings.replicateModel, e.target.value)}
-          />
-          <p className="mt-1 text-[11px] text-[var(--muted)]">For {settings.replicateModel}</p>
-        </div>
+        <RateFields
+          provider="fal"
+          model={settings.falModel}
+          rate={falRate}
+          onDraft={(next) => {
+            const rates = {
+              fal: { ...settings.rates.fal },
+              replicate: { ...settings.rates.replicate },
+            };
+            if (next == null) delete rates.fal[settings.falModel];
+            else rates.fal[settings.falModel] = next;
+            setSettings({ ...settings, rates });
+          }}
+          onSave={(raw, unit) => saveRate("fal", settings.falModel, raw, unit)}
+        />
+        <RateFields
+          provider="replicate"
+          model={settings.replicateModel}
+          rate={replicateRate}
+          onDraft={(next) => {
+            const rates = {
+              fal: { ...settings.rates.fal },
+              replicate: { ...settings.rates.replicate },
+            };
+            if (next == null) delete rates.replicate[settings.replicateModel];
+            else rates.replicate[settings.replicateModel] = next;
+            setSettings({ ...settings, rates });
+          }}
+          onSave={(raw, unit) => saveRate("replicate", settings.replicateModel, raw, unit)}
+        />
         <div>
           <label className="label" htmlFor="budget-cap">
             Budget cap, optional

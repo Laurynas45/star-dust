@@ -33,6 +33,7 @@ import {
   CHAIN_TRIM_START_CHOICES,
   ComfyWorkflowId,
   CostEstimate,
+  ShotCostLine,
   FRAME_BACK_HONESTY,
   HUNT_NOTE,
   HUNT_SEED_CHOICES,
@@ -89,6 +90,36 @@ const OUTPUT_SIZE_CHOICES = [
   [960, 544],
   [832, 480],
 ] as const;
+
+function moneyText(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "unknown";
+  return String(Math.round(value * 10000) / 10000);
+}
+
+function ShotCostNote(props: { line: ShotCostLine | undefined }) {
+  const line = props.line;
+  if (!line) return null;
+  if (line.amount == null) {
+    return (
+      <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+        Estimate unknown for this shot until a rate is set and the still size can be read.
+      </p>
+    );
+  }
+  const size =
+    line.width != null && line.height != null
+      ? ` Still ${line.width}×${line.height}, ${line.durationSec}s, 24 fps.`
+      : "";
+  return (
+    <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+      {line.remaining
+        ? `This remaining take adds ${moneyText(line.amount)}.`
+        : "This shot is not in the remaining total."}{" "}
+      {line.retakeAdd != null ? `A retake of this clip would add ${moneyText(line.retakeAdd)}.` : "No clip yet, so a retake adds nothing."}
+      {size}
+    </p>
+  );
+}
 
 type StitchResponse = {
   outputPath: string;
@@ -1220,7 +1251,19 @@ export default function ProjectStudioPage() {
             Next cloud run uses <span className="font-semibold">{modelName}</span>.
           </p>
           <p className="mt-1 text-xs leading-relaxed text-current/80">
-            {cost?.label ?? "Cost unknown. No per-second rate is set for this model."}
+            {cost?.label ?? "Cost unknown. No rate is set for this model."}
+          </p>
+          {cost && !cost.unknown && (
+            <ul className="mt-2 space-y-1 text-xs leading-relaxed text-current/80">
+              <li>Total for every shot: {moneyText(cost.projectTotal)}.</li>
+              <li>Remaining takes add {moneyText(cost.remainingTotal)}.</li>
+              <li>A retake of existing clips would add {moneyText(cost.retakeTotal)}.</li>
+            </ul>
+          )}
+          <p className="mt-1 text-[11px] leading-relaxed text-current/70">
+            Estimate from the rate and billing unit you entered. Per megapixel and per 1M video
+            tokens use each still&apos;s width and height, the shot duration, and 24 fps. Star Dust
+            has no vendor price table.
           </p>
           {cost?.credits?.hosted && (
             <p className="mt-1 text-xs leading-relaxed text-current/80">{cost.credits.label}</p>
@@ -1681,6 +1724,7 @@ export default function ProjectStudioPage() {
                         </span>
                       )}
                     </div>
+                    {paid && <ShotCostNote line={cost?.shots?.find((item) => item.shotId === shot.id)} />}
                     <label className="mt-2 block text-[11px] text-[var(--muted)]">
                       Prompt
                       <textarea
