@@ -3,7 +3,7 @@ import { resolveComfyChoice } from "./comfy-choice";
 import { chainStaleMarks, completedTakesFor, cutTake } from "./chain-stale";
 import { chainProviderNote, planChain, previousShot } from "./continuity";
 import { creditEstimate, deductCredits } from "./credits";
-import { buildEstimate, quoteRun, shotBill, withCredits } from "./cost";
+import { buildEstimate, estimateRenderAll, quoteRun, shotBill, withCredits } from "./cost";
 import { clipKeyForSeed, effectiveSeed, freshSeed, upstreamCutKey } from "./input-key";
 import {
   CLOUD_RISK_NOTE,
@@ -39,6 +39,7 @@ import {
   Job,
   HuntSeedCount,
   JobKind,
+  LOCKED_HOLD_REASON,
   ProviderId,
   Shot,
   effectivePrompt,
@@ -497,7 +498,7 @@ function retakeChain(shotId: string): Shot[] | undefined {
   const chain = [shots[index]];
   for (let cursor = index + 1; cursor < shots.length; cursor += 1) {
     if (!shots[cursor].chainFromPrevious) break;
-    if (shots[cursor].approvedJobId) break;
+    if (shots[cursor].approvedJobId || shots[cursor].lockedJobId) break;
     chain.push(shots[cursor]);
   }
   return chain;
@@ -599,6 +600,7 @@ function chargeRun(
 export function quoteRetake(shotId: string): { ok: true; cost: CostEstimate } | RenderFailure {
   const chain = retakeChain(shotId);
   if (!chain) return { ok: false, status: 404, error: "Shot not found" };
+  if (chain[0].lockedJobId) return { ok: false, status: 409, error: LOCKED_HOLD_REASON };
   const inspected = inspectShots(chain, new Set(chain.map((shot) => shot.id)));
   if (!("runnable" in inspected)) return inspected;
   const label = `Retake renders ${chain.length} shot${chain.length === 1 ? "" : "s"}, ${inspected.seconds} seconds. No charge. Earlier takes stay on disk.`;
@@ -625,6 +627,7 @@ export function retakeShot(
 ): RenderResult {
   const current = getShot(shotId);
   if (!current) return { ok: false, status: 404, error: "Shot not found" };
+  if (current.lockedJobId) return { ok: false, status: 409, error: LOCKED_HOLD_REASON };
   if (current.approvedJobId && !opts?.confirmApproved) return approvalBlock(current);
   const chain = retakeChain(shotId);
   if (!chain) return { ok: false, status: 404, error: "Shot not found" };
@@ -635,9 +638,11 @@ export function retakeShot(
   const paid = chargeRun(inspected, label, `retake ${shotId}`, opts?.acknowledgeModel);
   if (!paid.ok) return paid;
   const head = chain[0];
-  const nextSeed = freshSeed([effectiveSeed(head)]);
   if (head.approvedJobId) clearApproval(head.id);
-  updateShot(head.id, { seed: nextSeed });
+  if (!head.seedPinned) {
+    const nextSeed = freshSeed([effectiveSeed(head)]);
+    updateShot(head.id, { seed: nextSeed });
+  }
   for (const shot of chain) clearTakeSelection(shot.id);
   const runnable = inspected.runnable.map((item) => {
     const fresh = getShot(item.shot.id) ?? item.shot;
@@ -652,6 +657,7 @@ export function quoteHunt(
 ): { ok: true; cost: CostEstimate } | RenderFailure {
   const shot = getShot(shotId);
   if (!shot) return { ok: false, status: 404, error: "Shot not found" };
+  if (shot.lockedJobId) return { ok: false, status: 409, error: LOCKED_HOLD_REASON };
   const inspected = inspectShots([shot], new Set());
   if (!("runnable" in inspected)) return inspected;
   const seconds = inspected.seconds * count;
@@ -683,6 +689,7 @@ export function huntShot(
   if (!count) return { ok: false, status: 400, error: "Choose 2, 3, or 4 seeds." };
   const shot = getShot(shotId);
   if (!shot) return { ok: false, status: 404, error: "Shot not found" };
+  if (shot.lockedJobId) return { ok: false, status: 409, error: LOCKED_HOLD_REASON };
   if (shot.approvedJobId && !opts?.confirmApproved) return approvalBlock(shot);
   const inspected = inspectShots([shot], new Set());
   if (!("runnable" in inspected)) return inspected;
@@ -797,4 +804,64 @@ export function retryFromJob(
     status: "queued",
   });
   return { ok: true, jobs: [job], skipped: [] };
+}
+
+/** Shots Retake all would price, with a stand-in seed where a new number will be rolled. */
+function retakeAllPreview(projectId: string): Shot[] {
+  return listShots(projectId).map((shot) => {
+    if (shot.lockedJobId || shot.approvedJobId || shot.seedPinned) return shot;
+    return { ...shot, seed: freshSeed([effectiveSeed(shot)]) };
+  });
+}
+
+/** Cost of Retake all before any seed is changed. Locked takes are left out. */
+export function quoteRetakeAll(projectId: string): { ok: true; cost: CostEstimate } | RenderFailure {
+  const project = getProject(projectId);
+  if (!project) return { ok: false, status: 404, error: "Project not found" };
+  const shots = listShots(projectId);
+  if (shots.length === 0) return { ok: false, status: 400, error: "Add a shot before rendering." };
+  for (const shot of shots) {
+    const prepared = prepareShot(shot.id);
+    if (!prepared.ok) return prepared;
+  }
+  return { ok: true, cost: estimateRenderAll(projectId, retakeAllPreview(projectId)) };
+}
+
+/**
+ * Rolls a new seed on every shot that is not pinned, then renders.
+ * A locked take is skipped and is not part of the estimate.
+ * An approved take stays. Seeds are not changed when the run is blocked.
+ */
+export function retakeAll(
+  projectId: string,
+  opts?: { acknowledgeModel?: string }
+): RenderResult {
+  const quote = quoteRetakeAll(projectId);
+  if (!quote.ok) return quote;
+  const settings = getSettings();
+  const provider = settings.provider;
+  const ack = ackFailure(provider, opts?.acknowledgeModel);
+  if (ack) return { ...ack, cost: quote.cost };
+  if (quote.cost.overBudget) {
+    return {
+      ok: false,
+      status: 409,
+      error: quote.cost.label,
+      overBudget: true,
+      cost: quote.cost,
+      modelName: modelNameFor(provider, settings),
+      priceAvailable: false,
+      riskNote: CLOUD_RISK_NOTE,
+    };
+  }
+  const seconds = quote.cost.seconds;
+  const short = insufficientFailure(provider, seconds, quote.cost);
+  if (short) return short;
+  const key = keyFailure(provider);
+  if (key) return { ...key, cost: quote.cost };
+  for (const shot of listShots(projectId)) {
+    if (shot.lockedJobId || shot.approvedJobId || shot.seedPinned) continue;
+    updateShot(shot.id, { seed: freshSeed([effectiveSeed(shot)]) });
+  }
+  return renderAll(projectId, opts);
 }

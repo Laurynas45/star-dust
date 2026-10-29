@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { effectiveSeed, normalizeSeed } from "@/lib/input-key";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
-import { deleteShot, getProject, getShot, updateShot } from "@/lib/storage";
+import { deleteShot, getJob, getProject, getShot, updateShot } from "@/lib/storage";
 import { ComfyWorkflowId, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
@@ -67,6 +68,21 @@ export async function PATCH(
       return NextResponse.json({ error: MINOR_SEXUAL_REFUSAL, refused: true }, { status: 400 });
     }
     const preset = presetById(typeof body.presetId === "string" ? body.presetId : shot.presetId);
+    let seed: number | null | undefined;
+    if (body.seed === null) seed = null;
+    else if (typeof body.seed === "number" && Number.isFinite(body.seed)) seed = normalizeSeed(body.seed);
+    let seedPinned: boolean | undefined;
+    if (typeof body.seedPinned === "boolean") seedPinned = body.seedPinned;
+    if (seedPinned === true && seed === undefined) seed = effectiveSeed(shot);
+    let lockedJobId: string | null | undefined;
+    if (body.lockedJobId === null) lockedJobId = null;
+    else if (typeof body.lockedJobId === "string" && body.lockedJobId) {
+      const job = getJob(body.lockedJobId);
+      if (!job || job.shotId !== shot.id || job.kind === "preview" || job.status !== "completed" || !job.outputPath) {
+        return NextResponse.json({ error: "Lock a completed take of this shot." }, { status: 400 });
+      }
+      lockedJobId = job.id;
+    }
     const updated = updateShot(shot.id, {
       prompt,
       presetId: preset.id,
@@ -74,6 +90,9 @@ export async function PATCH(
         typeof body.durationSec === "number" ? body.durationSec : shot.durationSec,
         preset.durationSec
       ),
+      seed,
+      seedPinned,
+      lockedJobId,
       endImagePath: body.clearEndImage ? "" : undefined,
       comfyuiWorkflow: workflowField(body.comfyuiWorkflow),
       comfyLowMemory: flagField(body.comfyLowMemory),

@@ -2,7 +2,7 @@ import { ChainStaleJob, chainStaleMarks, completedTakesFor, cutIsPinned, cutTake
 import { startImageForMatch } from "./continuity";
 import { desiredClipKey } from "./input-key";
 import { getProject } from "./storage";
-import { APPROVED_HOLD_REASON, Job, ProviderId, REUSE_SKIP_REASON, Shot } from "./types";
+import { APPROVED_HOLD_REASON, Job, LOCKED_HOLD_REASON, ProviderId, REUSE_SKIP_REASON, Shot } from "./types";
 
 export function isPreview(job: Job): boolean {
   return job.kind === "preview";
@@ -19,11 +19,12 @@ export function takeInputsMatch(
   return takeFieldsMatch(job, shot, startImageForMatch(shot), provider, modelName, styleBase);
 }
 
-export type SkipReason = "inflight" | "match" | "approved";
+export type SkipReason = "inflight" | "match" | "approved" | "locked";
 
 export function skipReasonText(reason: SkipReason): string {
   if (reason === "inflight") return "Already queued or running";
   if (reason === "approved") return APPROVED_HOLD_REASON;
+  if (reason === "locked") return LOCKED_HOLD_REASON;
   return REUSE_SKIP_REASON;
 }
 
@@ -111,6 +112,17 @@ export function projectRenderPlan(
   /** inputKey that will be in the cut, or null when this plan will render a new one. */
   const plannedCut = new Map<string, string | null>();
   return shots.map((shot, index) => {
+    if (shot.lockedJobId) {
+      cutWillChange = false;
+      return {
+        shot,
+        action: "skip" as const,
+        reason: "locked" as const,
+        jobId: shot.lockedJobId,
+        stale: false,
+        refreshesCut: false,
+      };
+    }
     if (shot.approvedJobId) {
       cutWillChange = false;
       return {

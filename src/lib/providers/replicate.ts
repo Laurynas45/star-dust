@@ -49,6 +49,7 @@ export async function runReplicateGenerate(jobId: string): Promise<void> {
     input_image: dataUri,
     image: dataUri,
     prompt: job.prompt,
+    ...(job.seed != null && Number.isFinite(job.seed) ? { seed: job.seed } : {}),
   };
 
   let prediction: {

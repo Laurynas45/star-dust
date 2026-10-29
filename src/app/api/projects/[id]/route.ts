@@ -5,7 +5,7 @@ import { planTakeConform } from "@/lib/conform";
 import { planProjectFinish } from "@/lib/finish-plan";
 import { finishedTake } from "@/lib/continuity";
 import { probeClipShape } from "@/lib/ffmpeg";
-import { desiredClipKey } from "@/lib/input-key";
+import { desiredClipKey, effectiveSeed } from "@/lib/input-key";
 import { ensureJobWorker } from "@/lib/providers";
 import {
   deleteProject,
@@ -107,6 +107,7 @@ export async function GET(
     shots: shots.map((shot) => ({
       ...shot,
       currentInputKey: desiredClipKey(shot),
+      effectiveSeed: effectiveSeed(shot),
       approvedMismatch: approvedTakeMismatch(
         shot,
         jobs.find((job) => job.id === shot.approvedJobId),

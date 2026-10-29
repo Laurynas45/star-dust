@@ -37,6 +37,8 @@ import {
   FRAME_BACK_HONESTY,
   HUNT_NOTE,
   HUNT_SEED_CHOICES,
+  RETAKE_ALL_NOTE,
+  SEED_PIN_NOTE,
   HuntSeedCount,
   Job,
   MAX_SHOT_SECONDS,
@@ -61,6 +63,7 @@ import {
   chainTrimChoiceLabel,
   effectivePrompt,
   presetById,
+  seedBackendNote,
   styleBaseText,
 } from "@/lib/types";
 
@@ -68,7 +71,11 @@ type SettingsResponse = AppSettings & {
   env: { hasFalKey: boolean; hasReplicateToken: boolean };
 };
 
-type StudioShot = Shot & { currentInputKey?: string; approvedMismatch?: boolean };
+type StudioShot = Shot & {
+  currentInputKey?: string;
+  approvedMismatch?: boolean;
+  effectiveSeed?: number;
+};
 
 type Detail = {
   project: Project;
@@ -99,6 +106,13 @@ function moneyText(value: number | null | undefined): string {
 function ShotCostNote(props: { line: ShotCostLine | undefined }) {
   const line = props.line;
   if (!line) return null;
+  if (line.locked) {
+    return (
+      <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+        Locked take. Left out of this estimate.
+      </p>
+    );
+  }
   if (line.amount == null) {
     return (
       <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
@@ -131,6 +145,7 @@ type StitchResponse = {
   seams?: { position: number; mode: "cut" | "crossfade"; fadeSec: number; note?: string }[];
   finish?: FinishView;
   contactSheetPath?: string;
+  manifestPath?: string;
 };
 
 type SkippedShot = {
@@ -144,6 +159,7 @@ type Pending =
   | { kind: "shot"; shotId: string; force?: boolean; confirmedApproval?: boolean }
   | { kind: "all" }
   | { kind: "retake"; shotId: string; confirmedApproval?: boolean }
+  | { kind: "retake-all" }
   | { kind: "hunt"; shotId: string; count: HuntSeedCount; confirmedApproval?: boolean }
   | { kind: "retry"; jobId: string; provider: ProviderId };
 
@@ -360,8 +376,10 @@ export default function ProjectStudioPage() {
         ? `/api/projects/${projectId}/render`
         : action.kind === "shot"
           ? `/api/projects/${projectId}/shots/${action.shotId}/render`
-          : action.kind === "retake"
+          :       action.kind === "retake"
             ? `/api/projects/${projectId}/shots/${action.shotId}/retake`
+            : action.kind === "retake-all"
+              ? `/api/projects/${projectId}/retake`
             : action.kind === "hunt"
               ? `/api/projects/${projectId}/shots/${action.shotId}/hunt`
               : `/api/jobs/${action.jobId}/retry`;
@@ -426,12 +444,14 @@ export default function ProjectStudioPage() {
   }
 
   useEffect(() => {
-    if (!pending || (pending.kind !== "hunt" && pending.kind !== "retake")) return;
+    if (!pending || (pending.kind !== "hunt" && pending.kind !== "retake" && pending.kind !== "retake-all")) return;
     let cancelled = false;
     const url =
       pending.kind === "hunt"
         ? `/api/projects/${projectId}/shots/${pending.shotId}/hunt?count=${pending.count}`
-        : `/api/projects/${projectId}/shots/${pending.shotId}/retake`;
+        : pending.kind === "retake-all"
+          ? `/api/projects/${projectId}/retake`
+          : `/api/projects/${projectId}/shots/${pending.shotId}/retake`;
     void fetch(url)
       .then(async (res) => {
         const data = await res.json().catch(() => ({}));
@@ -725,6 +745,9 @@ export default function ProjectStudioPage() {
       dropDuplicateFrame?: boolean | null;
       seamMode?: SeamMode | null;
       seamFadeSec?: number | null;
+      seed?: number | null;
+      seedPinned?: boolean;
+      lockedJobId?: string | null;
     }
   ) {
     const res = await fetch(`/api/projects/${projectId}/shots/${shotId}`, {
@@ -869,6 +892,15 @@ export default function ProjectStudioPage() {
           >
             {busy ? "Working…" : "Render all"}
           </button>
+          <button
+            type="button"
+            className="btn-ghost mt-2 w-full"
+            disabled={busy || shots.length === 0}
+            onClick={() => ask({ kind: "retake-all" })}
+          >
+            Retake all
+          </button>
+          <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{RETAKE_ALL_NOTE}</p>
           <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{REUSE_HONESTY}</p>
         </article>
         <article className="panel flex flex-col p-4">
@@ -1725,6 +1757,48 @@ export default function ProjectStudioPage() {
                       )}
                     </div>
                     {paid && <ShotCostNote line={cost?.shots?.find((item) => item.shotId === shot.id)} />}
+                    <div className="mt-2 flex flex-wrap items-end gap-2">
+                      <label className="text-[11px] text-[var(--muted)]">
+                        Seed
+                        <input
+                          key={`${shot.id}:${shot.effectiveSeed ?? ""}:${shot.seedPinned ? "1" : "0"}`}
+                          className="input mt-1 w-36"
+                          type="number"
+                          min={0}
+                          step={1}
+                          defaultValue={shot.effectiveSeed ?? ""}
+                          onBlur={(e) => {
+                            const raw = e.target.value.trim();
+                            if (raw === "") return;
+                            const value = Number(raw);
+                            if (!Number.isFinite(value) || value < 0) return;
+                            const next = Math.floor(Math.abs(value)) % 1_000_000_000;
+                            if (next === shot.effectiveSeed && shot.seedPinned) return;
+                            void saveShotPatch(shot.id, { seed: next, seedPinned: true });
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="btn-ghost !px-3 !py-1.5 text-xs"
+                        disabled={busy || takeBusy}
+                        onClick={() => {
+                          const seed = shot.effectiveSeed ?? 0;
+                          void saveShotPatch(
+                            shot.id,
+                            shot.seedPinned ? { seedPinned: false } : { seed, seedPinned: true }
+                          );
+                        }}
+                      >
+                        {shot.seedPinned ? "Unpin seed" : "Pin seed"}
+                      </button>
+                      {shot.seedPinned && (
+                        <span className="pb-2 text-[11px] font-semibold text-violet-200">Pinned</span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                      {SEED_PIN_NOTE} {seedBackendNote(provider)}
+                    </p>
                     <label className="mt-2 block text-[11px] text-[var(--muted)]">
                       Prompt
                       <textarea
@@ -1967,26 +2041,40 @@ export default function ProjectStudioPage() {
                             !shot.approvedJobId &&
                             Boolean(take.inputKey) &&
                             take.inputKey === shot.currentInputKey;
+                          const locked = shot.lockedJobId === take.id;
                           return (
-                          <label key={take.id} className="flex items-center gap-2 text-xs text-[var(--muted)]">
-                            <input
-                              type="radio"
-                              name={`take-${shot.id}`}
-                              checked={chosen === take.id}
-                              disabled={Boolean(shot.approvedJobId && take.id !== shot.approvedJobId)}
-                              onChange={() => void onSelectTake(shot.id, take.id)}
-                            />
-                            <span className="text-white">
-                              Take {takeIndex + 1}
-                              {chosen === take.id ? " · in the stitch" : ""}
-                              {shot.approvedJobId === take.id ? " · approved" : ""}
-                              {take.seed != null ? ` · seed ${take.seed}` : ""}
-                            </span>
+                          <div key={take.id} className="flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+                            <label className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name={`take-${shot.id}`}
+                                checked={chosen === take.id}
+                                disabled={Boolean(shot.approvedJobId && take.id !== shot.approvedJobId)}
+                                onChange={() => void onSelectTake(shot.id, take.id)}
+                              />
+                              <span className="text-white">
+                                Take {takeIndex + 1}
+                                {chosen === take.id ? " · in the stitch" : ""}
+                                {shot.approvedJobId === take.id ? " · approved" : ""}
+                                {locked ? " · locked" : ""}
+                                {take.seed != null ? ` · seed ${take.seed}` : ""}
+                              </span>
+                            </label>
                             {reused && (
                               <span className="text-emerald-300">{REUSE_LABEL}</span>
                             )}
                             <span className="truncate">{take.modelName || take.provider}</span>
-                          </label>
+                            <button
+                              type="button"
+                              className="btn-ghost !px-2 !py-0.5 text-[11px]"
+                              disabled={busy || takeBusy}
+                              onClick={() =>
+                                void saveShotPatch(shot.id, { lockedJobId: locked ? null : take.id })
+                              }
+                            >
+                              {locked ? "Unlock take" : "Lock take"}
+                            </button>
+                          </div>
                           );
                         })}
                       </fieldset>
@@ -2021,7 +2109,7 @@ export default function ProjectStudioPage() {
                       <button
                         type="button"
                         className="btn-ghost !px-3 !py-1.5"
-                        disabled={busy || takeBusy}
+                        disabled={busy || takeBusy || Boolean(shot.lockedJobId)}
                         onClick={() => ask({ kind: "retake", shotId: shot.id })}
                       >
                         Retake
@@ -2048,7 +2136,7 @@ export default function ProjectStudioPage() {
                       <button
                         type="button"
                         className="btn-ghost !px-3 !py-1.5"
-                        disabled={busy || takeBusy}
+                        disabled={busy || takeBusy || Boolean(shot.lockedJobId)}
                         onClick={() =>
                           ask({ kind: "hunt", shotId: shot.id, count: huntCounts[shot.id] ?? 2 })
                         }
@@ -2294,6 +2382,11 @@ export default function ProjectStudioPage() {
                     Download contact sheet
                   </a>
                 )}
+                {stitch.manifestPath && (
+                  <a className="btn-ghost inline-flex" href={`/api/media/${stitch.manifestPath}`} download>
+                    Download stitch manifest
+                  </a>
+                )}
                 {stitch.finish?.sidecarPath && (
                   <a className="btn-ghost inline-flex" href={`/api/media/${stitch.finish.sidecarPath}`} download>
                     Download sidecar .srt
@@ -2431,17 +2524,22 @@ export default function ProjectStudioPage() {
                     ? `Try ${pending.count} seeds`
                     : pending.kind === "retake"
                       ? "Retake"
-                      : confirmModel}
+                      : pending.kind === "retake-all"
+                        ? "Retake all"
+                        : confirmModel}
                 </h2>
                 <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{CLOUD_RISK_NOTE}</p>
-                {(pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake") && (
+                {(pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake" || pending.kind === "retake-all") && (
                   <p className="mt-3 text-sm leading-relaxed text-white">
                     {(pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.label ??
                       "Estimating this run…"}
                   </p>
                 )}
+                {pending.kind === "retake-all" && (
+                  <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{RETAKE_ALL_NOTE}</p>
+                )}
                 {(pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.credits?.hosted &&
-                  (pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake") && (
+                  (pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake" || pending.kind === "retake-all") && (
                     <p className="mt-3 text-sm leading-relaxed text-white">
                       {(pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.credits?.label}
                     </p>
@@ -2466,7 +2564,7 @@ export default function ProjectStudioPage() {
                 disabled={
                   busy ||
                   Boolean(
-                    (pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake") &&
+                    (pending.kind === "all" || pending.kind === "hunt" || pending.kind === "retake" || pending.kind === "retake-all") &&
                       ((pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.overBudget ||
                         (pending.kind === "all" ? (ackCost ?? cost) : ackCost)?.credits?.insufficient)
                   )

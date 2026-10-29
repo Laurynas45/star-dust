@@ -4692,6 +4692,111 @@ async function main() {
   assert(packedPng && packedPng[0] === 0x89 && packedPng.toString("ascii", 1, 4) === "PNG", "the edit zip contains a PNG contact sheet");
   assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "the contact sheet did not need a provider key");
 
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  const seedProject = storage.createProject("Pinned seeds");
+  const pinShot = storage.createShot({
+    projectId: seedProject.id,
+    prompt: "A pinned lantern.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: shot.startImagePath,
+  });
+  const lockShot = storage.createShot({
+    projectId: seedProject.id,
+    prompt: "A locked pier.",
+    presetId: "pan-right",
+    durationSec: 2,
+    startImagePath: shot.startImagePath,
+  });
+  const pinRender = render.renderShot(pinShot.id);
+  assert(pinRender.ok && pinRender.jobs.length === 1, "a shot renders on Mock before its seed is pinned");
+  if (pinRender.ok) await mock.runMockGenerate(pinRender.jobs[0].id);
+  const lockRender = render.renderShot(lockShot.id);
+  assert(lockRender.ok && lockRender.jobs.length === 1, "the shot that will be locked renders on Mock");
+  if (lockRender.ok) await mock.runMockGenerate(lockRender.jobs[0].id);
+  const pinnedShot = storage.updateShot(pinShot.id, { seed: 4242, seedPinned: true });
+  assert(pinnedShot?.seed === 4242 && pinnedShot.seedPinned === true, "the shot stores the pinned seed");
+  const pinRetake = render.retakeShot(pinShot.id);
+  assert(pinRetake.ok && pinRetake.jobs[0]?.seed === 4242, "retake keeps the pinned seed");
+  assert(storage.getShot(pinShot.id)?.seed === 4242, "the pinned number stays on the shot");
+  if (pinRetake.ok) await mock.runMockGenerate(pinRetake.jobs[0].id);
+  const lockJobId = lockRender.ok ? lockRender.jobs[0].id : "";
+  const lockedShot = storage.updateShot(lockShot.id, { lockedJobId: lockJobId });
+  assert(lockedShot?.lockedJobId === lockJobId, "the completed take is locked");
+  const lockedRetake = render.retakeShot(lockShot.id);
+  assert(!lockedRetake.ok && /locked take/i.test(lockedRetake.error), "retake skips a locked take");
+  const lockedHunt = render.huntShot(lockShot.id, 2);
+  assert(!lockedHunt.ok && /locked take/i.test(lockedHunt.error), "try seeds skips a locked take");
+  const beforeRetakeAll = storage.listJobs(seedProject.id).filter((job) => job.shotId === lockShot.id).length;
+  const rolled = render.retakeAll(seedProject.id);
+  assert(rolled.ok, "retake all runs on Mock with no key");
+  assert(
+    storage.listJobs(seedProject.id).filter((job) => job.shotId === lockShot.id).length === beforeRetakeAll,
+    "retake all does not queue the locked shot"
+  );
+  assert(storage.getShot(pinShot.id)?.seed === 4242, "retake all keeps a pinned seed");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "pin and lock did not need a provider key");
+
+  storage.saveSettings({
+    provider: "fal",
+    falModel: "fal-ai/test-model",
+    rates: { fal: { "fal-ai/test-model": 0.5 }, replicate: {} },
+    budgetCap: null,
+  });
+  const seedCost = cost.estimateRenderAll(seedProject.id);
+  const lockLine = seedCost.shots?.find((line) => line.shotId === lockShot.id);
+  assert(lockLine?.locked === true && lockLine.amount == null && lockLine.retakeAdd == null, "a locked take is left out of the estimate");
+  assert(seedCost.seconds === 2, "the locked shot is not in the billed seconds");
+  assert(seedCost.total === 1, "the budget figure excludes the locked shot");
+  assert(seedCost.projectTotal === 1, "the shot-list total excludes the locked shot");
+  const heldBillingEnv: [string, string][] = [];
+  for (const key of Object.keys(process.env)) {
+    if (!key.startsWith("STRIPE_") && !key.startsWith("PAYPAL_")) continue;
+    const value = process.env[key];
+    if (value === undefined) continue;
+    heldBillingEnv.push([key, value]);
+    delete process.env[key];
+  }
+  const blockedSeed = render.renderAll(seedProject.id, { acknowledgeModel: "fal-ai/test-model" });
+  for (const [key, value] of heldBillingEnv) process.env[key] = value;
+  assert(!blockedSeed.ok && blockedSeed.error.includes("FAL_KEY"), "the estimate still needs a key before a paid render");
+  assert(
+    storage.listJobs(seedProject.id).every((job) => job.provider !== "fal"),
+    "the locked estimate did not call fal"
+  );
+
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  const seedStitch = await stitch.stitchProject(seedProject.id);
+  assert(fs.existsSync(storage.resolveDataPath(seedStitch.contactSheetPath)), "the stitch still writes a contact sheet");
+  const seedManifest = JSON.parse(fs.readFileSync(storage.resolveDataPath(seedStitch.manifestPath), "utf8")) as {
+    shots: { shotId: string; seed: number | null }[];
+  };
+  const pinEntry = seedManifest.shots.find((item) => item.shotId === pinShot.id);
+  assert(pinEntry?.seed === 4242, "the stitch manifest records the pinned seed");
+  const sheetLib = await import("../src/lib/contact-sheet");
+  assert(
+    sheetLib.contactLabelLines({
+      shotId: pinShot.id,
+      version: 2,
+      preview: false,
+      provider: "mock",
+      seed: pinEntry?.seed ?? null,
+      durationSec: 2,
+    }).includes("seed 4242"),
+    "the contact sheet line shows that seed"
+  );
+  const seedExport = await edit.buildEditExport(seedProject.id);
+  const pinManifest = seedExport.manifests.find((item) => item.shot === "SH010");
+  assert(
+    pinManifest?.seed === 4242 && pinManifest.seedPinned === true,
+    "the edit manifest records the pinned seed"
+  );
+  const { seedBackendNote } = await import("../src/lib/types");
+  assert(/may ignore this seed/i.test(seedBackendNote("fal")), "fal says it may ignore the seed");
+  assert(/may ignore this seed/i.test(seedBackendNote("replicate")), "Replicate says it may ignore the seed");
+  assert(/does not redraw the picture/i.test(seedBackendNote("mock")), "Mock says the seed does not redraw the picture");
+  assert(!/character lock|lip-sync|long film/i.test(`${seedBackendNote("fal")} ${seedBackendNote("mock")}`), "seed copy makes no film promise");
+
   console.log("provider checks ok");
   console.log(dataDir);
 }

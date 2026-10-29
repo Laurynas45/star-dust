@@ -65,6 +65,8 @@ export interface StitchResult {
   durationSec: number;
   /** PNG next to the mp4. One labelled thumbnail per shot, in order. */
   contactSheetPath: string;
+  /** JSON next to the mp4. One entry per shot, including the seed. */
+  manifestPath: string;
   /** Music bed and captions actually applied. Absent on a seam preview. */
   finish?: FinishView;
 }
@@ -574,6 +576,24 @@ async function concatClips(
     }),
     sheetAbs
   );
+  const { abs: manifestAbs, rel: manifestRel } = absoluteOutputPath(projectId, `${prefix}-${stamp}-manifest.json`);
+  const manifestShots = counted.map((part, index) => {
+    const job = jobs.find((item) => item.id === part.jobId);
+    const preview = job?.kind === "preview";
+    const pool = jobs.filter((item) => {
+      if (item.shotId !== part.shotId || item.status !== "completed" || !item.outputPath) return false;
+      return preview ? item.kind === "preview" : item.kind !== "preview";
+    });
+    return {
+      shotId: part.shotId,
+      seed: job?.seed ?? null,
+      provider: job?.provider ?? "mock",
+      durationSec: shapes[index]?.durationSec ?? job?.durationSec ?? 0,
+      version: job ? contactVersion(pool, part.jobId) : 1,
+      preview: Boolean(preview),
+    };
+  });
+  fs.writeFileSync(manifestAbs, `${JSON.stringify({ kind, shots: manifestShots }, null, 2)}\n`);
   return {
     outputPath: rel,
     includedShotIds: included.map((part) => part.shotId),
@@ -583,6 +603,7 @@ async function concatClips(
     seams,
     durationSec: probeDurationSec(outAbs),
     contactSheetPath: sheetRel,
+    manifestPath: manifestRel,
     finish,
   };
 }

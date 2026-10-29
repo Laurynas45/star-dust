@@ -111,9 +111,17 @@ export interface Shot {
   approvedEndStamp?: string;
   /**
    * Sequence seed. Unset rows use a stable seed derived from the shot id.
-   * Retake stores a new seed here. Try seeds keeps its candidates on the takes.
+   * Retake stores a new seed here unless the seed is pinned.
+   * Try seeds keeps its candidates on the takes.
    */
   seed?: number;
+  /** When true, Retake and Retake all keep this number. */
+  seedPinned?: boolean;
+  /**
+   * Completed take that re-rolls and Retake all skip.
+   * Left out of the cost estimate. Unset means the shot is not locked.
+   */
+  lockedJobId?: string;
   /** Null inherits the project, then the app default. */
   comfyuiWorkflow?: ComfyWorkflowId | null;
   /** Null inherits the project, then the app default. */
@@ -264,6 +272,8 @@ export interface ShotCostLine {
   hasClip: boolean;
   /** What rendering that existing clip again would add. Null when there is no clip. */
   retakeAdd: number | null;
+  /** Locked takes are left out of the totals. */
+  locked?: boolean;
 }
 
 /** User-entered arithmetic. Never a vendor quote. */
@@ -422,7 +432,29 @@ export const REUSE_HONESTY =
   "Reuse loads a finished clip when the still, the effective prompt (including shared style text), the seed, the backend and model or workflow, the render settings, the start-frame trim when it applies, and the upstream clip are unchanged. That avoids paying again for an unchanged shot. It does not promise the same pixels from another backend, and it does not lock a character.";
 
 export const RETAKE_NOTE =
-  "Retake gives this shot a new seed and renders it again, plus every chained shot after it until an approved take. An approved take stays. Earlier takes stay. It does not lock a character.";
+  "Retake gives this shot a new seed and renders it again, plus every chained shot after it until an approved or locked take. A pinned seed stays the number you set. A locked take is skipped. An approved take stays. Earlier takes stay. It does not lock a character, lip-sync, or build a long film.";
+
+export const RETAKE_ALL_NOTE =
+  "Retake all rolls a new seed on every shot that is not pinned, then renders those shots. A locked take is skipped and left out of the cost estimate. An approved take stays. This does not lock a character, lip-sync, or build a long film.";
+
+export const LOCKED_HOLD_REASON = "Locked take kept. Not rendered again.";
+
+export const SEED_PIN_NOTE =
+  "Pin keeps this number. Retake and Retake all do not roll a new seed while it is pinned. This does not lock a character.";
+
+/** What to tell the user about whether this backend will honor a seed. */
+export function seedBackendNote(provider: ProviderId): string {
+  if (provider === "fal") {
+    return "fal may ignore this seed. Star Dust stores it and sends it on the request. The service can still discard it.";
+  }
+  if (provider === "replicate") {
+    return "Replicate may ignore this seed. Star Dust stores it and sends it on the request. The service can still discard it.";
+  }
+  if (provider === "mock") {
+    return "Mock records this seed. The clip is camera motion on the still. The seed does not redraw the picture.";
+  }
+  return "The shipped ComfyUI graphs write this seed into the sampler. A graph edited outside Star Dust may ignore it.";
+}
 
 export const APPROVED_LABEL = "Approved";
 

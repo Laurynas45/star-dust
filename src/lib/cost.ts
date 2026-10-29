@@ -29,6 +29,8 @@ export interface ShotBill {
   hasClip: boolean;
   /** Render all would send this shot. */
   remaining: boolean;
+  /** A locked take is left out of every total. */
+  locked: boolean;
 }
 
 function round4(value: number): number {
@@ -139,14 +141,16 @@ function moneyFor(unit: BillingUnit, amount: number, shot: ShotBill): number | n
 
 export function shotBill(shot: Shot, jobs: readonly Job[], remaining: boolean): ShotBill {
   const size = measureStill(shot);
+  const locked = Boolean(shot.lockedJobId);
   return {
     id: shot.id,
     position: shot.position,
     durationSec: Number(shot.durationSec) || 0,
     width: size.width,
     height: size.height,
-    hasClip: completedTakesFor(jobs, shot.id).length > 0,
-    remaining,
+    hasClip: !locked && completedTakesFor(jobs, shot.id).length > 0,
+    remaining: remaining && !locked,
+    locked,
   };
 }
 
@@ -199,7 +203,8 @@ export function buildEstimate(opts: {
   }
 
   const shots = opts.shots ?? [];
-  const billed = shots.filter((shot) => shot.remaining);
+  const listed = shots.filter((shot) => !shot.locked);
+  const billed = listed.filter((shot) => shot.remaining);
   const rawSeconds = billed.reduce((sum, shot) => sum + Math.max(0, shot.durationSec), 0) * repeat;
   const seconds = round4(rawSeconds);
 
@@ -216,6 +221,7 @@ export function buildEstimate(opts: {
           height: null,
           hasClip: false,
           remaining: true,
+          locked: false,
         },
       ],
     });
@@ -235,6 +241,20 @@ export function buildEstimate(opts: {
   };
 
   const lines: ShotCostLine[] = shots.map((shot) => {
+    if (shot.locked) {
+      return {
+        shotId: shot.id,
+        position: shot.position,
+        durationSec: shot.durationSec,
+        width: shot.width,
+        height: shot.height,
+        amount: null,
+        remaining: false,
+        hasClip: false,
+        retakeAdd: null,
+        locked: true,
+      };
+    }
     const amount = rate ? moneyFor(rate.unit, rate.amount, shot) : null;
     return {
       shotId: shot.id,
@@ -246,11 +266,12 @@ export function buildEstimate(opts: {
       remaining: shot.remaining,
       hasClip: shot.hasClip,
       retakeAdd: shot.hasClip ? amount : null,
+      locked: false,
     };
   });
 
-  const withClips = shots.filter((shot) => shot.hasClip);
-  const projectTotal = priced(shots);
+  const withClips = listed.filter((shot) => shot.hasClip);
+  const projectTotal = priced(listed);
   const remainingTotal = priced(billed);
   const retakeTotal = withClips.length === 0 ? 0 : priced(withClips);
 
@@ -407,13 +428,13 @@ export function quoteRun(opts: {
 }
 
 /** What a paid Render all would newly send, plus the shot-list totals. */
-export function estimateRenderAll(projectId: string): CostEstimate {
+export function estimateRenderAll(projectId: string, shotsOverride?: Shot[]): CostEstimate {
   const settings = getSettings();
   const provider = settings.provider;
   const modelName = modelNameFor(provider, settings);
   const jobs = listJobs(projectId);
   const project = getProject(projectId);
-  const shots = project ? listShots(projectId) : [];
+  const shots = shotsOverride ?? (project ? listShots(projectId) : []);
   let bills: ShotBill[] = [];
   if (isPaidProvider(provider) && project) {
     const plan = projectRenderPlan(

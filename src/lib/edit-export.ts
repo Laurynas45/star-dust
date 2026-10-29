@@ -45,6 +45,8 @@ export interface TakeManifest {
   provider: ProviderId;
   comfyuiWorkflowName: string | null;
   seed: number | null;
+  /** True when the shot was pinned to this number. */
+  seedPinned: boolean;
   frames: number;
   fps: number;
   width: number;
@@ -277,6 +279,7 @@ function manifestFor(
     provider: job.provider,
     comfyuiWorkflowName: workflowName(job),
     seed: job.seed == null ? null : job.seed,
+    seedPinned: Boolean(shot.seedPinned),
     frames: info.frames,
     fps: roundFps(info.fps),
     width: info.width,

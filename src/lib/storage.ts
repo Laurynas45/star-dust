@@ -307,6 +307,12 @@ function migrate(db: DB) {
   if (!hasColumn(db, "jobs", "seed")) {
     db.exec("ALTER TABLE jobs ADD COLUMN seed INTEGER");
   }
+  if (!hasColumn(db, "shots", "seed_pinned")) {
+    db.exec("ALTER TABLE shots ADD COLUMN seed_pinned INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "shots", "locked_job_id")) {
+    db.exec("ALTER TABLE shots ADD COLUMN locked_job_id TEXT");
+  }
   if (!hasColumn(db, "jobs", "input_key")) {
     db.exec("ALTER TABLE jobs ADD COLUMN input_key TEXT");
   }
@@ -560,6 +566,8 @@ function mapShot(row: Record<string, unknown>): Shot {
           ? row.approved_end_stamp
           : "",
     seed: row.seed == null || !Number.isFinite(Number(row.seed)) ? undefined : Math.floor(Number(row.seed)),
+    seedPinned: Number(row.seed_pinned) === 1,
+    lockedJobId: str(row.locked_job_id),
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
     chainFromPrevious: Number(row.chain_from_previous) === 1,
@@ -887,28 +895,33 @@ export function createShot(input: {
 export function updateShot(
   id: string,
   patch: Partial<
-    Pick<
-      Shot,
-      | "prompt"
-      | "presetId"
-      | "durationSec"
-      | "startImagePath"
-      | "endImagePath"
-      | "comfyuiWorkflow"
-      | "comfyLowMemory"
-      | "chainFromPrevious"
-      | "chainFrameBack"
-      | "chainedStartImagePath"
-      | "chainedFromJobId"
-      | "chainedFrameBack"
-      | "chainedFrameRequest"
-      | "chainTrimStartFrames"
-      | "dropDuplicateFrame"
-      | "seamMode"
-      | "seamFadeSec"
-      | "seed"
+    Omit<
+      Pick<
+        Shot,
+        | "prompt"
+        | "presetId"
+        | "durationSec"
+        | "startImagePath"
+        | "endImagePath"
+        | "comfyuiWorkflow"
+        | "comfyLowMemory"
+        | "chainFromPrevious"
+        | "chainFrameBack"
+        | "chainedStartImagePath"
+        | "chainedFromJobId"
+        | "chainedFrameBack"
+        | "chainedFrameRequest"
+        | "chainTrimStartFrames"
+        | "dropDuplicateFrame"
+        | "seamMode"
+        | "seamFadeSec"
+        | "seed"
+        | "seedPinned"
+        | "lockedJobId"
+      >,
+      "seed" | "lockedJobId"
     >
-  >
+  > & { seed?: number | null; lockedJobId?: string | null }
 ): Shot | undefined {
   const current = getShot(id);
   if (!current) return undefined;
@@ -959,6 +972,9 @@ export function updateShot(
         : patch.seed == null || !Number.isFinite(patch.seed)
           ? null
           : Math.floor(Math.abs(patch.seed)) % 1_000_000_000,
+    seedPinned: patch.seedPinned === undefined ? Boolean(current.seedPinned) : patch.seedPinned,
+    lockedJobId:
+      patch.lockedJobId === undefined ? current.lockedJobId ?? null : patch.lockedJobId || null,
     seamMode: patch.seamMode === undefined ? current.seamMode ?? null : patch.seamMode,
     seamFadeSec:
       patch.seamFadeSec === undefined
@@ -976,7 +992,7 @@ export function updateShot(
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
            seam_mode = ?, seam_fade_sec = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
-           chain_trim_start_frames = ?, seed = ?, updated_at = ?
+           chain_trim_start_frames = ?, seed = ?, seed_pinned = ?, locked_job_id = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -998,6 +1014,8 @@ export function updateShot(
       next.chainTrimStartFrames == null ? null : next.chainTrimStartFrames > 0 ? 1 : 0,
       next.chainTrimStartFrames,
       next.seed,
+      next.seedPinned ? 1 : 0,
+      next.lockedJobId,
       next.updatedAt,
       id
     );
@@ -1338,8 +1356,11 @@ export function selectTake(shotId: string, jobId: string): Shot | undefined {
   if (job.kind === "preview") return undefined;
   if (job.status !== "completed" || !job.outputPath) return undefined;
   const now = new Date().toISOString();
-  const seed =
-    job.seed == null || !Number.isFinite(job.seed) ? shot.seed ?? null : Math.floor(job.seed);
+  const seed = shot.seedPinned
+    ? shot.seed ?? null
+    : job.seed == null || !Number.isFinite(job.seed)
+      ? shot.seed ?? null
+      : Math.floor(job.seed);
   getDb()
     .prepare("UPDATE shots SET selected_job_id = ?, seed = ?, updated_at = ? WHERE id = ?")
     .run(jobId, seed, now, shotId);
