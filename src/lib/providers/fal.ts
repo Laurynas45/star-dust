@@ -51,6 +51,7 @@ export async function runFalGenerate(jobId: string): Promise<void> {
     body: JSON.stringify({
       prompt: job.prompt,
       image_url: dataUri,
+      ...(job.seed != null && Number.isFinite(job.seed) ? { seed: job.seed } : {}),
     }),
   });
 
