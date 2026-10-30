@@ -6,6 +6,7 @@ import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
 import { chainStaleShotIds } from "@/lib/chain-stale";
+import { joinPlanSummary, projectFadeLabel, type JoinPlan } from "@/lib/join";
 import { reviewStitchPasses } from "@/lib/mixed-pass";
 import { resolveComfyChoice } from "@/lib/comfy-choice";
 import {
@@ -53,10 +54,12 @@ import {
   REUSE_LABEL,
   RETAKE_NOTE,
   SEAM_FADE_CHOICES,
+  SEAM_FADE_FRAME_CHOICES,
   SEAM_FRAME_HONESTY,
   SEAM_HONESTY,
   SEAM_PREVIEW_HONESTY,
   STYLE_BASE_HONESTY,
+  SeamFadeUnit,
   SeamMode,
   Shot,
   chainFramePhrase,
@@ -87,6 +90,7 @@ type Detail = {
   };
   finish?: FinishView;
   previewFinish?: FinishView;
+  join?: JoinPlan;
 };
 
 const OUTPUT_FPS_CHOICES = [16, 24, 25, 30] as const;
@@ -97,6 +101,12 @@ const OUTPUT_SIZE_CHOICES = [
   [960, 544],
   [832, 480],
 ] as const;
+
+function seamLabel(seam: { mode: string; fadeSec: number; frames?: number | null }): string {
+  if (seam.mode !== "crossfade") return "hard cut";
+  if (seam.frames != null) return `crossfade ${seam.frames} frames (${seam.fadeSec}s)`;
+  return `crossfade ${seam.fadeSec}s`;
+}
 
 function moneyText(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "unknown";
@@ -142,7 +152,10 @@ type StitchResponse = {
   skipped: { shotId: string; position: number; reason: string }[];
   kind?: "takes" | "preview";
   durationSec?: number;
-  seams?: { position: number; mode: "cut" | "crossfade"; fadeSec: number; note?: string }[];
+  sumClipSec?: number;
+  overlapSec?: number;
+  warning?: string | null;
+  seams?: { position: number; mode: "cut" | "crossfade"; fadeSec: number; frames?: number | null; note?: string }[];
   finish?: FinishView;
   contactSheetPath?: string;
   manifestPath?: string;
@@ -710,6 +723,8 @@ export default function ProjectStudioPage() {
     comfyLowMemory?: boolean | null;
     seamMode?: SeamMode;
     seamFadeSec?: number;
+    seamFadeUnit?: SeamFadeUnit;
+    seamFadeFrames?: number;
     chainTrimStartFrames?: number;
     dropDuplicateFrame?: boolean;
     outputFps?: number | null;
@@ -745,6 +760,9 @@ export default function ProjectStudioPage() {
       dropDuplicateFrame?: boolean | null;
       seamMode?: SeamMode | null;
       seamFadeSec?: number | null;
+      seamFadeUnit?: SeamFadeUnit | null;
+      seamFadeFrames?: number | null;
+      enabled?: boolean;
       seed?: number | null;
       seedPinned?: boolean;
       lockedJobId?: string | null;
@@ -1016,7 +1034,7 @@ export default function ProjectStudioPage() {
             className="btn-ghost mt-3 w-full"
             disabled={exporting || takeClips.length === 0}
             onClick={() => {
-              if (stitchReview?.warn) {
+              if (stitchReview?.warn || detail.join?.warning) {
                 setStitchGate(true);
                 return;
               }
@@ -1193,7 +1211,7 @@ export default function ProjectStudioPage() {
           <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted)]">{SEAM_HONESTY}</p>
           <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted)]">{CHAIN_HONESTY}</p>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-3">
           <label className="text-xs text-[var(--muted)]">
             Project join
             <select
@@ -1206,21 +1224,61 @@ export default function ProjectStudioPage() {
             </select>
           </label>
           <label className="text-xs text-[var(--muted)]">
-            Crossfade length
+            Crossfade unit
             <select
               className="input mt-1"
-              value={String(project.seamFadeSec)}
+              value={project.seamFadeUnit ?? "seconds"}
               disabled={project.seamMode !== "crossfade"}
-              onChange={(e) => void saveProjectPatch({ seamFadeSec: Number(e.target.value) })}
+              onChange={(e) =>
+                void saveProjectPatch({ seamFadeUnit: e.target.value === "frames" ? "frames" : "seconds" })
+              }
             >
-              {SEAM_FADE_CHOICES.map((seconds) => (
-                <option key={seconds} value={seconds}>
-                  {seconds}s
-                </option>
-              ))}
+              <option value="seconds">Seconds</option>
+              <option value="frames">Frames</option>
             </select>
           </label>
+          {(project.seamFadeUnit ?? "seconds") === "frames" ? (
+            <label className="text-xs text-[var(--muted)]">
+              Crossfade frames
+              <select
+                className="input mt-1"
+                value={String(project.seamFadeFrames ?? 4)}
+                disabled={project.seamMode !== "crossfade"}
+                onChange={(e) => void saveProjectPatch({ seamFadeFrames: Number(e.target.value) })}
+              >
+                {SEAM_FADE_FRAME_CHOICES.map((frames) => (
+                  <option key={frames} value={frames}>
+                    {frames === 0 ? "0 frames (hard cut)" : `${frames} frames`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <label className="text-xs text-[var(--muted)]">
+              Crossfade length
+              <select
+                className="input mt-1"
+                value={String(project.seamFadeSec)}
+                disabled={project.seamMode !== "crossfade"}
+                onChange={(e) => void saveProjectPatch({ seamFadeSec: Number(e.target.value) })}
+              >
+                {SEAM_FADE_CHOICES.map((seconds) => (
+                  <option key={seconds} value={seconds}>
+                    {seconds}s
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
+        {detail.join && (
+          <p className="text-sm leading-relaxed text-white">{joinPlanSummary(detail.join)}</p>
+        )}
+        {detail.join?.warning && (
+          <p className="text-sm leading-relaxed text-amber-100" role="alert">
+            {detail.join.warning}
+          </p>
+        )}
         <label className="block max-w-md text-xs text-[var(--muted)]">
           Start frames trimmed on a chained hard cut
           <select
@@ -1297,6 +1355,9 @@ export default function ProjectStudioPage() {
             tokens use each still&apos;s width and height, the shot duration, and 24 fps. Star Dust
             has no vendor price table.
           </p>
+          {cost?.joinNote && (
+            <p className="mt-1 text-[11px] leading-relaxed text-current/80">{cost.joinNote}</p>
+          )}
           {cost?.credits?.hosted && (
             <p className="mt-1 text-xs leading-relaxed text-current/80">{cost.credits.label}</p>
           )}
@@ -1734,6 +1795,11 @@ export default function ProjectStudioPage() {
                         {preset.label} · {shot.durationSec}s
                         {shot.endImagePath ? " · end still" : ""}
                       </span>
+                      {shot.enabled === false && (
+                        <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] text-amber-100">
+                          Disabled
+                        </span>
+                      )}
                       {conformLabel && (
                         <span className="rounded-full bg-white/5 px-2 py-0.5 text-[11px] text-sky-100">
                           {conformLabel}
@@ -1938,11 +2004,7 @@ export default function ProjectStudioPage() {
                               }}
                             >
                               <option value="">
-                                Project default (
-                                {project.seamMode === "crossfade"
-                                  ? `crossfade ${project.seamFadeSec}s`
-                                  : "hard cut"}
-                                )
+                                Project default ({projectFadeLabel(project)})
                               </option>
                               <option value="cut">Hard cut</option>
                               <option value="crossfade">Crossfade</option>
@@ -1950,17 +2012,69 @@ export default function ProjectStudioPage() {
                           </label>
                           {shot.seamMode === "crossfade" && (
                             <label className="text-[11px] text-[var(--muted)]">
+                              This join&apos;s unit
+                              <select
+                                className="input mt-1"
+                                value={shot.seamFadeUnit ?? ""}
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  if (value === "") {
+                                    void saveShotPatch(shot.id, { seamFadeUnit: null, seamFadeFrames: null });
+                                    return;
+                                  }
+                                  void saveShotPatch(shot.id, {
+                                    seamFadeUnit: value === "frames" ? "frames" : "seconds",
+                                    seamFadeFrames:
+                                      value === "frames" ? shot.seamFadeFrames ?? project.seamFadeFrames ?? 4 : null,
+                                  });
+                                }}
+                              >
+                                <option value="">
+                                  Project default (
+                                  {(project.seamFadeUnit ?? "seconds") === "frames" ? "frames" : "seconds"})
+                                </option>
+                                <option value="seconds">Seconds</option>
+                                <option value="frames">Frames</option>
+                              </select>
+                            </label>
+                          )}
+                          {shot.seamMode === "crossfade" && (shot.seamFadeUnit ?? project.seamFadeUnit) !== "frames" && (
+                            <label className="text-[11px] text-[var(--muted)]">
                               This join&apos;s crossfade
                               <select
                                 className="input mt-1"
                                 value={String(shot.seamFadeSec ?? project.seamFadeSec)}
                                 onChange={(e) =>
-                                  void saveShotPatch(shot.id, { seamFadeSec: Number(e.target.value) })
+                                  void saveShotPatch(shot.id, {
+                                    seamFadeSec: Number(e.target.value),
+                                    seamFadeUnit: "seconds",
+                                  })
                                 }
                               >
                                 {SEAM_FADE_CHOICES.map((seconds) => (
                                   <option key={seconds} value={seconds}>
                                     {seconds}s
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )}
+                          {shot.seamMode === "crossfade" && (shot.seamFadeUnit ?? project.seamFadeUnit) === "frames" && (
+                            <label className="text-[11px] text-[var(--muted)]">
+                              This join&apos;s frames
+                              <select
+                                className="input mt-1"
+                                value={String(shot.seamFadeFrames ?? project.seamFadeFrames ?? 4)}
+                                onChange={(e) =>
+                                  void saveShotPatch(shot.id, {
+                                    seamFadeFrames: Number(e.target.value),
+                                    seamFadeUnit: "frames",
+                                  })
+                                }
+                              >
+                                {SEAM_FADE_FRAME_CHOICES.map((frames) => (
+                                  <option key={frames} value={frames}>
+                                    {frames === 0 ? "0 frames (hard cut)" : `${frames} frames`}
                                   </option>
                                 ))}
                               </select>
@@ -2079,6 +2193,18 @@ export default function ProjectStudioPage() {
                         })}
                       </fieldset>
                     )}
+                    <label className="mt-3 flex items-start gap-2 text-[11px] leading-relaxed text-[var(--muted)]">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={shot.enabled !== false}
+                        onChange={(e) => void saveShotPatch(shot.id, { enabled: e.target.checked })}
+                      />
+                      <span>
+                        Include in the stitch. Turn this off to leave the shot out. Export stitch names it
+                        instead of dropping it quietly. It can still render.
+                      </span>
+                    </label>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         type="button"
@@ -2288,8 +2414,18 @@ export default function ProjectStudioPage() {
             <div className="space-y-2 p-4">
               <p className="text-sm text-white">
                 Camera motion on stills, not AI motion. {previewCut.includedShotIds.length} shot
-                {previewCut.includedShotIds.length === 1 ? "" : "s"}. This is not a take.
+                {previewCut.includedShotIds.length === 1 ? "" : "s"}
+                {typeof previewCut.durationSec === "number" ? ` · ${previewCut.durationSec.toFixed(2)}s` : ""}
+                {typeof previewCut.overlapSec === "number" && previewCut.overlapSec > 0.001
+                  ? `. Crossfades overlap ${previewCut.overlapSec.toFixed(2)}s.`
+                  : "."}{" "}
+                This is not a take.
               </p>
+              {previewCut.warning && (
+                <p className="text-sm leading-relaxed text-amber-100" role="alert">
+                  {previewCut.warning}
+                </p>
+              )}
               {previewCut.finish?.line && (
                 <p className="text-xs text-white">{previewCut.finish.line}</p>
               )}
@@ -2351,7 +2487,10 @@ export default function ProjectStudioPage() {
               <p className="text-sm text-white">
                 Stitch of {stitch.includedShotIds.length} completed shot
                 {stitch.includedShotIds.length === 1 ? "" : "s"}
-                {typeof stitch.durationSec === "number" ? ` · ${stitch.durationSec.toFixed(2)}s` : ""}.
+                {typeof stitch.durationSec === "number" ? ` · ${stitch.durationSec.toFixed(2)}s` : ""}
+                {typeof stitch.overlapSec === "number" && stitch.overlapSec > 0.001
+                  ? `. Clips add to ${(stitch.sumClipSec ?? 0).toFixed(2)}s, and crossfades overlap ${stitch.overlapSec.toFixed(2)}s.`
+                  : "."}
               </p>
               {stitch.finish?.line && <p className="text-xs text-white">{stitch.finish.line}</p>}
               {stitch.finish?.loudnessNote && (
@@ -2361,16 +2500,14 @@ export default function ProjectStudioPage() {
                 <p className="text-xs text-[var(--muted)]">
                   {stitch.seams
                     .map((seam) => {
-                      const label =
-                        seam.mode === "crossfade" ? `crossfade ${seam.fadeSec}s` : "hard cut";
-                      return `Into shot ${seam.position}: ${label}${seam.note ? ` (${seam.note})` : ""}`;
+                      return `Into shot ${seam.position}: ${seamLabel(seam)}${seam.note ? ` (${seam.note})` : ""}`;
                     })
                     .join(" · ")}
                 </p>
               )}
-              {stitch.skipped.length > 0 && (
-                <p className="text-xs text-[var(--muted)]">
-                  {stitch.skipped.map((item) => `Shot ${item.position}: ${item.reason}`).join(" · ")}
+              {stitch.warning && (
+                <p className="text-sm leading-relaxed text-amber-100" role="alert">
+                  {stitch.warning}
                 </p>
               )}
               <div className="flex flex-wrap gap-2">
@@ -2430,7 +2567,7 @@ export default function ProjectStudioPage() {
         )}
       </section>
 
-      {stitchGate && stitchReview?.warn && (
+      {stitchGate && (stitchReview?.warn || detail.join?.warning) && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center">
           <div
             className="panel w-full max-w-xl p-5"
@@ -2439,17 +2576,23 @@ export default function ProjectStudioPage() {
             aria-labelledby="mixed-pass-title"
           >
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200">
-              {stitchReview.mixed ? "Mixed passes" : "Out of date"}
+              {stitchReview?.warn ? (stitchReview.mixed ? "Mixed passes" : "Out of date") : "Left out"}
             </p>
             <h2 id="mixed-pass-title" className="mt-2 text-xl font-semibold text-white">
               Review this cut before the stitch
             </h2>
             <div className="mt-3 space-y-3">
-              {stitchReview.paragraphs.map((paragraph, index) => (
-                <p key={index} className="text-sm leading-relaxed text-white">
-                  {paragraph}
+              {stitchReview?.warn &&
+                stitchReview.paragraphs.map((paragraph, index) => (
+                  <p key={index} className="text-sm leading-relaxed text-white">
+                    {paragraph}
+                  </p>
+                ))}
+              {detail.join?.warning && (
+                <p className="text-sm leading-relaxed text-amber-100" role="alert">
+                  {detail.join.warning} The stitch will not include them.
                 </p>
-              ))}
+              )}
             </div>
             <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <button

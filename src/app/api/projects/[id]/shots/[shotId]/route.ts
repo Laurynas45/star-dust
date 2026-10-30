@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { effectiveSeed, normalizeSeed } from "@/lib/input-key";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getJob, getProject, getShot, updateShot } from "@/lib/storage";
-import { ComfyWorkflowId, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
+import { ComfyWorkflowId, SeamFadeUnit, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, clampSeamFadeFrames, effectivePrompt, isComfyWorkflowId, isSeamFadeUnit, presetById } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
   if (value === null) return null;
@@ -25,6 +25,18 @@ function seamField(value: unknown): SeamMode | null | undefined {
 function fadeField(value: unknown): number | null | undefined {
   if (value === null) return null;
   if (typeof value === "number") return clampSeamFade(value);
+  return undefined;
+}
+
+function fadeUnitField(value: unknown): SeamFadeUnit | null | undefined {
+  if (value === null) return null;
+  if (isSeamFadeUnit(value)) return value;
+  return undefined;
+}
+
+function fadeFramesField(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return clampSeamFadeFrames(value);
   return undefined;
 }
 
@@ -103,6 +115,9 @@ export async function PATCH(
       dropDuplicateFrame: optionalBool(body.dropDuplicateFrame),
       seamMode: seamField(body.seamMode),
       seamFadeSec: fadeField(body.seamFadeSec),
+      seamFadeUnit: fadeUnitField(body.seamFadeUnit),
+      seamFadeFrames: fadeFramesField(body.seamFadeFrames),
+      enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
     });
     return NextResponse.json(updated);
   }

@@ -7,6 +7,7 @@ import {
   AppSettings,
   ComfyWorkflowId,
   isComfyWorkflowId,
+  DEFAULT_SEAM_FADE_FRAMES,
   DEFAULT_SEAM_FADE_SEC,
   DEFAULT_SETTINGS,
   EMPTY_RATES,
@@ -19,12 +20,15 @@ import {
   StoredRate,
   isBillingUnit,
   SAMPLE_PROJECT_ID,
+  SeamFadeUnit,
   SeamMode,
   Shot,
   chainTrimFromDropDuplicate,
   clampChainFrameBack,
   clampChainTrimStartFrames,
   clampSeamFade,
+  clampSeamFadeFrames,
+  isSeamFadeUnit,
   DEFAULT_CHAIN_TRIM_START_FRAMES,
   CaptionMode,
   clampMusicFadeSec,
@@ -84,6 +88,8 @@ function openDatabase(): DB {
       comfy_low_memory INTEGER,
       seam_mode TEXT NOT NULL DEFAULT 'cut',
       seam_fade_sec REAL NOT NULL DEFAULT 0.5,
+      seam_fade_unit TEXT NOT NULL DEFAULT 'seconds',
+      seam_fade_frames INTEGER NOT NULL DEFAULT 4,
       style_base TEXT NOT NULL DEFAULT '',
       drop_duplicate_frame INTEGER NOT NULL DEFAULT 1,
       chain_trim_start_frames INTEGER NOT NULL DEFAULT 1,
@@ -117,6 +123,9 @@ function openDatabase(): DB {
       chained_from_job_id TEXT,
       seam_mode TEXT,
       seam_fade_sec REAL,
+      seam_fade_unit TEXT,
+      seam_fade_frames INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1,
       chain_frame_back INTEGER NOT NULL DEFAULT 0,
       chained_frame_back INTEGER,
       chained_frame_request INTEGER,
@@ -355,6 +364,21 @@ function migrate(db: DB) {
   if (!hasColumn(db, "projects", "caption_mode")) {
     db.exec("ALTER TABLE projects ADD COLUMN caption_mode TEXT");
   }
+  if (!hasColumn(db, "projects", "seam_fade_unit")) {
+    db.exec("ALTER TABLE projects ADD COLUMN seam_fade_unit TEXT NOT NULL DEFAULT 'seconds'");
+  }
+  if (!hasColumn(db, "projects", "seam_fade_frames")) {
+    db.exec("ALTER TABLE projects ADD COLUMN seam_fade_frames INTEGER NOT NULL DEFAULT 4");
+  }
+  if (!hasColumn(db, "shots", "seam_fade_unit")) {
+    db.exec("ALTER TABLE shots ADD COLUMN seam_fade_unit TEXT");
+  }
+  if (!hasColumn(db, "shots", "seam_fade_frames")) {
+    db.exec("ALTER TABLE shots ADD COLUMN seam_fade_frames INTEGER");
+  }
+  if (!hasColumn(db, "shots", "enabled")) {
+    db.exec("ALTER TABLE shots ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
+  }
 }
 
 function seedSample(db: DB) {
@@ -440,6 +464,11 @@ function mapProject(row: Record<string, unknown>): Project {
     seamMode: parseSeamMode(row.seam_mode) ?? "cut",
     seamFadeSec:
       row.seam_fade_sec == null ? DEFAULT_SEAM_FADE_SEC : clampSeamFade(Number(row.seam_fade_sec)),
+    seamFadeUnit: parseSeamFadeUnit(row.seam_fade_unit) ?? "seconds",
+    seamFadeFrames:
+      row.seam_fade_frames == null
+        ? DEFAULT_SEAM_FADE_FRAMES
+        : clampSeamFadeFrames(Number(row.seam_fade_frames)),
     styleBase: String(row.style_base ?? ""),
     outputFps: row.output_fps == null ? null : canonicalFps(Number(row.output_fps)),
     outputWidth: row.output_width == null ? null : evenDim(Number(row.output_width), OUTPUT_DIM_MIN),
@@ -463,6 +492,10 @@ function mapProject(row: Record<string, unknown>): Project {
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
   };
+}
+
+function parseSeamFadeUnit(value: unknown): SeamFadeUnit | null {
+  return isSeamFadeUnit(value) ? value : null;
 }
 
 function parseCaptionMode(value: unknown): CaptionMode | null {
@@ -583,6 +616,9 @@ function mapShot(row: Record<string, unknown>): Shot {
     ...trimFields(shotChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)),
     seamMode: parseSeamMode(row.seam_mode),
     seamFadeSec: row.seam_fade_sec == null ? null : clampSeamFade(Number(row.seam_fade_sec)),
+    seamFadeUnit: parseSeamFadeUnit(row.seam_fade_unit),
+    seamFadeFrames: row.seam_fade_frames == null ? null : clampSeamFadeFrames(Number(row.seam_fade_frames)),
+    enabled: row.enabled == null ? true : Number(row.enabled) !== 0,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -665,6 +701,8 @@ export function createProject(name: string, description = ""): Project {
     completedCount: 0,
     seamMode: "cut",
     seamFadeSec: DEFAULT_SEAM_FADE_SEC,
+    seamFadeUnit: "seconds",
+    seamFadeFrames: DEFAULT_SEAM_FADE_FRAMES,
     styleBase: "",
     chainTrimStartFrames: DEFAULT_CHAIN_TRIM_START_FRAMES,
     dropDuplicateFrame: true,
@@ -699,6 +737,8 @@ export function updateProject(
       | "comfyLowMemory"
       | "seamMode"
       | "seamFadeSec"
+      | "seamFadeUnit"
+      | "seamFadeFrames"
       | "styleBase"
       | "chainTrimStartFrames"
       | "dropDuplicateFrame"
@@ -734,6 +774,11 @@ export function updateProject(
     seamMode: patch.seamMode === undefined ? current.seamMode : patch.seamMode,
     seamFadeSec:
       patch.seamFadeSec === undefined ? current.seamFadeSec : clampSeamFade(patch.seamFadeSec),
+    seamFadeUnit: patch.seamFadeUnit === undefined ? current.seamFadeUnit : patch.seamFadeUnit,
+    seamFadeFrames:
+      patch.seamFadeFrames === undefined
+        ? current.seamFadeFrames
+        : clampSeamFadeFrames(patch.seamFadeFrames),
     styleBase: patch.styleBase === undefined ? current.styleBase : patch.styleBase.trim(),
     chainTrimStartFrames: nextProjectTrim(current, patch),
     ...nextOutput(current, patch),
@@ -759,6 +804,7 @@ export function updateProject(
       `UPDATE projects
        SET name = ?, description = ?, character_sheet_path = ?, updated_at = ?,
            comfyui_workflow = ?, comfy_low_memory = ?, seam_mode = ?, seam_fade_sec = ?,
+           seam_fade_unit = ?, seam_fade_frames = ?,
            style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?,
            output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
            music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
@@ -774,6 +820,8 @@ export function updateProject(
       next.comfyLowMemory == null ? null : next.comfyLowMemory ? 1 : 0,
       next.seamMode,
       next.seamFadeSec,
+      next.seamFadeUnit,
+      next.seamFadeFrames,
       next.styleBase,
       next.chainTrimStartFrames > 0 ? 1 : 0,
       next.chainTrimStartFrames,
@@ -861,6 +909,7 @@ export function createShot(input: {
     comfyLowMemory: input.comfyLowMemory ?? null,
     chainFromPrevious: Boolean(input.chainFromPrevious),
     chainFrameBack: clampChainFrameBack(input.chainFrameBack ?? 0),
+    enabled: true,
     createdAt: now,
     updatedAt: now,
   };
@@ -915,6 +964,9 @@ export function updateShot(
         | "dropDuplicateFrame"
         | "seamMode"
         | "seamFadeSec"
+        | "seamFadeUnit"
+        | "seamFadeFrames"
+        | "enabled"
         | "seed"
         | "seedPinned"
         | "lockedJobId"
@@ -982,6 +1034,15 @@ export function updateShot(
         : patch.seamFadeSec == null
           ? null
           : clampSeamFade(patch.seamFadeSec),
+    seamFadeUnit:
+      patch.seamFadeUnit === undefined ? current.seamFadeUnit ?? null : patch.seamFadeUnit,
+    seamFadeFrames:
+      patch.seamFadeFrames === undefined
+        ? current.seamFadeFrames ?? null
+        : patch.seamFadeFrames == null
+          ? null
+          : clampSeamFadeFrames(patch.seamFadeFrames),
+    enabled: patch.enabled === undefined ? current.enabled !== false : patch.enabled,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -990,7 +1051,8 @@ export function updateShot(
        SET prompt = ?, preset_id = ?, duration_sec = ?, start_image_path = ?,
            end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?,
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
-           seam_mode = ?, seam_fade_sec = ?, chain_frame_back = ?,
+           seam_mode = ?, seam_fade_sec = ?, seam_fade_unit = ?, seam_fade_frames = ?,
+           enabled = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
            chain_trim_start_frames = ?, seed = ?, seed_pinned = ?, locked_job_id = ?, updated_at = ?
        WHERE id = ?`
@@ -1008,6 +1070,9 @@ export function updateShot(
       next.chainedFromJobId,
       next.seamMode,
       next.seamFadeSec,
+      next.seamFadeUnit,
+      next.seamFadeFrames,
+      next.enabled ? 1 : 0,
       next.chainFrameBack,
       next.chainedFrameBack,
       next.chainedFrameRequest,
