@@ -8,6 +8,7 @@ import { writeContactSheet } from "./contact-sheet";
 import { completedTakesFor, cutTake } from "./chain-stale";
 import { resolveConformTarget } from "./conform";
 import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
+import { joinOmissionWarning, type JoinOmission } from "./join";
 import { COMFY_WORKFLOWS, comfyWorkflowFromModelName } from "./provider-info";
 import { getProject, listJobs, listShots, resolveDataPath } from "./storage";
 import { planStitchSeams } from "./stitch";
@@ -325,12 +326,23 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
     info: VideoStreamInfo;
   }[] = [];
 
+  const omissions: JoinOmission[] = [];
   for (const shot of shots) {
+    if (shot.enabled === false) {
+      omissions.push({ shotId: shot.id, position: shot.position, prompt: shot.prompt, reason: "disabled" });
+      continue;
+    }
     const takes = orderedTakes(completedTakesFor(jobs, shot.id));
     const job = cutTake(shot.selectedJobId, takes, shot.approvedJobId);
-    if (!job?.outputPath) continue;
+    if (!job?.outputPath) {
+      omissions.push({ shotId: shot.id, position: shot.position, prompt: shot.prompt, reason: "no-clip" });
+      continue;
+    }
     const abs = resolveDataPath(job.outputPath);
-    if (!fs.existsSync(abs)) continue;
+    if (!fs.existsSync(abs)) {
+      omissions.push({ shotId: shot.id, position: shot.position, prompt: shot.prompt, reason: "missing-file" });
+      continue;
+    }
     const version = takeVersion(takes, job.id);
     chosen.push({
       shot,
@@ -343,7 +355,9 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
   }
 
   if (chosen.length === 0) {
-    throw new Error("No completed shots to export. Render at least one shot first.");
+    throw new Error(
+      joinOmissionWarning(omissions) ?? "No completed shots to export. Render at least one shot first."
+    );
   }
 
   const filenames = new Set<string>();
@@ -354,6 +368,10 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
     filenames.add(part.filename);
   }
 
+  const target = resolveConformTarget(
+    project,
+    chosen.map((part) => ({ fps: part.info.fps, width: part.info.width, height: part.info.height }))
+  );
   const seams = planStitchSeams(
     project,
     chosen.map((part) => ({
@@ -362,18 +380,16 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
       abs: part.abs,
       shot: part.shot,
       imagePath: part.job.imagePath,
-    }))
-  );
-  const target = resolveConformTarget(
-    project,
-    chosen.map((part) => ({ fps: part.info.fps, width: part.info.width, height: part.info.height }))
+    })),
+    target.fps
   );
   const events = timelineEvents(
     chosen.map((part) => ({ filename: part.filename, frames: reviewFrames(part.info, target.fps) })),
     seams,
     target.fps
   );
-  const edl = formatCmx3600(project.name, events, target.fps);
+  const leftOut = joinOmissionWarning(omissions);
+  const edl = formatCmx3600(project.name, events, target.fps) + (leftOut ? `* ${leftOut}\n` : "");
   const manifests = chosen.map((part) =>
     manifestFor(part.shot, part.job, part.version, sharedStyle, part.info, shots, jobs)
   );

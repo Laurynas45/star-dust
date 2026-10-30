@@ -4,6 +4,7 @@ import { approvedTakeMismatch } from "@/lib/approve";
 import { planTakeConform } from "@/lib/conform";
 import { planProjectFinish } from "@/lib/finish-plan";
 import { finishedTake } from "@/lib/continuity";
+import { planJoin } from "@/lib/join";
 import { probeClipShape } from "@/lib/ffmpeg";
 import { desiredClipKey, effectiveSeed } from "@/lib/input-key";
 import { ensureJobWorker } from "@/lib/providers";
@@ -24,8 +25,10 @@ import {
   clampMusicFadeSec,
   clampMusicLevelDb,
   clampSeamFade,
+  clampSeamFadeFrames,
   effectivePrompt,
   isComfyWorkflowId,
+  isSeamFadeUnit,
 } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
@@ -43,6 +46,10 @@ function flagField(value: unknown): boolean | null | undefined {
 function seamModeField(value: unknown): SeamMode | undefined {
   if (value === "cut" || value === "crossfade") return value;
   return undefined;
+}
+
+function seamFadeUnitField(value: unknown): "seconds" | "frames" | undefined {
+  return isSeamFadeUnit(value) ? value : undefined;
 }
 
 function nullableNumber(value: unknown): number | null | undefined {
@@ -91,11 +98,19 @@ export async function GET(
       continue;
     }
   }
-  const cutSec = conformClips.reduce((sum, clip) => sum + (clip.durationSec > 0 ? clip.durationSec : 0), 0);
-  const previewSec = shots.reduce((sum, shot) => sum + (shot.durationSec > 0 ? shot.durationSec : 0), 0);
+  const conformPlan = planTakeConform(project, conformClips);
+  const join = planJoin(
+    project,
+    shots,
+    conformClips.map((clip) => ({ shotId: clip.shotId, durationSec: clip.durationSec })),
+    conformPlan.fps
+  );
+  const cutSec = join.joinedSec > 0 ? join.joinedSec : join.plannedJoinedSec;
+  const previewSec = join.plannedJoinedSec;
   return NextResponse.json({
     project,
-    conform: planTakeConform(project, conformClips),
+    join,
+    conform: conformPlan,
     finish: planProjectFinish(project, {
       anyClipAudio: conformClips.some((clip) => clip.hasAudio),
       cutSec: cutSec > 0 ? cutSec : null,
@@ -142,6 +157,9 @@ export async function PATCH(
     comfyLowMemory: flagField(body.comfyLowMemory),
     seamMode: seamModeField(body.seamMode),
     seamFadeSec: typeof body.seamFadeSec === "number" ? clampSeamFade(body.seamFadeSec) : undefined,
+    seamFadeUnit: seamFadeUnitField(body.seamFadeUnit),
+    seamFadeFrames:
+      typeof body.seamFadeFrames === "number" ? clampSeamFadeFrames(body.seamFadeFrames) : undefined,
     styleBase,
     chainTrimStartFrames:
       typeof body.chainTrimStartFrames === "number" && Number.isFinite(body.chainTrimStartFrames)

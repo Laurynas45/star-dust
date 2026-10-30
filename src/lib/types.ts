@@ -2,6 +2,9 @@ export type ProviderId = "mock" | "fal" | "replicate" | "comfyui";
 
 export type SeamMode = "cut" | "crossfade";
 
+/** Seconds keep the 0.25–1s choices. Frames are 0–24 and never longer than 1s. */
+export type SeamFadeUnit = "seconds" | "frames";
+
 /** Burn draws the SRT into the picture. Sidecar writes a .srt next to the mp4. */
 export type CaptionMode = "burn" | "sidecar";
 
@@ -39,8 +42,12 @@ export interface Project {
   comfyLowMemory?: boolean | null;
   /** How clips join in the stitch. Cut is the historical hard cut. */
   seamMode: SeamMode;
-  /** Crossfade length when seamMode is crossfade. Ignored for a hard cut. */
+  /** Crossfade length when the unit is seconds. Ignored for a hard cut and for a frame fade. */
   seamFadeSec: number;
+  /** Seconds, or frames. A shot can override this. Default seconds, so older projects stay put. */
+  seamFadeUnit: SeamFadeUnit;
+  /** Frame count when the unit is frames. 0–24, default 4. Ignored for a hard cut and for seconds. */
+  seamFadeFrames: number;
   /**
    * Start frames trimmed from the next clip on a chained hard cut that used the
    * exact last frame. 0 keeps every frame. 1 matches the old one-frame drop.
@@ -156,8 +163,17 @@ export interface Shot {
   dropDuplicateFrame?: boolean | null;
   /** Join into this shot. Null inherits the project seam. */
   seamMode?: SeamMode | null;
-  /** Null inherits the project crossfade length. */
+  /** Null inherits the project crossfade length in seconds. */
   seamFadeSec?: number | null;
+  /** Null inherits the project unit. Frames are 0–24 and never longer than 1 second. */
+  seamFadeUnit?: SeamFadeUnit | null;
+  /** Null inherits the project frame count. Used when this join's unit is frames. */
+  seamFadeFrames?: number | null;
+  /**
+   * When false, Export stitch leaves this shot out and names it.
+   * Unset means the shot is included. It can still render.
+   */
+  enabled?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -302,6 +318,14 @@ export interface CostEstimate {
   /** Sum of a retake of each existing clip, each clip on its own. */
   retakeTotal?: number | null;
   shots?: ShotCostLine[];
+  /** Enabled shots added together, before a crossfade overlap. */
+  clipSumSec?: number;
+  /** Joined cut after crossfade overlap. Shorter than clipSumSec when a join fades. */
+  joinedRuntimeSec?: number;
+  /** Seconds the crossfades remove from the sum of the clips. */
+  joinOverlapSec?: number;
+  /** Says the estimate bills each clip, and the joined file is shorter when a crossfade overlaps. */
+  joinNote?: string;
 }
 
 export interface PublicCreditPack {
@@ -407,6 +431,14 @@ export const MIN_SEAM_FADE_SEC = 0.25;
 export const MAX_SEAM_FADE_SEC = 1;
 export const DEFAULT_SEAM_FADE_SEC = 0.5;
 export const SEAM_FADE_CHOICES = [0.25, 0.5, 0.75, 1] as const;
+
+/** A frame crossfade. 0 is a hard cut. 24 frames is 1s at 24 fps, and the cap at any rate. */
+export const MIN_SEAM_FADE_FRAMES = 0;
+export const MAX_SEAM_FADE_FRAMES = 24;
+export const DEFAULT_SEAM_FADE_FRAMES = 4;
+export const SEAM_FADE_FRAME_CHOICES = [
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+] as const;
 
 /** 0 is the last frame. Twelve is about half a second at 24 fps. */
 export const MAX_CHAIN_FRAME_BACK = 12;
@@ -515,7 +547,7 @@ export const SEAM_PREVIEW_HONESTY =
   "Preview seam plays about the last 1.5 seconds of the previous take and the first 1.5 seconds of this one, using the same join as the stitch. It helps you spot the seam. It does not fix drift, lock a character, or guarantee continuity. It does not replace any take.";
 
 export const SEAM_HONESTY =
-  "Hard cut is the default. A short crossfade blends the pixels at the join. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
+  "Hard cut is the default. A short crossfade blends the pixels at the join. Length is 0.25–1 second, or 0–24 frames (default 4, never longer than 1 second). A crossfade overlaps, so the joined cut is shorter than the clips added together. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
 
 export const SEAM_FRAME_HONESTY =
   "On a chained hard cut from the previous shot's exact last frame, trim 0–4 frames from the start of the next clip. The default is 1, which drops that repeated frame. 2–4 also trims early frames a model often re-enacts, which softens that freeze at the seam. It does not fix identity or detail drift, and it does not keep identity continuous. A crossfade is left as-is, a shot that is not chained is left as-is, and stepping back from the last frame is left as-is. Star Dust does not lock a character, lip-sync, or build a long film.";
@@ -571,6 +603,17 @@ export function clampSeamFade(value: number, fallback = DEFAULT_SEAM_FADE_SEC): 
   if (!Number.isFinite(value)) return fallback;
   const rounded = Math.round(value * 1000) / 1000;
   return Math.min(MAX_SEAM_FADE_SEC, Math.max(MIN_SEAM_FADE_SEC, rounded));
+}
+
+export function clampSeamFadeFrames(value: number, fallback = DEFAULT_SEAM_FADE_FRAMES): number {
+  if (!Number.isFinite(value)) return fallback;
+  const rounded = Math.round(value);
+  if (!Number.isFinite(rounded)) return fallback;
+  return Math.min(MAX_SEAM_FADE_FRAMES, Math.max(MIN_SEAM_FADE_FRAMES, rounded));
+}
+
+export function isSeamFadeUnit(value: unknown): value is SeamFadeUnit {
+  return value === "seconds" || value === "frames";
 }
 
 export function clampChainFrameBack(value: number, fallback = 0): number {

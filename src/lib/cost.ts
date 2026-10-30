@@ -5,6 +5,7 @@ import { creditEstimate } from "./credits";
 import { probeImageSize } from "./ffmpeg";
 import { isPaidProvider, modelNameFor } from "./provider-info";
 import { projectRenderPlan } from "./takes";
+import { joinCostNote, planJoin } from "./join";
 import { getProject, getSettings, listJobs, listShots, resolveDataPath } from "./storage";
 import {
   AppSettings,
@@ -453,9 +454,24 @@ export function estimateRenderAll(projectId: string, shotsOverride?: Shot[]): Co
     bills = shots.map((shot) => shotBill(shot, jobs, remaining.has(shot.id)));
   }
   const seconds = round4(bills.filter((shot) => shot.remaining).reduce((sum, shot) => sum + shot.durationSec, 0));
-  return withCredits(
+  const estimate = withCredits(
     buildEstimate({ provider, modelName, seconds, settings, shots: bills, scope: "project" }),
     provider,
     seconds
   );
+  if (!project) return estimate;
+  const enabled = shots.filter((shot) => shot.enabled !== false);
+  const plan = planJoin(
+    project,
+    shots,
+    enabled.map((shot) => ({ shotId: shot.id, durationSec: Math.max(0, Number(shot.durationSec) || 0) })),
+    project.outputFps ?? 24
+  );
+  return {
+    ...estimate,
+    clipSumSec: plan.plannedSumSec,
+    joinedRuntimeSec: plan.plannedJoinedSec,
+    joinOverlapSec: plan.plannedOverlapSec,
+    joinNote: joinCostNote(plan),
+  };
 }

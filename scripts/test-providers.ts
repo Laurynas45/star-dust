@@ -254,6 +254,7 @@ async function main() {
   const comfy = await import("../src/lib/providers/comfyui");
   const mock = await import("../src/lib/providers/mock");
   const stitch = await import("../src/lib/stitch");
+  const join = await import("../src/lib/join");
   const providers = await import("../src/lib/providers");
   const { SAMPLE_PROJECT_ID } = await import("../src/lib/types");
 
@@ -2521,6 +2522,143 @@ async function main() {
     "crossfade args are unchanged"
   );
   assert(!fadeArgs.includes("trim="), "crossfade filter does not drop a frame");
+
+  const fourFrames = join.framesToFadeSec(4, 24);
+  assert(fourFrames.frames === 4 && fourFrames.fadeSec === 0.167 && fourFrames.capped === false, "4 frames at 24 fps is 0.167s");
+  const cappedFrames = join.framesToFadeSec(24, 16);
+  assert(cappedFrames.capped && cappedFrames.fadeSec <= 1 && cappedFrames.frames === 16, "24 frames at 16 fps stays within 1s");
+  assert(join.framesToFadeSec(0, 24).fadeSec === 0, "0 frames is no fade");
+  assert(join.framesToFadeSec(40, 24).frames === 24, "frame count clamps to 24");
+  const graph = join.buildJoinFilterGraph({
+    durations: [2, 2],
+    seams: [{ mode: "crossfade", fadeSec: 0.5, droppedFrames: 0 }],
+    withAudio: false,
+    fps: 24,
+  });
+  assert(graph === stitch.crossfadeFilter(0.5, 1.5), "a two-clip crossfade graph matches xfade");
+  const audioGraph = join.buildJoinFilterGraph({
+    durations: [2, 2],
+    seams: [{ mode: "crossfade", fadeSec: 0.5, droppedFrames: 0 }],
+    withAudio: true,
+    fps: 24,
+  });
+  assert(audioGraph.includes("xfade=transition=fade:duration=0.500:offset=1.500"), "audio graph still crossfades video");
+  assert(audioGraph.includes("acrossfade=d=0.500:c1=tri:c2=tri"), "audio graph crossfades audio");
+  const mixedGraph = join.buildJoinFilterGraph({
+    durations: [2, 2, 2],
+    seams: [
+      { mode: "cut", fadeSec: 0, droppedFrames: 1 },
+      { mode: "crossfade", fadeSec: 0.5, droppedFrames: 0 },
+    ],
+    fps: 24,
+  });
+  assert(mixedGraph.includes("trim=start_frame=1"), "a mixed graph trims the hard cut");
+  assert(mixedGraph.includes("concat=n=2:v=1:a=0"), "a mixed graph hard-cuts with concat");
+  assert(/xfade=transition=fade:duration=0\.500:offset=/.test(mixedGraph), "a mixed graph crossfades the next boundary");
+  const runtime = join.joinedRuntimeSec(
+    [2, 2, 2],
+    [
+      { mode: "cut", fadeSec: 0, droppedFrames: 0 },
+      { mode: "crossfade", fadeSec: 0.5, droppedFrames: 0 },
+    ],
+    24
+  );
+  assert(runtime.sumSec === 6 && runtime.overlapSec === 0.5 && runtime.joinedSec === 5.5, "one crossfade shortens the sum by its overlap");
+  const named = join.joinOmissionWarning([
+    { shotId: "a", position: 2, prompt: "Lanterns over the water", reason: "disabled" },
+    { shotId: "b", position: 3, prompt: "No clip yet", reason: "no-clip" },
+  ]);
+  assert(
+    named != null && named.includes('shot 2 "Lanterns over the water" (disabled)') && named.includes('shot 3 "No clip yet" (no rendered clip)'),
+    "a join warning names the disabled shot and the shot with no clip"
+  );
+
+  storage.saveSettings({ provider: "mock" });
+  const boundary = storage.createProject("Boundary fades");
+  const fadeStillA = storage.saveUpload(boundary.id, "fade-a.png", solidPng(dataDir, "fade-a.png", "red"));
+  const fadeStillB = storage.saveUpload(boundary.id, "fade-b.png", solidPng(dataDir, "fade-b.png", "blue"));
+  const fadeA = storage.createShot({
+    projectId: boundary.id,
+    prompt: "Red pier at dusk.",
+    presetId: "slow-zoom-in",
+    durationSec: 1,
+    startImagePath: fadeStillA,
+  });
+  const fadeB = storage.createShot({
+    projectId: boundary.id,
+    prompt: "Blue water beside the pier.",
+    presetId: "pan-right",
+    durationSec: 1,
+    startImagePath: fadeStillB,
+  });
+  storage.updateProject(boundary.id, { seamMode: "cut", seamFadeUnit: "frames", seamFadeFrames: 4 });
+  storage.updateShot(fadeB.id, { seamMode: "crossfade", seamFadeUnit: "frames", seamFadeFrames: 4 });
+  const keptBoundary = storage.getProject(boundary.id);
+  const keptFade = storage.getShot(fadeB.id);
+  assert(keptBoundary?.seamFadeUnit === "frames" && keptBoundary.seamFadeFrames === 4, "project frame fade is stored");
+  assert(
+    keptFade?.seamMode === "crossfade" && keptFade.seamFadeUnit === "frames" && keptFade.seamFadeFrames === 4,
+    "shot frame fade is stored"
+  );
+  const fadeRun = render.renderAll(boundary.id);
+  assert(fadeRun.ok && fadeRun.jobs.length === 2, "frame crossfade renders on mock with no API key");
+  for (const job of fadeRun.ok ? fadeRun.jobs : []) await providers.startJob(job.id);
+  const boundaryEstimate = cost.estimateRenderAll(boundary.id);
+  assert(
+    boundaryEstimate.joinOverlapSec != null &&
+      boundaryEstimate.joinOverlapSec > 0.1 &&
+      boundaryEstimate.joinOverlapSec < 0.25 &&
+      /bills each clip/i.test(boundaryEstimate.joinNote ?? ""),
+    `cost note stays on the clips while the join overlaps, got ${boundaryEstimate.joinNote}`
+  );
+  const fadedBoundary = await stitch.stitchProject(boundary.id);
+  assert(fadedBoundary.warning == null, "a complete list has no join warning");
+  assert(
+    fadedBoundary.seams[0]?.mode === "crossfade" && fadedBoundary.seams[0]?.frames === 4,
+    `boundary is a 4-frame crossfade, got ${fadedBoundary.seams[0]?.mode} frames ${fadedBoundary.seams[0]?.frames}`
+  );
+  const fadedBoundaryAbs = storage.resolveDataPath(fadedBoundary.outputPath);
+  assert(fs.statSync(fadedBoundaryAbs).size > 1000, "4-frame crossfade stitch is an mp4");
+  const boundaryDur = mediaDuration(fadedBoundaryAbs);
+  const boundaryClipSum = [fadeA, fadeB]
+    .map((shot) => {
+      const job = storage
+        .listJobs(boundary.id)
+        .find((entry) => entry.shotId === shot.id && entry.status === "completed" && entry.outputPath);
+      return mediaDuration(storage.resolveDataPath(job!.outputPath!));
+    })
+    .reduce((sum, value) => sum + value, 0);
+  assert(Math.abs(fadedBoundary.durationSec - boundaryDur) < 0.05, "reported frame-fade duration matches ffprobe");
+  assert(
+    fadedBoundary.overlapSec > 0.1 && boundaryDur < boundaryClipSum - 0.1,
+    `4-frame crossfade should shorten ${boundaryClipSum}s, got ${boundaryDur}s overlap ${fadedBoundary.overlapSec}`
+  );
+
+  storage.updateShot(fadeB.id, { enabled: false });
+  const missingFade = storage.createShot({
+    projectId: boundary.id,
+    prompt: "Lantern that was never rendered.",
+    presetId: "slow-zoom-in",
+    durationSec: 1,
+    startImagePath: fadeStillA,
+  });
+  const warnedBoundary = await stitch.stitchProject(boundary.id);
+  assert(
+    warnedBoundary.includedShotIds.length === 1 && warnedBoundary.includedShotIds[0] === fadeA.id,
+    "disabled and missing shots stay out of the mp4"
+  );
+  assert(
+    warnedBoundary.warning != null &&
+      warnedBoundary.warning.includes("Blue water beside the pier") &&
+      warnedBoundary.warning.includes("disabled") &&
+      warnedBoundary.warning.includes("Lantern that was never rendered") &&
+      warnedBoundary.warning.includes("no rendered clip"),
+    `warning names both shots, got ${warnedBoundary.warning}`
+  );
+  assert(
+    !warnedBoundary.includedShotIds.includes(fadeB.id) && !warnedBoundary.includedShotIds.includes(missingFade.id),
+    "the warning is not a silent drop"
+  );
 
   assert(/repeated frame/i.test(SEAM_FRAME_HONESTY), "copy says this removes a repeated frame");
   assert(/does not fix identity or detail drift/i.test(SEAM_FRAME_HONESTY), "copy says drift is not fixed");

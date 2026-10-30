@@ -27,10 +27,16 @@ import {
   type ClipShape,
 } from "./ffmpeg";
 import { describeFinish, musicFilter, musicFitsByLoop } from "./music-bed";
+import {
+  buildJoinFilterGraph,
+  joinOmissionWarning,
+  joinedRuntimeSec,
+  requestedSeamFade,
+  type JoinOmission,
+} from "./join";
 import { absoluteOutputPath, getProject, listJobs, listShots, resolveDataPath } from "./storage";
 import { probeVideoFrames } from "./ffmpeg";
 import {
-  DEFAULT_SEAM_FADE_SEC,
   DROPPED_FRAME_NOTE,
   FRAME_BACK_SEAM_NOTE,
   SEAM_PREVIEW_SEC,
@@ -41,7 +47,6 @@ import {
   SeamMode,
   Shot,
   clampChainTrimStartFrames,
-  clampSeamFade,
   startFrameTrimNote,
 } from "./types";
 
@@ -53,6 +58,8 @@ export interface StitchSeam {
   note?: string;
   /** Start frames removed from the incoming clip. 0 when this join is unchanged. */
   droppedFrames: number;
+  /** Set when this crossfade was chosen in frames. */
+  frames?: number | null;
 }
 
 export interface StitchResult {
@@ -63,6 +70,12 @@ export interface StitchResult {
   kind: "takes" | "preview";
   seams: StitchSeam[];
   durationSec: number;
+  /** Sum of the clips that were joined, before overlap and trim. */
+  sumClipSec: number;
+  /** Seconds the crossfades remove. Hard cuts do not add to this. */
+  overlapSec: number;
+  /** Names every disabled shot and every shot with no clip. Null when the list was complete. */
+  warning: string | null;
   /** PNG next to the mp4. One labelled thumbnail per shot, in order. */
   contactSheetPath: string;
   /** JSON next to the mp4. One entry per shot, including the seed. */
@@ -340,30 +353,43 @@ function resolveSeam(
   project: Project,
   shot: Shot,
   durPrev: number,
-  durNext: number
+  durNext: number,
+  fps: number
 ): Omit<StitchSeam, "droppedFrames"> {
-  const requested = shot.seamMode ?? project.seamMode ?? "cut";
-  if (requested !== "crossfade") {
-    return { position: shot.position, mode: "cut", fadeSec: 0 };
+  const requested = requestedSeamFade(project, shot, fps);
+  if (requested.mode !== "crossfade" || requested.fadeSec <= 0) {
+    const note =
+      requested.unit === "frames" && requested.frames === 0
+        ? "0 frames is a hard cut."
+        : undefined;
+    return { position: shot.position, mode: "cut", fadeSec: 0, frames: requested.frames, note };
   }
-  const fadeRequest = clampSeamFade(
-    shot.seamFadeSec == null ? project.seamFadeSec ?? DEFAULT_SEAM_FADE_SEC : shot.seamFadeSec
-  );
+  const fadeRequest = requested.fadeSec;
   const longestSafe = Math.min(durPrev, durNext) / 2;
-  if (!(longestSafe >= MIN_SEAM_FADE_SEC)) {
+  const shortest = requested.unit === "frames" ? 1 / (Number.isFinite(fps) && fps > 0 ? fps : 24) : MIN_SEAM_FADE_SEC;
+  if (!(longestSafe >= shortest)) {
     return {
       position: shot.position,
       mode: "cut",
       fadeSec: 0,
-      note: "Crossfade needs at least 0.25s on both clips, so this join is a hard cut.",
+      frames: null,
+      note:
+        requested.unit === "frames"
+          ? "Crossfade needs room on both clips, so this join is a hard cut."
+          : "Crossfade needs at least 0.25s on both clips, so this join is a hard cut.",
     };
   }
   const fadeSec = Math.round(Math.min(fadeRequest, longestSafe) * 1000) / 1000;
-  const note =
-    fadeSec + 0.001 < fadeRequest
-      ? `Crossfade shortened to ${fadeSec}s so it fits both clips.`
-      : undefined;
-  return { position: shot.position, mode: "crossfade", fadeSec, note };
+  const frames =
+    requested.unit === "frames" ? Math.max(0, Math.round(fadeSec * (fps > 0 ? fps : 24))) : null;
+  let note: string | undefined;
+  if (requested.capped) {
+    note = `Crossfade capped at ${fadeSec}s so it stays within 1 second.`;
+  }
+  if (fadeSec + 0.001 < fadeRequest) {
+    note = `Crossfade shortened to ${fadeSec}s so it fits both clips.`;
+  }
+  return { position: shot.position, mode: "crossfade", fadeSec, frames, note };
 }
 
 function annotateSeam(
@@ -371,9 +397,10 @@ function annotateSeam(
   previous: Included,
   next: Included,
   durPrev: number,
-  durNext: number
+  durNext: number,
+  fps = 24
 ): StitchSeam {
-  const seam = resolveSeam(project, next.shot, durPrev, durNext);
+  const seam = resolveSeam(project, next.shot, durPrev, durNext, fps);
   const takeUsedChainedStill =
     Boolean(next.shot.chainedStartImagePath) && next.imagePath === next.shot.chainedStartImagePath;
   const trimFrames = resolveChainTrimStartFrames(project, next.shot);
@@ -409,37 +436,63 @@ function annotateSeam(
   return { ...seam, droppedFrames: dropped, note };
 }
 
+function omissionFor(
+  shot: Shot,
+  reason: JoinOmission["reason"]
+): { skipped: StitchResult["skipped"][number]; omission: JoinOmission } {
+  const omission: JoinOmission = {
+    shotId: shot.id,
+    position: shot.position,
+    prompt: shot.prompt,
+    reason,
+  };
+  const phrase =
+    reason === "disabled" ? "disabled" : reason === "missing-file" ? "clip file missing" : "no rendered clip";
+  return {
+    omission,
+    skipped: {
+      shotId: shot.id,
+      position: shot.position,
+      reason: `${shot.position} "${shot.prompt.trim().replace(/\s+/g, " ").slice(0, 42)}" is ${phrase} and was left out of this join.`,
+    },
+  };
+}
+
 export async function stitchProject(projectId: string): Promise<StitchResult> {
   const shots = listShots(projectId);
   const included: Included[] = [];
   const skipped: StitchResult["skipped"] = [];
+  const omissions: JoinOmission[] = [];
 
   for (const shot of shots) {
+    if (shot.enabled === false) {
+      const item = omissionFor(shot, "disabled");
+      skipped.push(item.skipped);
+      omissions.push(item.omission);
+      continue;
+    }
     const job = finishedTake(shot);
     if (!job?.outputPath) {
-      skipped.push({
-        shotId: shot.id,
-        position: shot.position,
-        reason: "No completed take",
-      });
+      const item = omissionFor(shot, "no-clip");
+      skipped.push(item.skipped);
+      omissions.push(item.omission);
       continue;
     }
     const abs = resolveDataPath(job.outputPath);
     if (!fs.existsSync(abs)) {
-      skipped.push({
-        shotId: shot.id,
-        position: shot.position,
-        reason: "Clip file is missing",
-      });
+      const item = omissionFor(shot, "missing-file");
+      skipped.push(item.skipped);
+      omissions.push(item.omission);
       continue;
     }
     included.push({ shotId: shot.id, jobId: job.id, abs, shot, imagePath: job.imagePath, frameCount: 0 });
   }
 
+  const warning = joinOmissionWarning(omissions);
   if (included.length === 0) {
-    throw new Error("No completed shots to stitch. Render at least one shot first.");
+    throw new Error(warning ?? "No completed shots to stitch. Render at least one shot first.");
   }
-  return concatClips(projectId, "stitch", "takes", included, skipped);
+  return concatClips(projectId, "stitch", "takes", included, skipped, warning);
 }
 
 export async function stitchPreview(projectId: string, jobIds: string[]): Promise<StitchResult> {
@@ -447,8 +500,15 @@ export async function stitchPreview(projectId: string, jobIds: string[]): Promis
   const shots = listShots(projectId);
   const included: Included[] = [];
   const skipped: StitchResult["skipped"] = [];
+  const omissions: JoinOmission[] = [];
 
   for (const shot of shots) {
+    if (shot.enabled === false) {
+      const item = omissionFor(shot, "disabled");
+      skipped.push(item.skipped);
+      omissions.push(item.omission);
+      continue;
+    }
     const job = newestCompleted(
       listJobs(projectId).filter(
         (item) =>
@@ -460,29 +520,26 @@ export async function stitchPreview(projectId: string, jobIds: string[]): Promis
       )
     );
     if (!job?.outputPath) {
-      skipped.push({
-        shotId: shot.id,
-        position: shot.position,
-        reason: "No completed preview clip",
-      });
+      const item = omissionFor(shot, "no-clip");
+      skipped.push({ ...item.skipped, reason: item.skipped.reason.replace("no rendered clip", "no rendered preview") });
+      omissions.push({ ...item.omission, reason: "no-clip" });
       continue;
     }
     const abs = resolveDataPath(job.outputPath);
     if (!fs.existsSync(abs)) {
-      skipped.push({
-        shotId: shot.id,
-        position: shot.position,
-        reason: "Preview file is missing",
-      });
+      const item = omissionFor(shot, "missing-file");
+      skipped.push(item.skipped);
+      omissions.push(item.omission);
       continue;
     }
     included.push({ shotId: shot.id, jobId: job.id, abs, shot, imagePath: job.imagePath, frameCount: 0 });
   }
 
+  const warning = joinOmissionWarning(omissions);
   if (included.length === 0) {
-    throw new Error("No completed preview clips to stitch.");
+    throw new Error(warning ?? "No completed preview clips to stitch.");
   }
-  return concatClips(projectId, "preview", "preview", included, skipped);
+  return concatClips(projectId, "preview", "preview", included, skipped, warning);
 }
 
 function withFrameCounts(included: Included[]): Included[] {
@@ -496,20 +553,22 @@ function withFrameCounts(included: Included[]): Included[] {
  */
 export function planStitchSeams(
   project: Project,
-  parts: { shotId: string; jobId: string; abs: string; shot: Shot; imagePath: string }[]
+  parts: { shotId: string; jobId: string; abs: string; shot: Shot; imagePath: string }[],
+  fps = 24
 ): StitchSeam[] {
   return seamsFor(
     project,
-    withFrameCounts(parts.map((part) => ({ ...part, frameCount: 0 })))
+    withFrameCounts(parts.map((part) => ({ ...part, frameCount: 0 }))),
+    fps
   );
 }
 
-function seamsFor(project: Project, included: Included[]): StitchSeam[] {
+function seamsFor(project: Project, included: Included[], fps = 24): StitchSeam[] {
   const seams: StitchSeam[] = [];
   for (let index = 1; index < included.length; index += 1) {
     const prevDur = probeDurationSec(included[index - 1].abs);
     const nextDur = probeDurationSec(included[index].abs);
-    seams.push(annotateSeam(project, included[index - 1], included[index], prevDur, nextDur));
+    seams.push(annotateSeam(project, included[index - 1], included[index], prevDur, nextDur, fps));
   }
   return seams;
 }
@@ -519,7 +578,8 @@ async function concatClips(
   prefix: string,
   kind: StitchResult["kind"],
   included: Included[],
-  skipped: StitchResult["skipped"]
+  skipped: StitchResult["skipped"],
+  warning: string | null = null
 ): Promise<StitchResult> {
   const project = getProject(projectId);
   if (!project) throw new Error("Project not found");
@@ -531,7 +591,7 @@ async function concatClips(
   const withAudio = anyAudio;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const { abs: outAbs, rel } = absoluteOutputPath(projectId, `${prefix}-${stamp}.mp4`);
-  const planned = seamsFor(project, counted);
+  const planned = seamsFor(project, counted, target.fps);
   const crossfade = planned.some((seam) => seam.mode === "crossfade");
   const seams = crossfade
     ? await crossfadeJoin(project, projectId, stamp, counted, shapes, outAbs, videoFilter, withAudio, target.fps)
@@ -545,6 +605,16 @@ async function concatClips(
     }
   }
   const decorate = prefix === "stitch" || prefix === "preview";
+  const clipDurations = shapes.map((shape) => shape.durationSec);
+  const runtime = joinedRuntimeSec(
+    clipDurations,
+    seams.map((seam) => ({
+      mode: seam.mode,
+      fadeSec: seam.fadeSec,
+      droppedFrames: seam.droppedFrames,
+    })),
+    target.fps
+  );
   const durationSec = probeDurationSec(outAbs);
   const finish = decorate
     ? await applyProgram(project, outAbs, rel, anyAudio, target.fps, durationSec)
@@ -602,6 +672,9 @@ async function concatClips(
     kind,
     seams,
     durationSec: probeDurationSec(outAbs),
+    sumClipSec: runtime.sumSec,
+    overlapSec: runtime.overlapSec,
+    warning,
     contactSheetPath: sheetRel,
     manifestPath: manifestRel,
     finish,
@@ -885,7 +958,8 @@ async function crossfadeJoin(
         included[index - 1],
         incoming,
         probeDurationSec(current),
-        probeDurationSec(normalized[index])
+        probeDurationSec(normalized[index]),
+        fps
       );
       applied.push(seam);
       const last = index === normalized.length - 1;
@@ -913,30 +987,18 @@ async function joinPair(
   const audioOut = withAudio
     ? ["-map", "[a]", "-c:a", "aac", "-ar", "48000", "-ac", "2"]
     : [];
-  if (seam.mode === "cut" || seam.fadeSec <= 0) {
-    const drop = seam.mode === "cut" ? seam.droppedFrames : 0;
-    await runFfmpeg([
-      "-y",
-      "-i",
-      a,
-      "-i",
-      b,
-      "-filter_complex",
-      withAudio ? pairCutAudioFilter(drop, fps) : pairCutFilter(drop),
-      "-map",
-      "[v]",
-      ...audioOut,
-      "-c:v",
-      "libx264",
-      "-pix_fmt",
-      "yuv420p",
-      "-movflags",
-      "+faststart",
-      out,
-    ]);
-    return;
-  }
-  const offset = Math.max(0, probeDurationSec(a) - seam.fadeSec);
+  const graph = buildJoinFilterGraph({
+    durations: [probeDurationSec(a), probeDurationSec(b)],
+    seams: [
+      {
+        mode: seam.mode === "crossfade" && seam.fadeSec > 0 ? "crossfade" : "cut",
+        fadeSec: seam.fadeSec,
+        droppedFrames: seam.mode === "cut" ? seam.droppedFrames : 0,
+      },
+    ],
+    withAudio,
+    fps,
+  });
   await runFfmpeg([
     "-y",
     "-i",
@@ -944,7 +1006,7 @@ async function joinPair(
     "-i",
     b,
     "-filter_complex",
-    crossfadeFilter(seam.fadeSec, offset, withAudio),
+    graph,
     "-map",
     "[v]",
     ...audioOut,
