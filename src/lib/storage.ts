@@ -7,6 +7,7 @@ import {
   AppSettings,
   ComfyWorkflowId,
   isComfyWorkflowId,
+  isProviderId,
   DEFAULT_SEAM_FADE_FRAMES,
   DEFAULT_SEAM_FADE_SEC,
   DEFAULT_SETTINGS,
@@ -379,6 +380,9 @@ function migrate(db: DB) {
   if (!hasColumn(db, "shots", "enabled")) {
     db.exec("ALTER TABLE shots ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
   }
+  if (!hasColumn(db, "projects", "shotlist_provider")) {
+    db.exec("ALTER TABLE projects ADD COLUMN shotlist_provider TEXT");
+  }
 }
 
 function seedSample(db: DB) {
@@ -488,6 +492,7 @@ function mapProject(row: Record<string, unknown>): Project {
         : clampMusicFadeSec(Number(row.music_fade_out_sec), DEFAULT_MUSIC_FADE_OUT_SEC),
     captionsPath: str(row.captions_path),
     captionMode: parseCaptionMode(row.caption_mode),
+    provider: isProviderId(row.shotlist_provider) ? row.shotlist_provider : null,
     ...trimFields(
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
@@ -714,6 +719,7 @@ export function createProject(name: string, description = ""): Project {
     musicFadeInSec: DEFAULT_MUSIC_FADE_IN_SEC,
     musicFadeOutSec: DEFAULT_MUSIC_FADE_OUT_SEC,
     captionMode: null,
+    provider: null,
   };
   getDb()
     .prepare(
@@ -750,6 +756,7 @@ export function updateProject(
       | "musicFadeInSec"
       | "musicFadeOutSec"
       | "captionMode"
+      | "provider"
     >
   > & {
     characterSheetPath?: string | null;
@@ -797,6 +804,12 @@ export function updateProject(
     captionsPath:
       patch.captionsPath === undefined ? current.captionsPath ?? null : patch.captionsPath || null,
     captionMode: patch.captionMode === undefined ? current.captionMode : patch.captionMode,
+    provider:
+      patch.provider === undefined
+        ? current.provider
+        : patch.provider && isProviderId(patch.provider)
+          ? patch.provider
+          : null,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -808,7 +821,7 @@ export function updateProject(
            style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?,
            output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
            music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
-           captions_path = ?, caption_mode = ?
+           captions_path = ?, caption_mode = ?, shotlist_provider = ?
        WHERE id = ?`
     )
     .run(
@@ -835,6 +848,7 @@ export function updateProject(
       next.musicFadeOutSec,
       next.captionsPath,
       next.captionMode,
+      next.provider,
       id
     );
   return getProject(id);

@@ -13,6 +13,7 @@ export default function StudioHome() {
   const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -49,6 +50,27 @@ export default function StudioHome() {
     } catch {
       setError("Could not create the project");
       setCreating(false);
+    }
+  }
+
+  async function onImport(file: File | null) {
+    if (!file) return;
+    setImporting(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.set("file", file);
+      const res = await fetch("/api/shotlist/import", { method: "POST", body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const lines = Array.isArray(data.errors) ? data.errors.filter((line: unknown) => typeof line === "string") : [];
+        throw new Error(lines.length > 0 ? lines.join("\n") : data.error || "Import failed");
+      }
+      const project = data.project as Project;
+      window.location.href = `/projects/${project.id}`;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Import failed");
+      setImporting(false);
     }
   }
 
@@ -177,7 +199,35 @@ export default function StudioHome() {
             </button>
           </div>
         </form>
-        {error && <p className="mt-3 text-sm text-rose-300">{error}</p>}
+        {error && (
+          <p className="mt-3 whitespace-pre-wrap text-sm text-rose-300" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="mt-5 border-t border-[var(--border)] pt-4">
+          <h3 className="text-sm font-semibold text-white">Import shot list</h3>
+          <p className="mt-1 max-w-2xl text-xs leading-relaxed text-[var(--muted)]">
+            Upload a zip of shotlist.json and its stills, or the JSON file when those stills sit
+            beside it. The whole file is checked first. Every problem is listed, and nothing is
+            created until the file is valid. This always makes a new project. It does not overwrite
+            one you already have. Sexual content involving a minor is refused before anything is
+            stored.
+          </p>
+          <label className="btn-ghost mt-3 inline-flex cursor-pointer">
+            {importing ? "Importing…" : "Choose shot list"}
+            <input
+              type="file"
+              accept=".zip,.json,application/zip,application/json"
+              className="sr-only"
+              disabled={importing}
+              onChange={(e) => {
+                const file = e.target.files?.[0] ?? null;
+                e.target.value = "";
+                void onImport(file);
+              }}
+            />
+          </label>
+        </div>
       </section>
 
       <section className="space-y-3">

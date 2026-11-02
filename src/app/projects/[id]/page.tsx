@@ -27,6 +27,7 @@ import {
   FinishView,
   APPROVED_MISMATCH_NOTE,
   EDIT_EXPORT_HONESTY,
+  SHOTLIST_HONESTY,
   AppSettings,
   CHAIN_FRAME_BACK_CHOICES,
   CHAIN_HONESTY,
@@ -193,6 +194,7 @@ export default function ProjectStudioPage() {
   const [exporting, setExporting] = useState(false);
   const [stitchGate, setStitchGate] = useState(false);
   const [editExporting, setEditExporting] = useState(false);
+  const [shotListExporting, setShotListExporting] = useState(false);
   const [stitch, setStitch] = useState<StitchResponse | null>(null);
   const [previewCut, setPreviewCut] = useState<StitchResponse | null>(null);
   const [seamBusyId, setSeamBusyId] = useState<string | null>(null);
@@ -675,6 +677,31 @@ export default function ProjectStudioPage() {
     }
   }
 
+  async function onExportShotList() {
+    setShotListExporting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/export/shotlist`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Shot list export failed");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const header = res.headers.get("Content-Disposition") || "";
+      const named = /filename="([^"]+)"/.exec(header);
+      link.href = url;
+      link.download = named?.[1] || "shotlist.zip";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Shot list export failed");
+    } finally {
+      setShotListExporting(false);
+    }
+  }
+
   async function onPreviewSeam(shotId: string) {
     setSeamBusyId(shotId);
     setError(null);
@@ -1059,6 +1086,25 @@ export default function ProjectStudioPage() {
             {editExporting ? "Packing…" : "Export for edit"}
           </button>
           <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{EDIT_EXPORT_HONESTY}</p>
+          <p className="mt-3 text-xs leading-relaxed text-[var(--muted)]">
+            Export shot list downloads a zip of shotlist.json and the stills. It is the list, not
+            the rendered takes. A later import makes a new project.
+          </p>
+          <button
+            type="button"
+            className="btn-ghost mt-3 w-full"
+            disabled={shotListExporting || shots.length === 0}
+            onClick={() => void onExportShotList()}
+          >
+            {shotListExporting ? "Packing…" : "Export shot list"}
+          </button>
+          {project.provider && (
+            <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">
+              This shot list names {CAPABILITY[project.provider].title}. Render all still uses the
+              provider in Settings.
+            </p>
+          )}
+          <p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{SHOTLIST_HONESTY}</p>
         </article>
       </section>
 

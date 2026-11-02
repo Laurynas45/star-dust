@@ -18,6 +18,10 @@ export function isComfyWorkflowId(value: unknown): value is ComfyWorkflowId {
   return value === "svd" || value === "wan" || value === "wan-flf" || value === "ltx";
 }
 
+export function isProviderId(value: unknown): value is ProviderId {
+  return value === "mock" || value === "fal" || value === "replicate" || value === "comfyui";
+}
+
 export type JobStatus =
   | "queued"
   | "running"
@@ -94,6 +98,11 @@ export interface Project {
   captionsPath?: string;
   /** Null until an SRT is imported. Burn-in or a sidecar file. */
   captionMode: CaptionMode | null;
+  /**
+   * Provider named on an imported shot list. Null on a project made in the studio.
+   * Render all still uses the provider in Settings. Export writes this when it is set.
+   */
+  provider: ProviderId | null;
 }
 
 export interface Shot {
@@ -523,6 +532,9 @@ export interface FinishView {
 
 export const CONFORM_HONESTY =
   "Frame rate changes by duplicating or dropping frames, not by speeding a clip up. Letterbox and pillarbox keep the picture from being stretched. This does not lock a character, lip-sync, or build a long film.";
+
+export const SHOTLIST_HONESTY =
+  "Export shot list zips shotlist.json and the stills it names. The schema is stardust.shotlist/1. API keys, auth headers, environment values, billing rates, and payment or license data are not written. Import creates a new project after the whole file is checked. It does not overwrite a project. This does not lock a character, lip-sync, or build a long film.";
 
 export const EDIT_EXPORT_HONESTY =
   "Export for edit zips the chosen take of each shot: the approved take when one is set, otherwise the current take. Names look like SH010_v03.mp4, so a newer version does not overwrite an earlier file. The CMX3600 EDL follows the shot list, with the same hard cuts and crossfade lengths as the stitch, at the conformed frame rate. It carries cuts, dissolves, and in/out only. It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering codec. When the project has an SRT, the zip includes captions.srt with times snapped to that conformed frame rate. The zip also includes contact-sheet.png, one thumbnail per shot labelled with the shot id, take version, provider, seed, and duration. This does not lock a character, lip-sync, or build a long film.";

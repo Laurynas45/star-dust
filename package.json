@@ -10,6 +10,7 @@
     "start": "next start",
     "lint": "next lint",
     "demo": "tsx scripts/demo.ts",
+    "render:shotlist": "tsx scripts/render-shotlist.ts",
     "test:providers": "tsx scripts/test-providers.ts"
   },
   "dependencies": {

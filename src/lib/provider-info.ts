@@ -109,6 +109,18 @@ export function comfyModelName(workflow: ComfyWorkflowId, lowMemory: boolean): s
   return lowMemory ? `${base}${LOW_MEMORY_MARK}` : base;
 }
 
+/** Title written into a shot list. The internal id is not the file's name. */
+export function comfyWorkflowTitle(id: ComfyWorkflowId): string {
+  return COMFY_WORKFLOWS[id].title;
+}
+
+export function comfyWorkflowIdByTitle(title: string): ComfyWorkflowId | null {
+  const found = COMFY_WORKFLOW_ORDER.find((id) => COMFY_WORKFLOWS[id].title === title);
+  return found ?? null;
+}
+
+export const COMFY_WORKFLOW_TITLES = COMFY_WORKFLOW_ORDER.map((id) => COMFY_WORKFLOWS[id].title);
+
 export function comfyWorkflowFromModelName(modelName?: string): ComfyWorkflowId | null {
   if (!modelName) return null;
   if (modelName.includes("FLF2V")) return "wan-flf";
