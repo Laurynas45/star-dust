@@ -4935,6 +4935,339 @@ async function main() {
   assert(/does not redraw the picture/i.test(seedBackendNote("mock")), "Mock says the seed does not redraw the picture");
   assert(!/character lock|lip-sync|long film/i.test(`${seedBackendNote("fal")} ${seedBackendNote("mock")}`), "seed copy makes no film promise");
 
+  const shotlist = await import("../src/lib/shotlist");
+  const { MINOR_SEXUAL_REFUSAL } = await import("../src/lib/safety");
+  storage.saveSettings({
+    provider: "comfyui",
+    comfyuiWorkflow: "svd",
+    comfyLowMemory: false,
+    budgetCap: 12345.67,
+    rates: { fal: { "fal-ai/minimax/video-01/image-to-video": 987.654321 }, replicate: {} },
+  });
+  const trip = storage.createProject("Round trip", "A list to share");
+  storage.updateProject(trip.id, {
+    styleBase: "cool dusk grade",
+    seamMode: "crossfade",
+    seamFadeUnit: "frames",
+    seamFadeFrames: 8,
+    seamFadeSec: 0.5,
+    chainTrimStartFrames: 2,
+    outputFps: 24,
+    outputWidth: 1280,
+    outputHeight: 720,
+    comfyuiWorkflow: "wan",
+    comfyLowMemory: true,
+    characterSheetPath: "uploads/secret-sheet.png",
+  });
+  const tripA = storage.saveUpload(trip.id, "trip-a.png", solidPng(dataDir, "trip-a.png", "navy"));
+  const tripB = storage.saveUpload(trip.id, "trip-b.png", solidPng(dataDir, "trip-b.png", "teal"));
+  const tripEnd = storage.saveUpload(trip.id, "trip-end.png", solidPng(dataDir, "trip-end.png", "olive"));
+  const trip1 = storage.createShot({
+    projectId: trip.id,
+    prompt: "Lanterns over the water",
+    presetId: "slow-zoom-in",
+    durationSec: 4,
+    startImagePath: tripA,
+  });
+  storage.updateShot(trip1.id, { seed: 4242, seedPinned: true });
+  const trip2 = storage.createShot({
+    projectId: trip.id,
+    prompt: "The camera drifts along the pier",
+    presetId: "pan-right",
+    durationSec: 3,
+    startImagePath: tripA,
+    endImagePath: tripEnd,
+    chainFromPrevious: true,
+    chainFrameBack: 3,
+    comfyuiWorkflow: "ltx",
+    comfyLowMemory: false,
+  });
+  storage.updateShot(trip2.id, {
+    seed: 99,
+    seedPinned: false,
+    chainTrimStartFrames: 0,
+    seamMode: "crossfade",
+    seamFadeUnit: "seconds",
+    seamFadeSec: 0.75,
+  });
+  const trip3 = storage.createShot({
+    projectId: trip.id,
+    prompt: "Hold on the dock lights",
+    presetId: "dramatic-push",
+    durationSec: 2,
+    startImagePath: tripB,
+  });
+  storage.updateShot(trip3.id, { enabled: false, seed: 7, seedPinned: true });
+  const tripShotIds = storage.listShots(trip.id).map((shot) => shot.id);
+  const beforeSettings = shotlist.renderSettingsOf(trip.id);
+  assert(beforeSettings.provider === "comfyui", "export names the provider in Settings when the project has none");
+  assert(beforeSettings.comfyuiWorkflow === "Wan 2.2 TI2V-5B", "the project workflow is exported by name");
+  assert(beforeSettings.shots[1].comfyuiWorkflow === "LTX-2.3 distilled FP8", "the shot workflow is exported by name");
+  assert(beforeSettings.shots[0].seed === 4242 && beforeSettings.shots[0].seedPinned, "the pinned seed is in the shot list");
+  assert(beforeSettings.shots[2].enabled === false, "a disabled shot stays in the file");
+
+  const shotFalSecret = "fal-secret-SHOULD-NOT-LEAK-9f3a";
+  const shotHeaderSecret = "Bearer header-SHOULD-NOT-LEAK-77";
+  const shotUrlSecret = "https://gpu.example.test/should-not-leak";
+  const shotReplicateSecret = "r8_should-not-leak-token-value";
+  const stripeSecret = "sk_live_SHOULD-NOT-LEAK-xyz987";
+  const paypalSecret = "paypal-SHOULD-NOT-LEAK-qq8877";
+  const licenseSecret = "license-SHOULD-NOT-LEAK-abc12345";
+  process.env.FAL_KEY = shotFalSecret;
+  process.env.COMFYUI_AUTH_HEADER = shotHeaderSecret;
+  process.env.COMFYUI_BASE_URL = shotUrlSecret;
+  process.env.REPLICATE_API_TOKEN = shotReplicateSecret;
+  process.env.STRIPE_SECRET_KEY = stripeSecret;
+  process.env.PAYPAL_CLIENT_SECRET = paypalSecret;
+  process.env.STAR_DUST_LICENSE_KEY = licenseSecret;
+  const packed = await shotlist.packShotList(trip.id);
+  const zip = await JSZip.loadAsync(packed.bytes);
+  const names = Object.keys(zip.files).filter((name) => !zip.files[name].dir).sort();
+  assert(names.includes("shotlist.json"), "the zip contains shotlist.json");
+  assert(names.some((name) => name.startsWith("stills/")), "the zip contains the stills");
+  const shotJson = await zip.file("shotlist.json")!.async("string");
+  const packedText = packed.bytes.toString("utf8");
+  for (const secret of [shotFalSecret, shotHeaderSecret, shotUrlSecret, shotReplicateSecret, stripeSecret, paypalSecret, licenseSecret, "987.654321", "12345.67"]) {
+    assert(!shotJson.includes(secret), `shot list json contains ${secret}`);
+    assert(!packedText.includes(secret), `shot list zip contains ${secret}`);
+  }
+  for (const word of ["FAL_KEY", "REPLICATE_API_TOKEN", "STRIPE_SECRET_KEY", "PAYPAL_CLIENT_SECRET", "STAR_DUST_LICENSE_KEY", "budgetCap", "rates", "uploads/"]) {
+    assert(!shotJson.includes(word), `shot list json contains ${word}`);
+  }
+  assert(shotJson.includes('"schema": "stardust.shotlist/1"'), "the file names the schema");
+  delete process.env.FAL_KEY;
+  delete process.env.COMFYUI_AUTH_HEADER;
+  delete process.env.COMFYUI_BASE_URL;
+  delete process.env.REPLICATE_API_TOKEN;
+  delete process.env.STRIPE_SECRET_KEY;
+  delete process.env.PAYPAL_CLIENT_SECRET;
+  delete process.env.STAR_DUST_LICENSE_KEY;
+
+  storage.saveSettings({ provider: "fal", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  const idsBeforeImport = new Set(storage.listProjects().map((project) => project.id));
+  const importedBundle = await shotlist.bundleFromUpload({ fileName: packed.filename, file: packed.bytes });
+  assert(importedBundle.bundle && importedBundle.errors.length === 0, `zip did not read: ${importedBundle.errors.join(" | ")}`);
+  const imported = shotlist.importShotList(importedBundle.bundle!);
+  assert(imported.ok, `import failed: ${imported.ok ? "" : imported.errors.join(" | ")}`);
+  if (!imported.ok) throw new Error("unreachable");
+  assert(!idsBeforeImport.has(imported.project.id), "import creates a new project id");
+  assert(imported.project.id !== trip.id, "import does not reuse the source project");
+  assert(
+    JSON.stringify(storage.listShots(trip.id).map((shot) => shot.id)) === JSON.stringify(tripShotIds),
+    "import does not rewrite the source shot list"
+  );
+  assert(storage.getSettings().provider === "fal", "import does not change the provider in Settings");
+  const afterSettings = shotlist.renderSettingsOf(imported.project.id);
+  assert(
+    JSON.stringify(beforeSettings) === JSON.stringify(afterSettings),
+    `round trip settings differ\n${JSON.stringify(beforeSettings)}\n${JSON.stringify(afterSettings)}`
+  );
+
+  const bad = {
+    schema: "stardust.shotlist/9",
+    id: "sample-harbor-dusk",
+    name: "Bad",
+    description: "",
+    styleBase: "",
+    provider: "openai",
+    comfyuiWorkflow: "Not a graph",
+    comfyLowMemory: null,
+    output: { fps: null, width: null, height: null },
+    transition: { mode: "cut", fadeSec: 0.5, fadeUnit: "seconds", fadeFrames: 4 },
+    chainTrimStartFrames: 1,
+    shots: [
+      {
+        prompt: "",
+        durationSec: 30,
+        preset: "spin",
+        enabled: true,
+        seed: null,
+        seedPinned: false,
+        images: [{ file: "stills/missing.png", role: "poster" }],
+        chainFromPrevious: true,
+        chainFrameBack: 99,
+        chainTrimStartFrames: 9,
+        transition: { mode: "dissolve", fadeSec: 5, fadeUnit: "seconds", fadeFrames: 4 },
+        comfyuiWorkflow: "wan",
+        comfyLowMemory: "yes",
+      },
+    ],
+  };
+  const idsBeforeBad = storage.listProjects().map((project) => project.id).sort();
+  const uploadNamesBefore = fs.readdirSync(path.join(dataDir, "uploads")).sort();
+  const badImport = shotlist.importShotList({
+    json: JSON.stringify(bad),
+    files: new Map(),
+    source: "json",
+  });
+  assert(!badImport.ok, "a bad shot list is not imported");
+  if (badImport.ok) throw new Error("unreachable");
+  const badText = badImport.errors.join("\n");
+  for (const piece of [
+    "Unknown shot list schema",
+    'field "id"',
+    'Provider "openai"',
+    "Not a graph",
+    "duration is 30",
+    'preset "spin"',
+    'role "poster"',
+    "missing from the shot list files",
+    "cannot chain from a previous shot",
+    "steps back 99",
+    "start-frame trim is 9",
+    'mode "dissolve"',
+    '"wan"',
+    "low-memory preset must be true, false, or null",
+    "prompt is empty",
+  ]) {
+    assert(badText.includes(piece), `bad file did not list: ${piece}\n${badText}`);
+  }
+  assert(badImport.errors.length > 5, "a bad file lists more than one problem");
+  assert(
+    JSON.stringify(storage.listProjects().map((project) => project.id).sort()) === JSON.stringify(idsBeforeBad),
+    "a bad file creates no project"
+  );
+  assert(
+    JSON.stringify(fs.readdirSync(path.join(dataDir, "uploads")).sort()) === JSON.stringify(uploadNamesBefore),
+    "a bad file stores no image"
+  );
+  const sampleAfterBad = storage.getProject("sample-harbor-dusk");
+  assert(sampleAfterBad && storage.listShots(sampleAfterBad.id).length === 2, "a bad file does not overwrite Harbor dusk");
+
+  const minorStill = solidPng(dataDir, "minor-still.png", "gray");
+  const minor = {
+    schema: "stardust.shotlist/1",
+    name: "Refused",
+    description: "",
+    styleBase: "",
+    provider: "mock",
+    comfyuiWorkflow: null,
+    comfyLowMemory: null,
+    output: { fps: null, width: null, height: null },
+    transition: { mode: "cut", fadeSec: 0.5, fadeUnit: "seconds", fadeFrames: 4 },
+    chainTrimStartFrames: 1,
+    shots: [
+      {
+        prompt: "nude child on a beach",
+        durationSec: 2,
+        preset: "slow-zoom-in",
+        enabled: true,
+        seed: 1,
+        seedPinned: false,
+        images: [{ file: "stills/minor-still.png", role: "start" }],
+        chainFromPrevious: false,
+        chainFrameBack: 0,
+        chainTrimStartFrames: null,
+        transition: null,
+        comfyuiWorkflow: null,
+        comfyLowMemory: null,
+      },
+    ],
+  };
+  const idsBeforeMinor = storage.listProjects().map((project) => project.id).sort();
+  const minorImport = shotlist.importShotList({
+    json: JSON.stringify(minor),
+    files: new Map([["stills/minor-still.png", minorStill]]),
+    source: "json",
+  });
+  assert(!minorImport.ok && minorImport.refused, "import refuses sexual content involving a minor");
+  if (minorImport.ok) throw new Error("unreachable");
+  assert(minorImport.errors.includes(MINOR_SEXUAL_REFUSAL), "import uses the existing refusal");
+  assert(
+    JSON.stringify(storage.listProjects().map((project) => project.id).sort()) === JSON.stringify(idsBeforeMinor),
+    "a refused import creates no project"
+  );
+  assert(
+    storage.listProjects().every((project) => storage.listShots(project.id).every((shot) => !shot.prompt.includes("nude child"))),
+    "the refused prompt is not stored"
+  );
+
+  const harbor = await shotlist.loadShotListPath(path.join(process.cwd(), "examples", "harbor-dusk.shotlist.zip"));
+  assert(harbor.bundle && harbor.errors.length === 0, `harbor zip did not read: ${harbor.errors.join(" | ")}`);
+  const harborProjectCount = storage.listProjects().length;
+  const harborImport = shotlist.importShotList(harbor.bundle!);
+  assert(harborImport.ok, `harbor import failed: ${harborImport.ok ? "" : harborImport.errors.join(" | ")}`);
+  if (!harborImport.ok) throw new Error("unreachable");
+  const harborShots = storage.listShots(harborImport.project.id);
+  assert(harborShots.length === 2, "harbor import has two shots");
+  assert(harborShots[0].prompt.startsWith("Slow push"), "harbor keeps the first prompt");
+  assert(harborShots[1].presetId === "pan-right", "harbor keeps the second preset");
+  assert(harborImport.project.id !== "sample-harbor-dusk", "harbor import does not take the sample id");
+  assert(storage.listProjects().length === harborProjectCount + 1, "harbor import adds one project");
+  const folder = await shotlist.loadShotListPath(path.join(process.cwd(), "examples", "harbor-dusk", "shotlist.json"));
+  assert(folder.bundle && folder.errors.length === 0, `harbor folder did not read: ${folder.errors.join(" | ")}`);
+  const folderImport = shotlist.importShotList(folder.bundle!);
+  assert(folderImport.ok, `harbor json import failed: ${folderImport.ok ? "" : folderImport.errors.join(" | ")}`);
+
+  function cliEnv(): NodeJS.ProcessEnv {
+    const env = { ...process.env };
+    for (const key of ["FAL_KEY", "REPLICATE_API_TOKEN", "COMFYUI_BASE_URL", "COMFYUI_AUTH_HEADER", "COMFYUI_AUTH_HEADER_NAME", "STRIPE_SECRET_KEY", "PAYPAL_CLIENT_SECRET", "STAR_DUST_LICENSE_KEY"]) {
+      delete env[key];
+    }
+    return env;
+  }
+  const harborCli = spawnSync(
+    "npm",
+    ["run", "render:shotlist", "--", "examples/harbor-dusk.shotlist.zip"],
+    { encoding: "utf8", cwd: process.cwd(), env: cliEnv() }
+  );
+  assert(harborCli.status === 0, `harbor shot list render failed\n${harborCli.stdout}\n${harborCli.stderr}`);
+  const harborMp4 = /mp4: (\S+)/.exec(harborCli.stdout || "");
+  assert(harborMp4, `harbor render did not print an mp4 path\n${harborCli.stdout}`);
+  assert(fs.existsSync(harborMp4![1]) && fs.statSync(harborMp4![1]).size > 1000, "harbor mp4 is a real file");
+  const harborDur = mediaDuration(harborMp4![1]);
+  assert(harborDur > 7.5 && harborDur < 8.5, `harbor stitch duration ${harborDur} is about 8s`);
+  assert(!/FAL_KEY=|REPLICATE_API_TOKEN=|sk_live|should-not-leak/i.test(harborCli.stdout || ""), "the cli output has no key");
+  assert(/camera motion only/.test(harborCli.stdout || ""), "the cli says Mock is camera motion");
+
+  const harborFirst = spawnSync(
+    "npm",
+    ["run", "render:shotlist", "--", "examples/harbor-dusk.shotlist.zip", "--first"],
+    { encoding: "utf8", cwd: process.cwd(), env: cliEnv() }
+  );
+  assert(harborFirst.status === 0, `harbor --first failed\n${harborFirst.stdout}\n${harborFirst.stderr}`);
+  const firstMp4 = /mp4: (\S+)/.exec(harborFirst.stdout || "");
+  assert(firstMp4 && fs.existsSync(firstMp4[1]), " --first prints an mp4");
+  const firstDur = mediaDuration(firstMp4![1]);
+  assert(firstDur > 3.5 && firstDur < 4.5, `--first duration ${firstDur} is the first shot`);
+  assert(/--first:/.test(harborFirst.stdout || ""), "--first says it rendered one shot");
+
+  const lookDir = fs.mkdtempSync(path.join(os.tmpdir(), "stardust-look-"));
+  const lookStill = solidPng(lookDir, "look.png", "purple");
+  fs.mkdirSync(path.join(lookDir, "stills"), { recursive: true });
+  fs.copyFileSync(path.join(lookDir, "look.png"), path.join(lookDir, "stills", "look.png"));
+  const lookDoc = {
+    ...minor,
+    name: "Look check",
+    provider: "fal",
+    shots: [
+      {
+        ...minor.shots[0],
+        prompt: "A purple card on a table",
+        durationSec: 1,
+        images: [{ file: "stills/look.png", role: "start" }],
+      },
+    ],
+  };
+  fs.writeFileSync(path.join(lookDir, "shotlist.json"), JSON.stringify(lookDoc));
+  const lookZip = new JSZip();
+  lookZip.file("shotlist.json", fs.readFileSync(path.join(lookDir, "shotlist.json")));
+  lookZip.file("stills/look.png", lookStill);
+  fs.writeFileSync(path.join(lookDir, "look.shotlist.zip"), await lookZip.generateAsync({ type: "nodebuffer" }));
+  const lookCli = spawnSync(
+    "npm",
+    ["run", "render:shotlist", "--", path.join(lookDir, "look.shotlist.zip"), "--first"],
+    { encoding: "utf8", cwd: process.cwd(), env: cliEnv() }
+  );
+  assert(lookCli.status === 0, `named fal still renders on Mock\n${lookCli.stdout}\n${lookCli.stderr}`);
+  assert(/This file names fal/.test(lookCli.stdout || ""), "the cli says the file names fal");
+  assert(/This run uses Mock/.test(lookCli.stdout || ""), "the cli stays on Mock without a key");
+  assert(!/should-not-leak|sk_live/.test(lookCli.stdout || ""), "the fal note does not print a key");
+  const lookMp4 = /mp4: (\S+)/.exec(lookCli.stdout || "");
+  assert(lookMp4 && fs.existsSync(lookMp4[1]), "the fal-named file still writes an mp4");
+
+  storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+
   console.log("provider checks ok");
   console.log(dataDir);
 }

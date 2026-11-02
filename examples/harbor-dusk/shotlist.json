@@ -1,0 +1,63 @@
+{
+  "schema": "stardust.shotlist/1",
+  "name": "Harbor dusk",
+  "description": "Sample shot list. Render all with Mock — camera motion only, ffmpeg Ken Burns, no API key and no GPU. Export stitches completed clips into one mp4.",
+  "styleBase": "",
+  "provider": "mock",
+  "comfyuiWorkflow": null,
+  "comfyLowMemory": null,
+  "output": {
+    "fps": null,
+    "width": null,
+    "height": null
+  },
+  "transition": {
+    "mode": "cut",
+    "fadeSec": 0.5,
+    "fadeUnit": "seconds",
+    "fadeFrames": 4
+  },
+  "chainTrimStartFrames": 1,
+  "shots": [
+    {
+      "prompt": "Slow push toward the lanterns as the tide slides under the pier.",
+      "durationSec": 4,
+      "preset": "slow-zoom-in",
+      "enabled": true,
+      "seed": null,
+      "seedPinned": false,
+      "images": [
+        {
+          "file": "stills/harbor-dusk.png",
+          "role": "start"
+        }
+      ],
+      "chainFromPrevious": false,
+      "chainFrameBack": 0,
+      "chainTrimStartFrames": null,
+      "transition": null,
+      "comfyuiWorkflow": null,
+      "comfyLowMemory": null
+    },
+    {
+      "prompt": "The camera drifts right along the water as the sky cools.",
+      "durationSec": 4,
+      "preset": "pan-right",
+      "enabled": true,
+      "seed": null,
+      "seedPinned": false,
+      "images": [
+        {
+          "file": "stills/harbor-dusk.png",
+          "role": "start"
+        }
+      ],
+      "chainFromPrevious": false,
+      "chainFrameBack": 0,
+      "chainTrimStartFrames": null,
+      "transition": null,
+      "comfyuiWorkflow": null,
+      "comfyLowMemory": null
+    }
+  ]
+}
