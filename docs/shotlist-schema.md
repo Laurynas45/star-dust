@@ -16,7 +16,7 @@ Mock is camera motion on the still, not AI motion. The file does not lock a char
 npm run render:shotlist -- examples/harbor-dusk.shotlist.zip
 ```
 
-That imports into a temporary project, renders with Mock, stitches, and prints the mp4 path. No API key and no server. `--first` renders and stitches only the first enabled shot. If the file names fal, Replicate, or ComfyUI, the command still uses Mock unless `--provider` is set and the matching environment value is present (`FAL_KEY`, `REPLICATE_API_TOKEN`, or `COMFYUI_BASE_URL`). It says so when it stays on Mock.
+That imports into a temporary project, prints a Preflight list, renders with Mock, stitches, and prints the mp4 path. No API key and no server. Preflight does not block the render. `--first` renders and stitches only the first enabled shot. If the file names fal, Replicate, or ComfyUI, the command still uses Mock unless `--provider` is set and the matching environment value is present (`FAL_KEY`, `REPLICATE_API_TOKEN`, or `COMFYUI_BASE_URL`). It says so when it stays on Mock.
 
 ## Top level
 

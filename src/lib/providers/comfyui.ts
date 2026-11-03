@@ -5,6 +5,7 @@ import { LTX_FPS, ltxFrameCount, ltxFrameSize } from "../ltx";
 import {
   COMFY_CHECKPOINT,
   LOW_MEMORY_MARK,
+  SVD_LOW_FRAME,
   LTX_CHECKPOINT,
   LTX_TEXT_ENCODER,
   WAN_DIFFUSION,
@@ -501,8 +502,8 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       seed,
       frames,
       fps,
-      width: plan.lowMemory ? 768 : undefined,
-      height: plan.lowMemory ? 448 : undefined,
+      width: plan.lowMemory ? SVD_LOW_FRAME.width : undefined,
+      height: plan.lowMemory ? SVD_LOW_FRAME.height : undefined,
     });
   }
 

@@ -5,12 +5,14 @@ import { planTakeConform } from "@/lib/conform";
 import { planProjectFinish } from "@/lib/finish-plan";
 import { finishedTake } from "@/lib/continuity";
 import { planJoin } from "@/lib/join";
+import { preflightStoredProject } from "@/lib/preflight-run";
 import { probeClipShape } from "@/lib/ffmpeg";
 import { desiredClipKey, effectiveSeed } from "@/lib/input-key";
 import { ensureJobWorker } from "@/lib/providers";
 import {
   deleteProject,
   getProject,
+  getSettings,
   listJobs,
   listShots,
   resolveDataPath,
@@ -119,6 +121,7 @@ export async function GET(
       anyClipAudio: false,
       cutSec: previewSec > 0 ? previewSec : null,
     }),
+    preflight: preflightStoredProject(project, shots, getSettings()),
     shots: shots.map((shot) => ({
       ...shot,
       currentInputKey: desiredClipKey(shot),

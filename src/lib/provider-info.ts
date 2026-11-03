@@ -2,6 +2,15 @@ import { AppSettings, ComfyWorkflowId, ProviderId } from "./types";
 
 export const LOW_MEMORY_MARK = " · low-memory preset";
 
+/** Frame the Mock Ken Burns filter writes. The historic stitch default is the same 1280×720. */
+export const MOCK_FRAME = { width: 1280, height: 720 } as const;
+
+/** Frame written in workflows/comfyui-svd-i2v.api.json. */
+export const SVD_FRAME = { width: 1024, height: 576 } as const;
+
+/** Low-memory size passed into that SVD graph. */
+export const SVD_LOW_FRAME = { width: 768, height: 448 } as const;
+
 /** Checkpoint name inside the shipped SVD ComfyUI API workflow. */
 export const COMFY_CHECKPOINT = "svd_xt_1_1.safetensors";
 
