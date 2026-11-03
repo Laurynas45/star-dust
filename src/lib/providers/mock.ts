@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { runFfmpeg } from "../ffmpeg";
+import { MOCK_FRAME } from "../provider-info";
 import { absoluteOutputPath, getJob, resolveDataPath, updateJob } from "../storage";
 import { presetById } from "../types";
 
@@ -29,10 +30,12 @@ function zoomExprs(presetId: string, zoom: number, frames: number) {
 
 function zoompan(presetId: string, zoom: number, frames: number, fps: number): string {
   const expr = zoomExprs(presetId, zoom, frames);
+  const width = MOCK_FRAME.width;
+  const height = MOCK_FRAME.height;
   return [
-    "scale=1280:720:force_original_aspect_ratio=increase",
-    "crop=1280:720",
-    `zoompan=z='${expr.z}':x='${expr.x}':y='${expr.y}':d=${frames}:s=1280x720:fps=${fps}`,
+    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+    `crop=${width}:${height}`,
+    `zoompan=z='${expr.z}':x='${expr.x}':y='${expr.y}':d=${frames}:s=${width}x${height}:fps=${fps}`,
     "format=yuv420p",
   ].join(",");
 }

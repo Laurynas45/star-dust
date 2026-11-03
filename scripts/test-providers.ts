@@ -244,7 +244,261 @@ function listen(handler: http.RequestListener): Promise<{ url: string; close: ()
   });
 }
 
+async function checkPreflight() {
+  const preflight = await import("../src/lib/preflight");
+  const { buildPreflight, formatPreflight, PREFLIGHT_HONESTY, isWanLike } = preflight;
+
+  assert(/do not block a render/.test(PREFLIGHT_HONESTY), "preflight says it does not block");
+  assert(/does not lock a character/i.test(PREFLIGHT_HONESTY), "preflight keeps the character lock out");
+  assert(/lip-sync/i.test(PREFLIGHT_HONESTY) && /long film/i.test(PREFLIGHT_HONESTY), "preflight keeps lip-sync and long film out");
+  assert(/hints about common failure modes/i.test(PREFLIGHT_HONESTY), "preflight calls the notes hints");
+  assert(/do not guarantee/i.test(PREFLIGHT_HONESTY), "preflight does not guarantee a result");
+  assert(isWanLike("comfyui", "wan") && isWanLike("comfyui", "wan-flf"), "Wan graphs are Wan-like");
+  assert(!isWanLike("comfyui", "svd") && !isWanLike("comfyui", "ltx") && !isWanLike("mock", "wan"), "SVD, LTX, and Mock are not Wan-like");
+
+  type ShotPartial = {
+    id?: string;
+    position?: number;
+    prompt?: string;
+    presetId?: string;
+    chainFromPrevious?: boolean;
+    comfyuiWorkflow?: "svd" | "wan" | "wan-flf" | "ltx" | null;
+    comfyLowMemory?: boolean | null;
+    width?: number | null;
+    height?: number | null;
+  };
+  function one(partial: ShotPartial) {
+    return {
+      id: partial.id ?? "s1",
+      position: partial.position ?? 1,
+      prompt: partial.prompt ?? "A lantern on the pier.",
+      presetId: partial.presetId ?? "slow-zoom-in",
+      chainFromPrevious: partial.chainFromPrevious ?? false,
+      comfyuiWorkflow: partial.comfyuiWorkflow ?? null,
+      comfyLowMemory: partial.comfyLowMemory ?? null,
+      width: partial.width === undefined ? 1920 : partial.width,
+      height: partial.height === undefined ? 1080 : partial.height,
+    };
+  }
+  function base(partial: {
+    styleBase?: string;
+    provider?: "mock" | "fal" | "replicate" | "comfyui";
+    outputWidth?: number | null;
+    outputHeight?: number | null;
+    settings?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx"; comfyLowMemory: boolean };
+    project?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | null; comfyLowMemory: boolean | null };
+    shots: ReturnType<typeof one>[];
+  }) {
+    return {
+      styleBase: partial.styleBase ?? "",
+      provider: partial.provider ?? "mock",
+      outputWidth: partial.outputWidth ?? null,
+      outputHeight: partial.outputHeight ?? null,
+      settings: partial.settings ?? { comfyuiWorkflow: "svd" as const, comfyLowMemory: false },
+      project: partial.project ?? { comfyuiWorkflow: null, comfyLowMemory: null },
+      shots: partial.shots,
+    };
+  }
+
+  const quiet = buildPreflight(base({ shots: [one({})] }));
+  assert(quiet.notes.length === 0, `a 1920×1080 Mock still should be quiet: ${quiet.notes.map((note) => note.note).join(" | ")}`);
+  assert(formatPreflight(quiet).includes("Preflight: no notes."), "an empty report says there are no notes");
+  assert(quiet.honesty === PREFLIGHT_HONESTY, "the report carries the honesty line");
+
+  const harborShots = [
+    one({
+      id: "h1",
+      position: 1,
+      prompt: "Slow push toward the lanterns as the tide slides under the pier.",
+      presetId: "slow-zoom-in",
+      width: 960,
+      height: 540,
+    }),
+    one({
+      id: "h2",
+      position: 2,
+      prompt: "The camera drifts right along the water as the sky cools.",
+      presetId: "pan-right",
+      width: 960,
+      height: 540,
+    }),
+  ];
+  const harbor = buildPreflight(base({ shots: harborShots }));
+  assert(harbor.notes.length === 2, `Harbor should have two size notes: ${harbor.notes.map((note) => note.code + " " + note.note).join(" | ")}`);
+  assert(
+    harbor.notes.every((note) => note.code === "still-small" && note.note.includes("960×540") && note.note.includes("1280×720")),
+    "Harbor notes name the still and Mock's frame"
+  );
+  assert(harbor.list.length === 0, "Harbor shots are not chained, so the list has no boundary notes");
+  assert(harbor.shots[0].notes.length === 1 && harbor.shots[1].notes.length === 1, "each Harbor shot has its own note");
+  assert(
+    JSON.stringify(harbor) === JSON.stringify(buildPreflight(base({ shots: harborShots }))),
+    "the same inputs produce the same report"
+  );
+  for (const note of harbor.notes) {
+    assert(/hint/i.test(note.reason) && /not a guarantee/i.test(note.reason), `reason stays a hint: ${note.reason}`);
+    assert(note.fix.length > 0, "each note suggests a fix");
+    assert(!/FAL_KEY|REPLICATE_API_TOKEN|was not started/.test(`${note.note} ${note.reason} ${note.fix}`), "a note does not mention a key or block the job");
+  }
+  const harborText = formatPreflight(harbor);
+  assert(harborText.startsWith("Preflight\n"), "the cli text starts with Preflight");
+  assert(harborText.includes("Reason:") && harborText.includes("Fix:") && harborText.includes("960×540"), "the cli text has the reason, the fix, and the size");
+
+  const square = buildPreflight(base({ shots: [one({ width: 1000, height: 1000 })] }));
+  assert(square.notes.some((note) => note.code === "still-small"), "a small square still is scaled up");
+  assert(square.notes.some((note) => note.code === "aspect" && /cropped/i.test(note.note)), "a square still is cropped to fill 16:9");
+
+  const padded = buildPreflight(
+    base({ outputWidth: 1080, outputHeight: 1080, shots: [one({ width: 1920, height: 1080 })] })
+  );
+  assert(!padded.notes.some((note) => note.code === "still-small"), "a 1920×1080 still is not too small for Mock");
+  assert(
+    padded.notes.some((note) => note.code === "aspect" && /1080×1080/.test(note.note) && /pads/i.test(note.reason)),
+    "a square project output pads the Mock clip"
+  );
+  assert(!padded.notes.some((note) => /cropped/i.test(note.note)), "a 16:9 still is not cropped by Mock");
+
+  function at(
+    provider: "mock" | "fal" | "replicate" | "comfyui",
+    workflow: "svd" | "wan" | "wan-flf" | "ltx",
+    width: number,
+    height: number
+  ) {
+    return buildPreflight(
+      base({
+        provider,
+        settings: { comfyuiWorkflow: workflow, comfyLowMemory: false },
+        shots: [one({ width, height })],
+      })
+    );
+  }
+  assert(!at("mock", "svd", 960, 540).notes.some((note) => note.code === "divisible-16"), "Mock does not warn about multiples of 16");
+  assert(!at("comfyui", "svd", 960, 540).notes.some((note) => note.code === "divisible-16"), "SVD does not warn about multiples of 16");
+  assert(!at("comfyui", "ltx", 960, 540).notes.some((note) => note.code === "divisible-16"), "LTX does not warn about multiples of 16");
+  assert(!at("fal", "wan", 960, 540).notes.some((note) => note.code === "divisible-16"), "fal does not warn about multiples of 16");
+  const wan = at("comfyui", "wan", 960, 540);
+  assert(
+    wan.notes.some(
+      (note) =>
+        note.code === "divisible-16" &&
+        /540/.test(note.note) &&
+        /multiple of 32/.test(note.reason) &&
+        /does not mean the job will fail/.test(note.reason)
+    ),
+    `Wan names the snap: ${wan.notes.map((note) => note.reason).join(" | ")}`
+  );
+  assert(!wan.notes.some((note) => note.code === "still-small"), "960×540 is not smaller than the Wan box");
+  assert(at("comfyui", "wan-flf", 960, 540).notes.some((note) => note.code === "divisible-16"), "first-last Wan uses the same divisible-by-16 note");
+  const fitted = at("comfyui", "wan", 832, 480);
+  assert(fitted.notes.length === 0, `832×480 on Wan should be quiet: ${fitted.notes.map((note) => note.note).join(" | ")}`);
+  const shotWan = buildPreflight(
+    base({
+      provider: "comfyui",
+      settings: { comfyuiWorkflow: "svd", comfyLowMemory: false },
+      shots: [one({ width: 960, height: 540, comfyuiWorkflow: "wan" })],
+    })
+  );
+  assert(shotWan.notes.some((note) => note.code === "divisible-16"), "a shot Wan graph overrides the SVD default");
+  const shotSvd = buildPreflight(
+    base({
+      provider: "comfyui",
+      settings: { comfyuiWorkflow: "svd", comfyLowMemory: false },
+      project: { comfyuiWorkflow: "wan", comfyLowMemory: null },
+      shots: [one({ width: 960, height: 540, comfyuiWorkflow: "svd" })],
+    })
+  );
+  assert(!shotSvd.notes.some((note) => note.code === "divisible-16"), "a shot SVD graph does not get the Wan note");
+  const tinyWan = at("comfyui", "wan", 320, 240);
+  assert(tinyWan.notes.some((note) => note.code === "still-small" && /832×480/.test(note.note)), "a small still is under the Wan box");
+  assert(!tinyWan.notes.some((note) => note.code === "divisible-16"), "320×240 is divisible by 16");
+
+  const falQuiet = buildPreflight(base({ provider: "fal", shots: [one({ width: 960, height: 540 })] }));
+  assert(falQuiet.notes.length === 0, "fal with no project size does not invent a frame");
+  const falSmall = buildPreflight(
+    base({ provider: "fal", outputWidth: 1920, outputHeight: 1080, shots: [one({ width: 960, height: 540 })] })
+  );
+  assert(falSmall.notes.some((note) => note.code === "still-small" && /1920×1080/.test(note.note)), "fal compares the still with the project output");
+  assert(!falSmall.notes.some((note) => note.code === "aspect"), "960×540 and 1920×1080 share an aspect");
+
+  function prompted(prompt: string, styleBase = "") {
+    return buildPreflight(base({ styleBase, shots: [one({ prompt, width: 1920, height: 1080 })] })).notes;
+  }
+  assert(prompted("The camera orbits the lantern.").some((note) => note.code === "orbit" && /orbit/i.test(note.note)), "orbit is a prompt note");
+  assert(prompted("A fly-through of the harbor at dusk.").some((note) => note.code === "orbit"), "fly-through is the same kind of note");
+  assert(prompted("Slow push toward the lanterns as the tide slides under the pier.").length === 0, "a slow push is not a prompt risk");
+  assert(prompted("The camera drifts right along the water as the sky cools.").length === 0, "a drift is not a prompt risk");
+  assert(prompted("Two boats fight in the channel.").some((note) => note.code === "fast-action"), "a fight is a prompt note");
+  assert(!prompted("A punch in toward the lantern.").some((note) => note.code === "fast-action"), "punch in is a camera move, not a fight");
+  assert(prompted("A close-up of her hands on the rope.").some((note) => note.code === "hands"), "hands in close-up are a prompt note");
+  assert(!prompted("Her hand rests on the rope.").some((note) => note.code === "hands"), "a hand that is not in close-up is quiet");
+  assert(!prompted("A close-up handheld view of the pier.").some((note) => note.code === "hands"), "handheld is not a hand");
+  assert(prompted("An animated logo on the sail.").some((note) => note.code === "moving-text"), "an animated logo is a prompt note");
+  assert(!prompted("The logo on the sail stays put.").some((note) => note.code === "moving-text"), "a still logo is quiet");
+  assert(prompted("She lifts the lantern. She turns toward the water.").some((note) => note.code === "several-actions"), "two sentences are several actions");
+  assert(prompted("She lifts the lantern then turns toward the water.").some((note) => note.code === "several-actions"), "then splits an action");
+  assert(!prompted("Slow push toward the lanterns as the tide slides under the pier.").some((note) => note.code === "several-actions"), "one sentence is one action");
+  assert(prompted("A lantern on the pier.", "orbit the harbor").some((note) => note.code === "orbit"), "the style base is part of the prompt the provider sees");
+  const missingStill = buildPreflight(
+    base({ shots: [one({ prompt: "The camera orbits the lantern.", width: null, height: null })] })
+  );
+  assert(missingStill.notes.length === 1 && missingStill.notes[0].code === "orbit", "a missing still still checks the prompt");
+
+  function pair(left: ShotPartial, right: ShotPartial) {
+    return buildPreflight(
+      base({
+        shots: [
+          one({ id: "a", position: 1, width: 1920, height: 1080, ...left }),
+          one({ id: "b", position: 2, width: 1920, height: 1080, chainFromPrevious: true, ...right }),
+        ],
+      })
+    );
+  }
+  const sizeJump = pair({ prompt: "A wide shot of the pier." }, { prompt: "A close-up of the lantern." });
+  assert(sizeJump.list.some((note) => note.code === "chain-shot-size"), "a chained wide shot into a close-up is a list note");
+  assert(sizeJump.shots[1].notes.some((note) => note.code === "chain-shot-size"), "the boundary note sits on the later shot");
+  assert(!sizeJump.shots[0].notes.some((note) => note.code === "chain-shot-size"), "the earlier shot does not repeat the boundary");
+  assert(!sizeJump.notes.some((note) => note.code === "chain-camera"), "the same zoom preset is not a camera mismatch");
+  const loose = buildPreflight(
+    base({
+      shots: [
+        one({ id: "a", position: 1, prompt: "A wide shot of the pier.", width: 1920, height: 1080 }),
+        one({ id: "b", position: 2, prompt: "A close-up of the lantern.", width: 1920, height: 1080 }),
+      ],
+    })
+  );
+  assert(!loose.notes.some((note) => note.code === "chain-shot-size" || note.code === "chain-camera"), "an unchained pair is not a boundary");
+  const cameraJump = pair(
+    { prompt: "Slow push toward the lanterns.", presetId: "slow-zoom-in" },
+    { prompt: "The camera drifts right along the water.", presetId: "pan-right" }
+  );
+  assert(
+    cameraJump.notes.some((note) => note.code === "chain-camera" && /push toward/i.test(note.note) && /drifts right/i.test(note.note)),
+    "a chained push into a drift is a camera mismatch"
+  );
+  const agreed = pair(
+    { prompt: "dolly in toward the boat", presetId: "pan-right" },
+    { prompt: "the camera pushes in", presetId: "slow-zoom-out" }
+  );
+  assert(!agreed.notes.some((note) => note.code === "chain-camera"), "matching camera phrases ignore the presets");
+  const presetJump = pair(
+    { prompt: "A lantern.", presetId: "slow-zoom-in" },
+    { prompt: "A lantern.", presetId: "pan-right" }
+  );
+  assert(
+    presetJump.notes.some((note) => note.code === "chain-camera" && /Slow Zoom In/.test(note.note) && /Drift Right/.test(note.note)),
+    "presets stand in when the prompt names no camera"
+  );
+  const held = pair(
+    { prompt: "A wide shot as the camera drifts right.", presetId: "pan-right" },
+    { prompt: "A wide shot as the camera drifts right.", presetId: "pan-right" }
+  );
+  assert(!held.notes.some((note) => note.code === "chain-camera" || note.code === "chain-shot-size"), "the same wording is quiet");
+  const medium = pair({ prompt: "A medium close-up of the face." }, { prompt: "A medium close-up of the cup." });
+  assert(!medium.notes.some((note) => note.code === "chain-shot-size"), "medium close-up matches medium close-up");
+}
+
 async function main() {
+  await checkPreflight();
   const safety = await import("../src/lib/safety");
   const storage = await import("../src/lib/storage");
   const uploads = await import("../src/lib/uploads");
@@ -5219,6 +5473,21 @@ async function main() {
   assert(harborDur > 7.5 && harborDur < 8.5, `harbor stitch duration ${harborDur} is about 8s`);
   assert(!/FAL_KEY=|REPLICATE_API_TOKEN=|sk_live|should-not-leak/i.test(harborCli.stdout || ""), "the cli output has no key");
   assert(/camera motion only/.test(harborCli.stdout || ""), "the cli says Mock is camera motion");
+  assert(/Preflight/.test(harborCli.stdout || ""), "the cli prints Preflight");
+  assert(/960×540/.test(harborCli.stdout || ""), "the cli names the Harbor still size");
+  assert(/do not block a render/.test(harborCli.stdout || ""), "the cli says Preflight does not block");
+  assert(!/divisible by 16/.test(harborCli.stdout || ""), "Harbor on Mock has no divisible-by-16 note");
+  const preflightRun = await import("../src/lib/preflight-run");
+  const harborReport = preflightRun.preflightStoredProject(harborImport.project, harborShots, {
+    ...storage.getSettings(),
+    provider: "mock",
+  });
+  assert(
+    harborReport.notes.some((note) => note.code === "still-small" && /960×540/.test(note.note) && /1280×720/.test(note.note)),
+    `Harbor file preflight: ${harborReport.notes.map((note) => note.note).join(" | ")}`
+  );
+  assert(!harborReport.notes.some((note) => note.code === "divisible-16"), "the Harbor file on Mock has no divisible-by-16 note");
+  assert(harborReport.list.length === 0, "the Harbor file has no chain notes");
 
   const harborFirst = spawnSync(
     "npm",

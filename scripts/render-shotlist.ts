@@ -124,6 +124,12 @@ async function main() {
   storage.saveSettings({ provider: run.provider });
 
   const shots = storage.listShots(imported.project.id);
+  const preflightRun = await import("../src/lib/preflight-run");
+  const preflight = await import("../src/lib/preflight");
+  const project = storage.getProject(imported.project.id);
+  if (project) {
+    console.log(preflight.formatPreflight(preflightRun.preflightStoredProject(project, shots, storage.getSettings())));
+  }
   const target = args.first ? shots.find((shot) => shot.enabled !== false) : undefined;
   if (args.first && !target) fail("No enabled shot to render.");
 

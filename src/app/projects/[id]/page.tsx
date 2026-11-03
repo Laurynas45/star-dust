@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
+import type { PreflightReport } from "@/lib/preflight";
 import { chainStaleShotIds } from "@/lib/chain-stale";
 import { joinPlanSummary, projectFadeLabel, type JoinPlan } from "@/lib/join";
 import { reviewStitchPasses } from "@/lib/mixed-pass";
@@ -92,6 +93,7 @@ type Detail = {
   finish?: FinishView;
   previewFinish?: FinishView;
   join?: JoinPlan;
+  preflight?: PreflightReport;
 };
 
 const OUTPUT_FPS_CHOICES = [16, 24, 25, 30] as const;
@@ -112,6 +114,45 @@ function seamLabel(seam: { mode: string; fadeSec: number; frames?: number | null
 function moneyText(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "unknown";
   return String(Math.round(value * 10000) / 10000);
+}
+
+function PreflightNotes(props: { report: PreflightReport | undefined; shotId?: string }) {
+  const report = props.report;
+  if (!report) return null;
+  const notes = props.shotId
+    ? report.shots.find((shot) => shot.shotId === props.shotId)?.notes ?? []
+    : report.notes;
+  if (props.shotId && notes.length === 0) return null;
+  return (
+    <div className={props.shotId ? "mt-2 space-y-2" : "mt-3 space-y-2"} role="status">
+      {!props.shotId && (
+        <div>
+          <p className="font-mono text-[11px] text-violet-300">Preflight</p>
+          <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{report.honesty}</p>
+        </div>
+      )}
+      {notes.length === 0 ? (
+        <p className="text-[11px] leading-relaxed text-[var(--muted)]">No notes for this shot list.</p>
+      ) : (
+        <div className={props.shotId ? "space-y-2" : "max-h-80 space-y-2 overflow-y-auto"}>
+          {notes.map((note) => (
+            <div
+              key={note.id}
+              className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-2"
+            >
+              <p className="text-[11px] leading-relaxed text-amber-50">{note.note}</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                <span className="text-amber-100/80">Reason.</span> {note.reason}
+              </p>
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                <span className="text-amber-100/80">Fix.</span> {note.fix}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ShotCostNote(props: { line: ShotCostLine | undefined }) {
@@ -929,6 +970,7 @@ export default function ProjectStudioPage() {
               ? "Add a shot, then run the list."
               : "Loads a finished clip when its inputs are unchanged, and does not spend again. A chained shot is rendered again when an earlier take in that chain changed, unless that shot is approved. Retake changes one shot's seed and stops at the next approved take."}
           </p>
+          <PreflightNotes report={detail.preflight} />
           <button
             type="button"
             className="btn-primary mt-3 w-full"
@@ -1941,6 +1983,7 @@ export default function ProjectStudioPage() {
                         Provider sees: {effectivePrompt(project.styleBase, shot.prompt)}
                       </p>
                     )}
+                    <PreflightNotes report={detail.preflight} shotId={shot.id} />
                     {index > 0 && (
                       <div className="mt-3 space-y-2">
                         <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
