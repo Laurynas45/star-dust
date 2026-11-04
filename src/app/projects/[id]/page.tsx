@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
+import { ComfyReadinessPanel, ShotComfyNote } from "@/components/ComfyReadinessPanel";
+import type { ComfyServerCheck } from "@/lib/comfy-readiness";
 import type { PreflightReport } from "@/lib/preflight";
 import { chainStaleShotIds } from "@/lib/chain-stale";
 import { joinPlanSummary, projectFadeLabel, type JoinPlan } from "@/lib/join";
@@ -225,6 +227,10 @@ export default function ProjectStudioPage() {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [comfyCheck, setComfyCheck] = useState<ComfyServerCheck | null>(null);
+  const [comfyChecking, setComfyChecking] = useState(false);
+  const [comfyCheckError, setComfyCheckError] = useState<string | null>(null);
+  const [comfyCheckNonce, setComfyCheckNonce] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [ackCost, setAckCost] = useState<CostEstimate | null>(null);
@@ -334,6 +340,52 @@ export default function ProjectStudioPage() {
   }, [startImage]);
 
   const provider: ProviderId = settings?.provider ?? "mock";
+  const comfyKey = useMemo(() => {
+    if (!detail || provider !== "comfyui") return "";
+    const shotKey = detail.shots
+      .map((shot) => `${shot.id}:${shot.comfyuiWorkflow ?? ""}`)
+      .join("|");
+    return `${settings?.comfyuiWorkflow ?? ""}:${detail.project.comfyuiWorkflow ?? ""}:${shotKey}`;
+  }, [detail, provider, settings?.comfyuiWorkflow]);
+
+  useEffect(() => {
+    if (provider !== "comfyui") {
+      setComfyCheck(null);
+      setComfyCheckError(null);
+      setComfyChecking(false);
+      return;
+    }
+    let cancelled = false;
+    setComfyChecking(true);
+    setComfyCheckError(null);
+    void fetch("/api/comfyui/readiness", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId }),
+    })
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as ComfyServerCheck | { error?: string } | null;
+        if (cancelled) return;
+        if (!res.ok || !data || !("workflows" in data)) {
+          setComfyCheck(null);
+          setComfyCheckError("Could not check ComfyUI.");
+          return;
+        }
+        setComfyCheck(data);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setComfyCheck(null);
+          setComfyCheckError("Could not check ComfyUI.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setComfyChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, projectId, comfyKey, comfyCheckNonce]);
   const projectChoice =
     settings && detail
       ? resolveComfyChoice({ settings, project: detail.project, shot: null })
@@ -971,6 +1023,18 @@ export default function ProjectStudioPage() {
               : "Loads a finished clip when its inputs are unchanged, and does not spend again. A chained shot is rendered again when an earlier take in that chain changed, unless that shot is approved. Retake changes one shot's seed and stops at the next approved take."}
           </p>
           <PreflightNotes report={detail.preflight} />
+          {provider === "comfyui" && (
+            <>
+              <ComfyReadinessPanel
+                report={comfyCheck}
+                checking={comfyChecking}
+                onRecheck={() => setComfyCheckNonce((value) => value + 1)}
+              />
+              {comfyCheckError && (
+                <p className="mt-2 text-[11px] leading-relaxed text-rose-100">{comfyCheckError}</p>
+              )}
+            </>
+          )}
           <button
             type="button"
             className="btn-primary mt-3 w-full"
@@ -1525,7 +1589,7 @@ export default function ProjectStudioPage() {
       )}
 
       {error && (
-        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+        <div className="whitespace-pre-wrap rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
           {error}
         </div>
       )}
@@ -1984,6 +2048,12 @@ export default function ProjectStudioPage() {
                       </p>
                     )}
                     <PreflightNotes report={detail.preflight} shotId={shot.id} />
+                    {settings && provider === "comfyui" && (
+                      <ShotComfyNote
+                        report={comfyCheck}
+                        workflow={resolveComfyChoice({ settings, project, shot }).workflow}
+                      />
+                    )}
                     {index > 0 && (
                       <div className="mt-3 space-y-2">
                         <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">

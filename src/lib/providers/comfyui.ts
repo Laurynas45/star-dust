@@ -24,6 +24,8 @@ import {
   resolveDataPath,
   updateJob,
 } from "../storage";
+import { formatQueueRefusal, toPublicCheck, type ComfyCheckSource } from "../comfy-readiness";
+import { assessShippedWorkflows, serverCheck } from "../comfy-readiness-run";
 import { ComfyWorkflowId } from "../types";
 import {
   WAN_FPS,
@@ -414,7 +416,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   if (!initial || (initial.status !== "queued" && initial.status !== "running")) return;
 
   const settings = getSettings();
-  const { base } = resolveComfyBase(settings);
+  const { base, source } = resolveComfyBase(settings);
   const healthUrl = `${base}/system_stats`;
 
   let health: Response;
@@ -443,6 +445,19 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
     if (!endAbs || !fs.existsSync(endAbs)) {
       fail(jobId, `End image not found: ${job.endImagePath}`);
     }
+  }
+
+  const readiness = await checkComfyServer([plan.workflow], { base, source });
+  // Stand-in servers used in tests do not expose /object_info. A real ComfyUI does.
+  // The render API refuses a 404 before a job exists. Here, 404 keeps the older path.
+  if (!(readiness.httpStatus === 404 && !readiness.reachable) && readiness.blocksQueue) {
+    fail(
+      jobId,
+      formatQueueRefusal(readiness, {
+        revealUrl: true,
+        closing: "The job was not left running. ComfyUI was not asked to run this graph.",
+      })
+    );
   }
 
   const bytes = fs.readFileSync(inputAbs);
@@ -643,6 +658,112 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
     outputPath: rel.split(path.sep).join("/"),
     error: undefined,
   });
+}
+
+const DEFAULT_OBJECT_INFO_MS = 15000;
+
+export function objectInfoTimeoutMs(): number {
+  const raw = Number(process.env.STAR_DUST_COMFY_OBJECT_INFO_MS);
+  if (Number.isFinite(raw) && raw >= 200 && raw <= 120_000) return raw;
+  return DEFAULT_OBJECT_INFO_MS;
+}
+
+export type ComfyObjectInfoFetch =
+  | { ok: true; objectInfo: unknown; publicUrl: string }
+  | {
+      ok: false;
+      publicUrl: string;
+      status: number | null;
+      timedOut: boolean;
+      detail: string;
+      timeoutMs: number;
+    };
+
+function isTimeoutError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  if (name === "TimeoutError") return true;
+  const message = err instanceof Error ? err.message : "";
+  return /aborted due to timeout|TimeoutError/i.test(message);
+}
+
+function failureDetail(err: unknown, publicUrl: string): string {
+  const cause =
+    err instanceof Error ? (err as Error & { cause?: { code?: string; message?: string } }).cause : undefined;
+  if (cause?.code) return cause.code;
+  const message = (cause?.message || (err instanceof Error ? err.message : String(err))).split(publicUrl).join("the server");
+  return message.replace(/\s+/g, " ").trim().slice(0, 180) || "request failed";
+}
+
+/** GET /object_info. Times out instead of waiting on a server that accepts and never answers. */
+export async function fetchComfyObjectInfo(base: string): Promise<ComfyObjectInfoFetch> {
+  const timeoutMs = objectInfoTimeoutMs();
+  const root = base.replace(/\/$/, "");
+  const publicUrl = publicComfyUrl(root);
+  const url = `${root}/object_info`;
+  try {
+    const res = await comfyFetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) {
+      return { ok: false, publicUrl, status: res.status, timedOut: false, detail: `HTTP ${res.status}`, timeoutMs };
+    }
+    try {
+      const objectInfo = (await res.json()) as unknown;
+      return { ok: true, objectInfo, publicUrl };
+    } catch {
+      return { ok: false, publicUrl, status: res.status, timedOut: false, detail: "body was not JSON", timeoutMs };
+    }
+  } catch (err) {
+    const timedOut = isTimeoutError(err);
+    const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+    return {
+      ok: false,
+      publicUrl,
+      status: null,
+      timedOut,
+      detail: timedOut ? `${seconds}s` : failureDetail(err, publicUrl),
+      timeoutMs,
+    };
+  }
+}
+
+export async function checkComfyServer(
+  ids: readonly ComfyWorkflowId[],
+  override?: { base: string; source: ComfyCheckSource }
+): Promise<ReturnType<typeof serverCheck>> {
+  const resolved = override
+    ? { base: override.base.replace(/\/$/, ""), source: override.source }
+    : resolveComfyBase(getSettings());
+  const fetched = await fetchComfyObjectInfo(resolved.base);
+  if (!fetched.ok) {
+    return serverCheck({
+      reachable: false,
+      url: fetched.publicUrl,
+      source: resolved.source,
+      timedOut: fetched.timedOut,
+      httpStatus: fetched.status,
+      detail: fetched.detail,
+      workflows: [],
+    });
+  }
+  return serverCheck({
+    reachable: true,
+    url: fetched.publicUrl,
+    source: resolved.source,
+    timedOut: false,
+    httpStatus: null,
+    detail: "",
+    workflows: assessShippedWorkflows(ids, fetched.objectInfo),
+  });
+}
+
+/** Refuses a ComfyUI render before any job row is created. Empty means nothing to queue. */
+export async function guardComfyWorkflows(
+  ids: readonly ComfyWorkflowId[]
+): Promise<{ status: number; error: string } | null> {
+  if (ids.length === 0) return null;
+  const report = toPublicCheck(await checkComfyServer(ids));
+  if (!report.blocksQueue) return null;
+  return { status: 400, error: formatQueueRefusal(report) };
 }
 
 export async function probeComfyui(baseUrl: string): Promise<{

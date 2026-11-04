@@ -1,0 +1,158 @@
+{
+  "ImageOnlyCheckpointLoader": {
+    "input": {
+      "required": {
+        "ckpt_name": [
+          ["svd_xt_1_1.safetensors"],
+          { "tooltip": "The name of the checkpoint (model) to load." }
+        ]
+      }
+    },
+    "output": ["MODEL", "CLIP_VISION", "VAE"],
+    "output_is_list": [false, false, false],
+    "output_name": ["MODEL", "CLIP_VISION", "VAE"],
+    "name": "ImageOnlyCheckpointLoader",
+    "display_name": "Image Only Checkpoint Loader (img2vid model)",
+    "description": "",
+    "category": "loaders",
+    "output_node": false
+  },
+  "UNETLoader": {
+    "input": {
+      "required": {
+        "unet_name": [
+          [
+            "wan2.2_ti2v_5B_fp16.safetensors",
+            "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+            "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+          ],
+          { "tooltip": "The name of the diffusion model." }
+        ],
+        "weight_dtype": [["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"], { "advanced": true }]
+      }
+    },
+    "output": ["MODEL"],
+    "output_name": ["MODEL"],
+    "name": "UNETLoader",
+    "display_name": "Load Diffusion Model",
+    "category": "model/loaders",
+    "output_node": false
+  },
+  "CLIPLoader": {
+    "input": {
+      "required": {
+        "clip_name": [["umt5_xxl_fp8_e4m3fn_scaled.safetensors"], {}],
+        "type": [["stable_diffusion", "wan"], {}]
+      }
+    },
+    "output": ["CLIP"],
+    "name": "CLIPLoader",
+    "display_name": "Load CLIP",
+    "category": "model/loaders",
+    "output_node": false
+  },
+  "VAELoader": {
+    "input": {
+      "required": {
+        "vae_name": [["wan2.2_vae.safetensors", "wan_2.1_vae.safetensors"], {}]
+      }
+    },
+    "output": ["VAE"],
+    "name": "VAELoader",
+    "display_name": "Load VAE",
+    "category": "model/loaders",
+    "output_node": false
+  },
+  "CheckpointLoaderSimple": {
+    "input": {
+      "required": {
+        "ckpt_name": [["ltx-2.3-22b-distilled-fp8.safetensors", "other.safetensors"], {}]
+      }
+    },
+    "output": ["MODEL", "CLIP", "VAE"],
+    "output_is_list": [false, false, false],
+    "output_name": ["MODEL", "CLIP", "VAE"],
+    "name": "CheckpointLoaderSimple",
+    "display_name": "Load Checkpoint",
+    "description": "",
+    "category": "loaders",
+    "output_node": false
+  },
+  "LTXAVTextEncoderLoader": {
+    "input": {
+      "required": {
+        "text_encoder": [
+          "COMBO",
+          { "options": ["gemma_3_12B_it_fp4_mixed.safetensors"], "tooltip": "Gemma text encoder." }
+        ],
+        "ckpt_name": ["COMBO", { "options": ["ltx-2.3-22b-distilled-fp8.safetensors"] }],
+        "device": ["COMBO", { "options": ["default", "cpu"], "advanced": true }]
+      }
+    },
+    "output": ["CLIP"],
+    "name": "LTXAVTextEncoderLoader",
+    "display_name": "Load LTXV Audio Text Encoder",
+    "category": "model/loaders",
+    "output_node": false
+  },
+  "LTXVAudioVAELoader": {
+    "input": {
+      "required": {
+        "ckpt_name": ["COMBO", { "options": ["ltx-2.3-22b-distilled-fp8.safetensors"] }]
+      }
+    },
+    "output": ["VAE"],
+    "name": "LTXVAudioVAELoader",
+    "display_name": "Load LTXV Audio VAE",
+    "category": "model/loaders",
+    "output_node": false
+  },
+  "LoadImage": {
+    "input": { "required": { "image": [["star-dust-start.png"], { "image_upload": true }] } },
+    "output": ["IMAGE", "MASK"],
+    "name": "LoadImage",
+    "display_name": "Load Image",
+    "category": "image",
+    "output_node": false
+  },
+  "SVD_img2vid_Conditioning": { "input": { "required": {} }, "name": "SVD_img2vid_Conditioning", "output_node": false },
+  "VideoLinearCFGGuidance": { "input": { "required": {} }, "name": "VideoLinearCFGGuidance", "output_node": false },
+  "KSampler": {
+    "input": {
+      "required": {
+        "model": ["MODEL", {}],
+        "seed": ["INT", { "default": 0, "min": 0, "max": 18446744073709551615 }],
+        "sampler_name": [["euler"], {}]
+      }
+    },
+    "output": ["LATENT"],
+    "name": "KSampler",
+    "display_name": "KSampler",
+    "category": "sampling",
+    "output_node": false
+  },
+  "VAEDecode": { "input": { "required": {} }, "name": "VAEDecode", "output_node": false },
+  "SaveAnimatedWEBP": { "input": { "required": {} }, "name": "SaveAnimatedWEBP", "output_node": true },
+  "ModelSamplingSD3": { "input": { "required": {} }, "name": "ModelSamplingSD3", "output_node": false },
+  "CLIPTextEncode": { "input": { "required": {} }, "name": "CLIPTextEncode", "output_node": false },
+  "Wan22ImageToVideoLatent": { "input": { "required": {} }, "name": "Wan22ImageToVideoLatent", "output_node": false },
+  "WanFirstLastFrameToVideo": { "input": { "required": {} }, "name": "WanFirstLastFrameToVideo", "output_node": false },
+  "KSamplerAdvanced": { "input": { "required": {} }, "name": "KSamplerAdvanced", "output_node": false },
+  "CreateVideo": { "input": { "required": {} }, "name": "CreateVideo", "output_node": false },
+  "SaveVideo": { "input": { "required": {} }, "name": "SaveVideo", "output_node": true },
+  "LTXVPreprocess": { "input": { "required": {} }, "name": "LTXVPreprocess", "output_node": false },
+  "EmptyLTXVLatentVideo": { "input": { "required": {} }, "name": "EmptyLTXVLatentVideo", "output_node": false },
+  "LTXVImgToVideoInplace": { "input": { "required": {} }, "name": "LTXVImgToVideoInplace", "output_node": false },
+  "LTXVEmptyLatentAudio": { "input": { "required": {} }, "name": "LTXVEmptyLatentAudio", "output_node": false },
+  "LTXVConcatAVLatent": { "input": { "required": {} }, "name": "LTXVConcatAVLatent", "output_node": false },
+  "LTXVConditioning": { "input": { "required": {} }, "name": "LTXVConditioning", "output_node": false },
+  "ModelSamplingLTXV": { "input": { "required": {} }, "name": "ModelSamplingLTXV", "output_node": false },
+  "LTXVScheduler": { "input": { "required": {} }, "name": "LTXVScheduler", "output_node": false },
+  "KSamplerSelect": { "input": { "required": {} }, "name": "KSamplerSelect", "output_node": false },
+  "RandomNoise": { "input": { "required": {} }, "name": "RandomNoise", "output_node": false },
+  "CFGGuider": { "input": { "required": {} }, "name": "CFGGuider", "output_node": false },
+  "SamplerCustomAdvanced": { "input": { "required": {} }, "name": "SamplerCustomAdvanced", "output_node": false },
+  "LTXVSeparateAVLatent": { "input": { "required": {} }, "name": "LTXVSeparateAVLatent", "output_node": false },
+  "VAEDecodeTiled": { "input": { "required": {} }, "name": "VAEDecodeTiled", "output_node": false },
+  "WanVideoBlockSwap": { "input": { "required": {} }, "name": "WanVideoBlockSwap", "output_node": false }
+}
