@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { enqueueJob } from "@/lib/providers";
-import { huntShot, quoteHunt } from "@/lib/render";
+import { guardComfyWorkflows } from "@/lib/providers/comfyui";
+import { comfyWorkflowsBeforeHunt, huntShot, quoteHunt } from "@/lib/render";
 import { getShot } from "@/lib/storage";
 import { huntSeedCount } from "@/lib/types";
 
@@ -40,6 +41,8 @@ export async function POST(
   const acknowledgeModel =
     typeof body.acknowledgeModel === "string" ? body.acknowledgeModel : undefined;
   const confirmApproved = body.confirmApproved === true;
+  const block = await guardComfyWorkflows(comfyWorkflowsBeforeHunt(params.shotId, confirmApproved));
+  if (block) return NextResponse.json({ ok: false, ...block }, { status: block.status });
   const result = huntShot(params.shotId, body.count, { acknowledgeModel, confirmApproved });
   if (!result.ok) return NextResponse.json(result, { status: result.status });
   for (const job of result.jobs) enqueueJob(job.id);

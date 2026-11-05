@@ -1,4 +1,4 @@
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import fs from "fs";
 import http from "http";
 import os from "os";
@@ -497,8 +497,348 @@ async function checkPreflight() {
   assert(!medium.notes.some((note) => note.code === "chain-shot-size"), "medium close-up matches medium close-up");
 }
 
+async function checkComfyObjectInfo() {
+  const readiness = await import("../src/lib/comfy-readiness");
+  const run = await import("../src/lib/comfy-readiness-run");
+  const comfy = await import("../src/lib/providers/comfyui");
+  const storage = await import("../src/lib/storage");
+  const info = await import("../src/lib/provider-info");
+  const { SAMPLE_PROJECT_ID } = await import("../src/lib/types");
+  const fixturePath = path.join(process.cwd(), "fixtures", "comfyui", "object-info-shipped.json");
+  const fixture = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Record<string, unknown>;
+  const secret = "super-secret-header-value";
+
+  assert(
+    readiness.modelChoicesFromInput(["MODEL", {}]) === null,
+    "a MODEL socket is not a file list"
+  );
+  assert(
+    JSON.stringify(readiness.modelChoicesFromInput([["svd_xt_1_1.safetensors"], { tooltip: "checkpoint" }])) ===
+      JSON.stringify(["svd_xt_1_1.safetensors"]),
+    "classic object_info lists files in the first element"
+  );
+  assert(
+    JSON.stringify(
+      readiness.modelChoicesFromInput(["COMBO", { options: ["gemma_3_12B_it_fp4_mixed.safetensors"] }])
+    ) === JSON.stringify(["gemma_3_12B_it_fp4_mixed.safetensors"]),
+    "schema nodes list files on COMBO options"
+  );
+  assert(JSON.stringify(readiness.modelChoicesFromInput([[], {}])) === "[]", "an empty combo is a real list");
+  assert(readiness.workflowIdFromFlag("wan22-14b-flf2v") === "wan-flf", "cli workflow flag");
+  assert(/does not promise quality/i.test(readiness.COMFY_CHECK_HONESTY), "the check does not promise quality");
+  assert(/character lock/i.test(readiness.COMFY_CHECK_HONESTY), "the check keeps character lock out");
+  assert(/lip-sync/i.test(readiness.COMFY_CHECK_HONESTY), "the check keeps lip-sync out");
+
+  const empty = readiness.checkComfyReadiness({}, null, []);
+  assert(empty.invalid && empty.blocksQueue, "a bad object_info body blocks the queue");
+
+  function written(
+    workflow: Record<string, { class_type?: string; inputs?: Record<string, unknown>; _meta?: { title?: string } }>,
+    slot: { classType: string; title?: string; input: string; filename: string }
+  ) {
+    const node = Object.values(workflow).find(
+      (item) => item.class_type === slot.classType && (!slot.title || item._meta?.title === slot.title)
+    );
+    assert(Boolean(node), `patched graph is missing ${slot.classType} ${slot.title ?? ""}`);
+    assert(
+      node?.inputs?.[slot.input] === slot.filename,
+      `${slot.classType}.${slot.input} patched ${String(node?.inputs?.[slot.input])}`
+    );
+  }
+  written(
+    comfy.patchWorkflow(comfy.loadWorkflow(), { imageName: "start.png", seed: 1, frames: 14, fps: 6 }),
+    readiness.modelSlotsFor("svd")[0]
+  );
+  for (const slot of readiness.modelSlotsFor("wan")) {
+    written(
+      comfy.patchWanWorkflow(comfy.loadWanWorkflow(), {
+        imageName: "start.png",
+        prompt: "a harbor",
+        seed: 1,
+        frames: 17,
+        width: 832,
+        height: 480,
+        fps: 16,
+      }),
+      slot
+    );
+  }
+  for (const slot of readiness.modelSlotsFor("wan-flf")) {
+    written(
+      comfy.patchWanFlfWorkflow(comfy.loadWanFlfWorkflow(), {
+        startImageName: "start.png",
+        endImageName: "end.png",
+        prompt: "a harbor",
+        seed: 1,
+        frames: 17,
+        width: 640,
+        height: 640,
+        fps: 16,
+      }),
+      slot
+    );
+  }
+  for (const slot of readiness.modelSlotsFor("ltx")) {
+    written(
+      comfy.patchLtxWorkflow(comfy.loadLtxWorkflow(), {
+        imageName: "start.png",
+        prompt: "a harbor",
+        seed: 1,
+        frames: 25,
+        width: 960,
+        height: 544,
+        fps: 24,
+      }),
+      slot
+    );
+  }
+
+  const shipped = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx"], fixture);
+  assert(shipped.every((item) => item.ok), `fixture should pass: ${JSON.stringify(shipped.filter((item) => !item.ok))}`);
+  assert(
+    shipped.every((item) => item.missingModels.length === 0),
+    "LoadImage filenames are not treated as missing models"
+  );
+
+  const missingNodeInfo = JSON.parse(JSON.stringify(fixture)) as Record<string, unknown>;
+  delete missingNodeInfo.WanFirstLastFrameToVideo;
+  const missingNode = readiness.checkComfyReadiness(
+    run.loadShippedWorkflow("wan-flf"),
+    missingNodeInfo,
+    readiness.modelSlotsFor("wan-flf")
+  );
+  const nodeIssue = missingNode.missingNodes.find((item) => item.classType === "WanFirstLastFrameToVideo");
+  assert(missingNode.blocksQueue && nodeIssue, "a removed node blocks the queue");
+  assert(/Update ComfyUI/.test(nodeIssue?.nextStep || ""), "missing node says to update ComfyUI");
+  assert(/Block Swap/.test(nodeIssue?.nextStep || ""), "missing node names a renamed node");
+  assert(/does not install nodes/.test(nodeIssue?.nextStep || ""), "missing node does not offer to install it");
+  assert(!/quality|character lock|lip-sync/i.test(nodeIssue?.nextStep || ""), "missing node makes no quality claim");
+
+  const missingFileInfo = JSON.parse(JSON.stringify(fixture)) as {
+    UNETLoader: { input: { required: { unet_name: [string[], Record<string, unknown>] } } };
+  };
+  missingFileInfo.UNETLoader.input.required.unet_name[0] = missingFileInfo.UNETLoader.input.required.unet_name[0].map(
+    (name) => (name === info.WAN_FLF_HIGH_NOISE ? `nested/${name}` : name)
+  );
+  const missingFile = readiness.checkComfyReadiness(
+    run.loadShippedWorkflow("wan-flf"),
+    missingFileInfo,
+    readiness.modelSlotsFor("wan-flf")
+  );
+  const fileIssue = missingFile.missingModels.find((item) => item.filename === info.WAN_FLF_HIGH_NOISE);
+  assert(missingFile.blocksQueue && fileIssue, "a subfolder listing does not match the filename Star Dust sends");
+  assert(/models\/diffusion_models/.test(fileIssue?.nextStep || ""), "missing file names the diffusion folder");
+  assert(/does not download weights/.test(fileIssue?.nextStep || ""), "missing file does not offer to download it");
+  assert(
+    !missingFile.missingModels.some((item) => item.filename === info.WAN_FLF_LOW_NOISE),
+    "the low-noise file that is listed is not reported"
+  );
+
+  const before = storage.getSettings();
+  const prevTimeout = process.env.STAR_DUST_COMFY_OBJECT_INFO_MS;
+  const prevBase = process.env.COMFYUI_BASE_URL;
+  const prevAuth = process.env.COMFYUI_AUTH_HEADER;
+  delete process.env.COMFYUI_BASE_URL;
+  delete process.env.COMFYUI_AUTH_HEADER;
+
+  function serve(handler: http.RequestListener): Promise<{ url: string; close: () => Promise<void> }> {
+    const server = http.createServer(handler);
+    const sockets = new Set<import("net").Socket>();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    return new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        resolve({
+          url: `http://127.0.0.1:${port}`,
+          close: () =>
+            new Promise((done) => {
+              for (const socket of sockets) socket.destroy();
+              server.close(() => done());
+            }),
+        });
+      });
+    });
+  }
+
+  const servers: Array<{ close: () => Promise<void> }> = [];
+  try {
+    assert((await comfy.guardComfyWorkflows([])) === null, "nothing to queue does not call the server");
+    storage.saveSettings({ provider: "mock" });
+    assert(
+      (await import("../src/lib/render")).comfyWorkflowsBeforeRenderAll(SAMPLE_PROJECT_ID).length === 0,
+      "Mock does not ask for a ComfyUI workflow"
+    );
+
+    let sawAuth = "";
+    const ready = await serve((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (typeof req.headers.authorization === "string") sawAuth = req.headers.authorization;
+      if (req.method === "GET" && url.pathname === "/object_info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(fixture));
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    servers.push(ready);
+    storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: ready.url, comfyuiWorkflow: "wan-flf" });
+    assert((await comfy.guardComfyWorkflows(["svd", "wan", "wan-flf", "ltx"])) === null, "a ready server does not block");
+
+    const broken = await serve((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/object_info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(missingNodeInfo));
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    servers.push(broken);
+    storage.saveSettings({ comfyuiBaseUrl: broken.url });
+    const blocked = await comfy.guardComfyWorkflows(["wan-flf"]);
+    assert(blocked?.status === 400, "missing node refuses the queue");
+    assert(/WanFirstLastFrameToVideo/.test(blocked?.error || ""), "the refusal names the node");
+    assert(/was not queued/.test(blocked?.error || ""), "the refusal says the render was not queued");
+    assert(/Update ComfyUI/.test(blocked?.error || ""), "the refusal says to update ComfyUI");
+    assert(!blocked?.error?.includes(secret), "the refusal does not print a secret");
+
+    const denied = await serve((_req, res) => {
+      res.writeHead(401, { "Content-Type": "text/plain" });
+      res.end(`token ${secret}`);
+    });
+    servers.push(denied);
+    storage.saveSettings({ comfyuiBaseUrl: denied.url });
+    const authBlock = await comfy.guardComfyWorkflows(["svd"]);
+    assert(/HTTP 401/.test(authBlock?.error || ""), `401 message: ${authBlock?.error}`);
+    assert(/COMFYUI_AUTH_HEADER/.test(authBlock?.error || ""), "401 names the env var");
+    assert(!authBlock?.error?.includes(secret), "401 does not echo the header value");
+    assert(/was not queued/.test(authBlock?.error || ""), "401 does not queue");
+
+    process.env.STAR_DUST_COMFY_OBJECT_INFO_MS = "400";
+    const hanging = await serve((_req, res) => {
+      void res;
+    });
+    servers.push(hanging);
+    storage.saveSettings({ comfyuiBaseUrl: hanging.url });
+    const started = Date.now();
+    const hung = await comfy.guardComfyWorkflows(["svd"]);
+    const elapsed = Date.now() - started;
+    assert(elapsed < 5000, `object_info hang took ${elapsed}ms`);
+    assert(/did not answer GET \/object_info/.test(hung?.error || ""), `hang message: ${hung?.error}`);
+    assert(/was not queued/.test(hung?.error || ""), "a hang does not queue");
+    delete process.env.STAR_DUST_COMFY_OBJECT_INFO_MS;
+
+    const shot = storage.listShots(SAMPLE_PROJECT_ID)[0];
+    assert(shot?.startImagePath, "sample shot has a still");
+    const missingSvd = JSON.parse(JSON.stringify(fixture)) as Record<string, unknown>;
+    delete missingSvd.SVD_img2vid_Conditioning;
+    let posted = false;
+    const worker = await serve((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/object_info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(missingSvd));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        posted = true;
+        req.resume();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: "should-not-queue" }));
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    servers.push(worker);
+    storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: worker.url, comfyuiWorkflow: "svd" });
+    const queued = storage.createJob({
+      projectId: SAMPLE_PROJECT_ID,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: shot.presetId,
+      provider: "comfyui",
+      imagePath: shot.startImagePath!,
+      modelName: info.COMFY_MODEL_NAME,
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(queued.id).catch(() => undefined);
+    const failedJob = storage.getJob(queued.id);
+    assert(failedJob?.status === "failed", `missing node job status ${failedJob?.status}`);
+    assert(failedJob?.status !== "running", "missing node job is not left running");
+    assert(!posted, "a missing node is not posted to /prompt");
+    assert(/SVD_img2vid_Conditioning/.test(failedJob?.error || ""), `job error: ${failedJob?.error}`);
+    assert(/not left running/.test(failedJob?.error || ""), "the job says it was not left running");
+
+    const tsxBin = path.join(process.cwd(), "node_modules", ".bin", "tsx");
+    const cliEnv = { ...process.env };
+    delete cliEnv.COMFYUI_BASE_URL;
+    delete cliEnv.COMFYUI_AUTH_HEADER;
+    delete cliEnv.STAR_DUST_COMFY_OBJECT_INFO_MS;
+    const runCli = (args: string[], env: NodeJS.ProcessEnv) =>
+      new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+        const child = spawn(tsxBin, ["scripts/comfy-check.ts", ...args], { cwd: process.cwd(), env });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk) => {
+          stdout += String(chunk);
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr += String(chunk);
+        });
+        child.on("error", reject);
+        child.on("close", (status) => resolve({ status, stdout, stderr }));
+      });
+    const passCli = await runCli(
+      ["--url", ready.url, "--workflow", "wan22-14b-flf2v"],
+      { ...cliEnv, COMFYUI_AUTH_HEADER: secret }
+    );
+    assert(passCli.status === 0, `comfy:check pass failed\n${passCli.stdout}\n${passCli.stderr}`);
+    assert(/Result: pass/.test(passCli.stdout || ""), "the table says pass");
+    assert(/Wan 2\.2 14B FLF2V/.test(passCli.stdout || ""), "the table names the workflow");
+    assert(/does not promise quality/.test(passCli.stdout || ""), "the table keeps the honesty line");
+    assert(!(passCli.stdout || "").includes(secret) && !(passCli.stderr || "").includes(secret), "comfy:check does not print the auth header");
+    assert(sawAuth === secret, "comfy:check sends the auth header");
+
+    const failCli = await runCli(["--url", broken.url, "--workflow", "wan22-14b-flf2v"], cliEnv);
+    assert(failCli.status !== 0, "comfy:check exits non-zero on a missing node");
+    assert(/Result: fail/.test(failCli.stdout || ""), "the table says fail");
+    assert(/models\/diffusion_models|Update ComfyUI/.test(failCli.stdout || ""), "the table includes a next step");
+    assert(!(failCli.stdout || "").includes(secret), "the failing table does not print a secret");
+
+    const downCli = await runCli(["--url", hanging.url], { ...cliEnv, STAR_DUST_COMFY_OBJECT_INFO_MS: "400" });
+    assert(downCli.status !== 0, "comfy:check exits non-zero when the server does not answer");
+    assert(/did not answer GET \/object_info/.test(downCli.stdout || ""), `cli hang:\n${downCli.stdout}\n${downCli.stderr}`);
+  } finally {
+    if (prevTimeout === undefined) delete process.env.STAR_DUST_COMFY_OBJECT_INFO_MS;
+    else process.env.STAR_DUST_COMFY_OBJECT_INFO_MS = prevTimeout;
+    if (prevBase === undefined) delete process.env.COMFYUI_BASE_URL;
+    else process.env.COMFYUI_BASE_URL = prevBase;
+    if (prevAuth === undefined) delete process.env.COMFYUI_AUTH_HEADER;
+    else process.env.COMFYUI_AUTH_HEADER = prevAuth;
+    storage.saveSettings({
+      provider: before.provider,
+      comfyuiBaseUrl: before.comfyuiBaseUrl,
+      comfyuiWorkflow: before.comfyuiWorkflow,
+    });
+    for (const server of servers) await server.close();
+  }
+}
+
 async function main() {
   await checkPreflight();
+  await checkComfyObjectInfo();
   const safety = await import("../src/lib/safety");
   const storage = await import("../src/lib/storage");
   const uploads = await import("../src/lib/uploads");

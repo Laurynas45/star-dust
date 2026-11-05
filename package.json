@@ -11,7 +11,8 @@
     "lint": "next lint",
     "demo": "tsx scripts/demo.ts",
     "render:shotlist": "tsx scripts/render-shotlist.ts",
-    "test:providers": "tsx scripts/test-providers.ts"
+    "test:providers": "tsx scripts/test-providers.ts",
+    "comfy:check": "tsx scripts/comfy-check.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",

@@ -199,6 +199,98 @@ function comfyForShot(shot: Shot, settings: AppSettings) {
   });
 }
 
+function workflowsOf(shots: Shot[]): ComfyWorkflowId[] {
+  const settings = getSettings();
+  const ids: ComfyWorkflowId[] = [];
+  for (const shot of shots) {
+    const id = resolveComfyChoice({
+      settings,
+      project: getProject(shot.projectId),
+      shot,
+    }).workflow;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/** Workflows a ComfyUI Render all would queue. Mock and a fully reused list return none. */
+export function comfyWorkflowsBeforeRenderAll(projectId: string): ComfyWorkflowId[] {
+  const settings = getSettings();
+  if (settings.provider !== "comfyui") return [];
+  const project = getProject(projectId);
+  if (!project) return [];
+  const plan = projectRenderPlan(
+    listShots(projectId),
+    listJobs(projectId),
+    settings.provider,
+    (shot) => modelForShot(shot, settings.provider, settings),
+    project.styleBase
+  );
+  return workflowsOf(plan.filter((item) => item.action === "run").map((item) => item.shot));
+}
+
+export function comfyWorkflowsBeforeRenderShot(
+  shotId: string,
+  opts?: { force?: boolean; confirmApproved?: boolean }
+): ComfyWorkflowId[] {
+  const settings = getSettings();
+  if (settings.provider !== "comfyui") return [];
+  const shot = getShot(shotId);
+  if (!shot) return [];
+  if (shot.approvedJobId && !opts?.confirmApproved) return [];
+  const force = Boolean(opts?.force || opts?.confirmApproved);
+  const decision = classifyShot(
+    shot,
+    listJobs(shot.projectId),
+    settings.provider,
+    modelForShot(shot, settings.provider, settings)
+  );
+  if (decision.action === "skip" && (decision.reason === "inflight" || !force)) return [];
+  return workflowsOf([shot]);
+}
+
+export function comfyWorkflowsBeforeRetake(shotId: string, confirmApproved: boolean): ComfyWorkflowId[] {
+  const settings = getSettings();
+  if (settings.provider !== "comfyui") return [];
+  const shot = getShot(shotId);
+  if (!shot || shot.lockedJobId) return [];
+  if (shot.approvedJobId && !confirmApproved) return [];
+  return workflowsOf(retakeChain(shotId) ?? []);
+}
+
+export function comfyWorkflowsBeforeRetakeAll(projectId: string): ComfyWorkflowId[] {
+  const settings = getSettings();
+  if (settings.provider !== "comfyui") return [];
+  const jobs = listJobs(projectId);
+  const shots = listShots(projectId).filter((shot) => {
+    if (shot.lockedJobId || shot.approvedJobId) return false;
+    if (!shot.seedPinned) return true;
+    const decision = classifyShot(shot, jobs, settings.provider, modelForShot(shot, settings.provider, settings));
+    return decision.action !== "skip";
+  });
+  return workflowsOf(shots);
+}
+
+export function comfyWorkflowsBeforeHunt(shotId: string, confirmApproved: boolean): ComfyWorkflowId[] {
+  const settings = getSettings();
+  if (settings.provider !== "comfyui") return [];
+  const shot = getShot(shotId);
+  if (!shot || shot.lockedJobId) return [];
+  if (shot.approvedJobId && !confirmApproved) return [];
+  return workflowsOf([shot]);
+}
+
+export function comfyWorkflowsBeforeRetry(job: Job): ComfyWorkflowId[] {
+  if (job.provider !== "comfyui") return [];
+  if (job.status === "queued" || job.status === "running") return [];
+  const named = comfyWorkflowFromModelName(job.modelName);
+  if (named) return [named];
+  const settings = getSettings();
+  const shot = job.shotId ? getShot(job.shotId) : undefined;
+  if (!shot) return [settings.comfyuiWorkflow];
+  return workflowsOf([shot]);
+}
+
 function modelForShot(shot: Shot, provider: ProviderId, settings: AppSettings): string {
   return modelNameFor(
     provider,

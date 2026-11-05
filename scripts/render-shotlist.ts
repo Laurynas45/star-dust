@@ -133,6 +133,14 @@ async function main() {
   const target = args.first ? shots.find((shot) => shot.enabled !== false) : undefined;
   if (args.first && !target) fail("No enabled shot to render.");
 
+  const comfy = await import("../src/lib/providers/comfyui");
+  const pendingWorkflows =
+    args.first && target
+      ? render.comfyWorkflowsBeforeRenderShot(target.id)
+      : render.comfyWorkflowsBeforeRenderAll(imported.project.id);
+  const block = await comfy.guardComfyWorkflows(pendingWorkflows);
+  if (block) fail(block.error);
+
   const result = args.first && target ? render.renderShot(target.id) : render.renderAll(imported.project.id);
   if (!result.ok) fail(result.error);
   for (const job of result.jobs) providers.enqueueJob(job.id);

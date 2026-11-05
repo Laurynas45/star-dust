@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ComfyReadinessPanel } from "@/components/ComfyReadinessPanel";
 import { ComfyWorkflowCards } from "@/components/ComfyWorkflowCards";
+import type { ComfyServerCheck } from "@/lib/comfy-readiness";
 import { CAPABILITY, CLOUD_RISK_NOTE, COMFY_WORKFLOWS } from "@/lib/provider-info";
 import {
   AppSettings,
@@ -113,6 +115,8 @@ export default function SettingsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [probeMsg, setProbeMsg] = useState<string | null>(null);
+  const [readiness, setReadiness] = useState<ComfyServerCheck | null>(null);
+  const [checkingComfy, setCheckingComfy] = useState(false);
   const [creditNote, setCreditNote] = useState<string | null>(null);
   const [buying, setBuying] = useState<string | null>(null);
 
@@ -170,14 +174,25 @@ export default function SettingsPage() {
 
   async function probe() {
     if (!settings) return;
-    setProbeMsg("Checking the server…");
-    const res = await fetch("/api/comfyui/probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ baseUrl: settings.comfyuiBaseUrl }),
-    });
-    const data = await res.json();
-    setProbeMsg(data.message);
+    setCheckingComfy(true);
+    setProbeMsg(null);
+    setReadiness(null);
+    try {
+      const res = await fetch("/api/comfyui/readiness", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflow: settings.comfyuiWorkflow }),
+      });
+      const data = (await res.json()) as ComfyServerCheck & { error?: string };
+      if (!res.ok || !data.workflows) {
+        throw new Error(data.error || "Could not check ComfyUI.");
+      }
+      setReadiness(data);
+    } catch (err) {
+      setProbeMsg(err instanceof Error ? err.message : "Could not check ComfyUI.");
+    } finally {
+      setCheckingComfy(false);
+    }
   }
 
   async function refreshBalance() {
@@ -466,7 +481,10 @@ export default function SettingsPage() {
           </p>
           <ComfyWorkflowCards
             selected={settings.comfyuiWorkflow}
-            onSelect={(id) => save({ comfyuiWorkflow: id })}
+            onSelect={(id) => {
+              setReadiness(null);
+              void save({ comfyuiWorkflow: id });
+            }}
           />
           <label className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
             <input
@@ -494,8 +512,13 @@ export default function SettingsPage() {
               onChange={(e) => setSettings({ ...settings, comfyuiBaseUrl: e.target.value })}
               onBlur={() => save({ comfyuiBaseUrl: settings.comfyuiBaseUrl })}
             />
-            <button type="button" className="btn-ghost shrink-0" onClick={() => void probe()}>
-              Check server
+            <button
+              type="button"
+              className="btn-ghost shrink-0"
+              disabled={checkingComfy}
+              onClick={() => void probe()}
+            >
+              {checkingComfy ? "Checking…" : "Check server"}
             </button>
           </div>
           <p className="mt-2 text-xs leading-relaxed text-[var(--muted)]">
@@ -510,6 +533,9 @@ export default function SettingsPage() {
             out-of-memory error fails the job instead of leaving it running.
           </p>
           {probeMsg && <p className="mt-2 text-xs text-white">{probeMsg}</p>}
+          {(readiness || checkingComfy) && (
+            <ComfyReadinessPanel report={readiness} checking={checkingComfy} onRecheck={() => void probe()} />
+          )}
         </div>
       </section>
 
