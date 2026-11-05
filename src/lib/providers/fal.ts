@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { finishRenderedClip } from "../clip-check";
 import { missingKeyMessage } from "../provider-info";
 import {
   absoluteOutputPath,
@@ -127,9 +128,5 @@ export async function runFalGenerate(jobId: string): Promise<void> {
   const { abs, rel } = absoluteOutputPath(job.projectId, `${jobId}.mp4`);
   fs.writeFileSync(abs, buf);
   if (getJob(jobId)?.status === "cancelled") return;
-  updateJob(jobId, {
-    status: "completed",
-    progress: 100,
-    outputPath: rel.split(path.sep).join("/"),
-  });
+  finishRenderedClip(jobId, rel.split(path.sep).join("/"));
 }

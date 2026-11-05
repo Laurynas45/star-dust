@@ -1,6 +1,7 @@
 import fs from "fs";
 import { NextRequest, NextResponse } from "next/server";
 import { approvedTakeMismatch } from "@/lib/approve";
+import { clipFlagLabel, clipHeldFromStitch } from "@/lib/clip-check";
 import { planTakeConform } from "@/lib/conform";
 import { planProjectFinish } from "@/lib/finish-plan";
 import { finishedTake } from "@/lib/continuity";
@@ -88,6 +89,7 @@ export async function GET(
   const shots = listShots(params.id);
   const jobs = listJobs(params.id);
   const conformClips = [];
+  const joinClips: { shotId: string; durationSec: number; held?: boolean; heldDetail?: string }[] = [];
   for (const shot of shots) {
     const job = finishedTake(shot);
     if (!job?.outputPath) continue;
@@ -95,18 +97,20 @@ export async function GET(
     if (!fs.existsSync(abs)) continue;
     try {
       const shape = probeClipShape(abs);
-      conformClips.push({ shotId: shot.id, ...shape });
+      const held = clipHeldFromStitch(job);
+      if (!held) conformClips.push({ shotId: shot.id, ...shape });
+      joinClips.push({
+        shotId: shot.id,
+        durationSec: shape.durationSec,
+        held,
+        heldDetail: held && job.clipCheck ? clipFlagLabel(job.clipCheck) : undefined,
+      });
     } catch {
       continue;
     }
   }
   const conformPlan = planTakeConform(project, conformClips);
-  const join = planJoin(
-    project,
-    shots,
-    conformClips.map((clip) => ({ shotId: clip.shotId, durationSec: clip.durationSec })),
-    conformPlan.fps
-  );
+  const join = planJoin(project, shots, joinClips, conformPlan.fps);
   const cutSec = join.joinedSec > 0 ? join.joinedSec : join.plannedJoinedSec;
   const previewSec = join.plannedJoinedSec;
   return NextResponse.json({

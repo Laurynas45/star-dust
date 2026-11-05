@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { finishRenderedClip } from "../clip-check";
 import { runFfmpeg } from "../ffmpeg";
 import { LTX_FPS, ltxFrameCount, ltxFrameSize } from "../ltx";
 import {
@@ -652,12 +653,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   }
 
   if (getJob(jobId)?.status === "cancelled") return;
-  updateJob(jobId, {
-    status: "completed",
-    progress: 100,
-    outputPath: rel.split(path.sep).join("/"),
-    error: undefined,
-  });
+  finishRenderedClip(jobId, rel.split(path.sep).join("/"));
 }
 
 const DEFAULT_OBJECT_INFO_MS = 15000;

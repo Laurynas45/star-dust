@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { finishRenderedClip } from "../clip-check";
 import { runFfmpeg } from "../ffmpeg";
 import { MOCK_FRAME } from "../provider-info";
 import { absoluteOutputPath, getJob, resolveDataPath, updateJob } from "../storage";
@@ -137,12 +138,7 @@ export async function runMockGenerate(jobId: string): Promise<void> {
     updateJob(jobId, { progress: 55 });
     await runFfmpeg(args, { jobId });
     if (getJob(jobId)?.status === "cancelled") return;
-    updateJob(jobId, {
-      status: "completed",
-      progress: 100,
-      outputPath: outRel.split(path.sep).join("/"),
-      error: undefined,
-    });
+    finishRenderedClip(jobId, outRel.split(path.sep).join("/"));
   } catch (err) {
     if (getJob(jobId)?.status === "cancelled") return;
     const message = err instanceof Error ? err.message : String(err);

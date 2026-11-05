@@ -2,6 +2,7 @@
  * Headless ComfyUI readiness check.
  * npm run comfy:check -- --url http://127.0.0.1:8188 [--workflow wan22-14b-flf2v]
  * Prints a pass/fail table. Exits non-zero when a checked graph would not run.
+ * A Wan VAE pairing note is printed and does not change the exit code.
  * COMFYUI_AUTH_HEADER is sent when set and is never printed.
  */
 

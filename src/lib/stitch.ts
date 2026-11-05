@@ -16,6 +16,7 @@ import {
   masterLoudnormFilter,
   resolveConformTarget,
 } from "./conform";
+import { clipFlagLabel, clipHeldFromStitch } from "./clip-check";
 import { contactVersion, writeContactSheet } from "./contact-sheet";
 import { finishedTake } from "./continuity";
 import {
@@ -438,16 +439,26 @@ function annotateSeam(
 
 function omissionFor(
   shot: Shot,
-  reason: JoinOmission["reason"]
+  reason: JoinOmission["reason"],
+  detail?: string
 ): { skipped: StitchResult["skipped"][number]; omission: JoinOmission } {
   const omission: JoinOmission = {
     shotId: shot.id,
     position: shot.position,
     prompt: shot.prompt,
     reason,
+    detail,
   };
   const phrase =
-    reason === "disabled" ? "disabled" : reason === "missing-file" ? "clip file missing" : "no rendered clip";
+    reason === "disabled"
+      ? "disabled"
+      : reason === "missing-file"
+        ? "clip file missing"
+        : reason === "broken"
+          ? detail
+            ? `a flagged clip (${detail})`
+            : "a flagged clip"
+          : "no rendered clip";
   return {
     omission,
     skipped: {
@@ -474,6 +485,12 @@ export async function stitchProject(projectId: string): Promise<StitchResult> {
     const job = finishedTake(shot);
     if (!job?.outputPath) {
       const item = omissionFor(shot, "no-clip");
+      skipped.push(item.skipped);
+      omissions.push(item.omission);
+      continue;
+    }
+    if (clipHeldFromStitch(job)) {
+      const item = omissionFor(shot, "broken", job.clipCheck ? clipFlagLabel(job.clipCheck) : undefined);
       skipped.push(item.skipped);
       omissions.push(item.omission);
       continue;
@@ -523,6 +540,12 @@ export async function stitchPreview(projectId: string, jobIds: string[]): Promis
       const item = omissionFor(shot, "no-clip");
       skipped.push({ ...item.skipped, reason: item.skipped.reason.replace("no rendered clip", "no rendered preview") });
       omissions.push({ ...item.omission, reason: "no-clip" });
+      continue;
+    }
+    if (clipHeldFromStitch(job)) {
+      const item = omissionFor(shot, "broken", job.clipCheck ? clipFlagLabel(job.clipCheck) : undefined);
+      skipped.push(item.skipped);
+      omissions.push(item.omission);
       continue;
     }
     const abs = resolveDataPath(job.outputPath);
@@ -661,6 +684,7 @@ async function concatClips(
       durationSec: shapes[index]?.durationSec ?? job?.durationSec ?? 0,
       version: job ? contactVersion(pool, part.jobId) : 1,
       preview: Boolean(preview),
+      ...(job?.clipCheck?.flagged ? { flag: clipFlagLabel(job.clipCheck) } : {}),
     };
   });
   fs.writeFileSync(manifestAbs, `${JSON.stringify({ kind, shots: manifestShots }, null, 2)}\n`);
