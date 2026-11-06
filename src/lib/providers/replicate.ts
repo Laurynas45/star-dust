@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { finishRenderedClip } from "../clip-check";
 import { missingKeyMessage } from "../provider-info";
 import {
   absoluteOutputPath,
@@ -124,9 +125,6 @@ export async function runReplicateGenerate(jobId: string): Promise<void> {
   const buf = Buffer.from(await videoRes.arrayBuffer());
   const { abs, rel } = absoluteOutputPath(job.projectId, `${jobId}.mp4`);
   fs.writeFileSync(abs, buf);
-  updateJob(jobId, {
-    status: "completed",
-    progress: 100,
-    outputPath: rel.split(path.sep).join("/"),
-  });
+  if (getJob(jobId)?.status === "cancelled") return;
+  finishRenderedClip(jobId, rel.split(path.sep).join("/"));
 }

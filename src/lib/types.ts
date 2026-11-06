@@ -195,6 +195,36 @@ export interface MotionPreset {
   durationSec: number;
 }
 
+/**
+ * Measured after a clip file is written.
+ * flagged is what the stitch and the UI use. A dark or slow shot can stay unflagged.
+ * Mock clips are not flagged when CI is set. See clip-check.ts for the numbers.
+ */
+export interface ClipCheck {
+  flagged: boolean;
+  /** At least 95% of frames are flat black. */
+  black: boolean;
+  /** Frame-to-frame luma change is at encoder-noise level. */
+  frozen: boolean;
+  /** Plain language. Empty when the clip is not flagged. */
+  status: string;
+  /**
+   * Ordered ComfyUI notes for a flagged clip.
+   * Reported causes of an all-black Wan clip. Not a promise that one of them is this file.
+   */
+  hints: string[];
+  /** The user asked the stitch to include this clip anyway. */
+  includeAnyway: boolean;
+  frames: number;
+  /** Share of frames that were flat black. Present even when Mock in CI is not flagged. */
+  blackFraction: number;
+  /** Mean frame-to-frame luma difference after the first frame. Null when motion was not judged. */
+  meanMotion: number | null;
+}
+
+export const CLIP_CHECK_HONESTY =
+  "This looks at the finished file for a clip that is all black, or nearly all black, and for a clip that does not move. A dark shot or a slow shot can still pass. It does not promise picture quality, a character lock, or lip-sync, and it does not turn the shot list into a long film.";
+
 export interface Job {
   id: string;
   projectId: string;
@@ -211,6 +241,8 @@ export interface Job {
   characterNote?: string;
   providerNote?: string;
   outputPath?: string;
+  /** Set when the file has been inspected. Absent on older rows. */
+  clipCheck?: ClipCheck;
   error?: string;
   createdAt: string;
   updatedAt: string;

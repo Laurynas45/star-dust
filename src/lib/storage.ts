@@ -383,6 +383,9 @@ function migrate(db: DB) {
   if (!hasColumn(db, "projects", "shotlist_provider")) {
     db.exec("ALTER TABLE projects ADD COLUMN shotlist_provider TEXT");
   }
+  if (!hasColumn(db, "jobs", "clip_check")) {
+    db.exec("ALTER TABLE jobs ADD COLUMN clip_check TEXT");
+  }
 }
 
 function seedSample(db: DB) {
@@ -655,7 +658,33 @@ function mapJob(row: Record<string, unknown>): Job {
     awaitPreviousFrame: Number(row.await_previous_frame) === 1,
     seed: row.seed == null || !Number.isFinite(Number(row.seed)) ? undefined : Math.floor(Number(row.seed)),
     inputKey: str(row.input_key),
+    clipCheck: parseClipCheck(row.clip_check),
   };
+}
+
+function parseClipCheck(raw: unknown): Job["clipCheck"] {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  try {
+    const value = JSON.parse(raw) as Partial<NonNullable<Job["clipCheck"]>>;
+    if (!value || typeof value !== "object") return undefined;
+    const hints = Array.isArray(value.hints)
+      ? value.hints.filter((item): item is string => typeof item === "string")
+      : [];
+    const mean = Number(value.meanMotion);
+    return {
+      flagged: value.flagged === true,
+      black: value.black === true,
+      frozen: value.frozen === true,
+      status: typeof value.status === "string" ? value.status : "",
+      hints,
+      includeAnyway: value.includeAnyway === true,
+      frames: Number.isFinite(Number(value.frames)) ? Number(value.frames) : 0,
+      blackFraction: Number.isFinite(Number(value.blackFraction)) ? Number(value.blackFraction) : 0,
+      meanMotion: value.meanMotion == null || !Number.isFinite(mean) ? null : mean,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export function getDataPaths() {
@@ -1260,7 +1289,7 @@ export function updateJob(id: string, patch: Partial<Job>): Job | undefined {
         end_image_path = ?, character_sheet_path = ?, character_note = ?,
         provider_note = ?, output_path = ?, error = ?, progress = ?,
         model_name = ?, duration_sec = ?, remote_id = ?, shot_id = ?,
-        await_previous_frame = ?, updated_at = ?
+        await_previous_frame = ?, clip_check = ?, updated_at = ?
        WHERE id = ?`
     )
     .run(
@@ -1281,6 +1310,7 @@ export function updateJob(id: string, patch: Partial<Job>): Job | undefined {
       next.remoteId ?? null,
       next.shotId ?? null,
       next.awaitPreviousFrame ? 1 : 0,
+      next.clipCheck ? JSON.stringify(next.clipCheck) : null,
       next.updatedAt,
       id
     );

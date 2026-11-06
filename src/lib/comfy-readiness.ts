@@ -49,7 +49,7 @@ export type WorkflowNode = {
 };
 
 export type ReadinessIssue = {
-  kind: "node" | "model";
+  kind: "node" | "model" | "vae";
   classType: string;
   nodeId: string;
   title?: string;
@@ -59,6 +59,8 @@ export type ReadinessIssue = {
   nextStep: string;
 };
 
+export type WanVariant = "5b" | "14b";
+
 export type ComfyReadiness = {
   ok: boolean;
   /** Missing nodes, missing files, or an object_info body that is not a node map. */
@@ -66,6 +68,11 @@ export type ComfyReadiness = {
   invalid: boolean;
   missingNodes: ReadinessIssue[];
   missingModels: ReadinessIssue[];
+  /**
+   * Wan VAE filename does not match the 5B or 14B model.
+   * A note only. It does not block the queue.
+   */
+  vaeWarnings: ReadinessIssue[];
 };
 
 export type ComfyWorkflowCheck = {
@@ -76,6 +83,7 @@ export type ComfyWorkflowCheck = {
   blocksQueue: boolean;
   missingNodes: ReadinessIssue[];
   missingModels: ReadinessIssue[];
+  vaeWarnings: ReadinessIssue[];
 };
 
 export type ComfyCheckSource = "env" | "settings" | "cli";
@@ -181,7 +189,7 @@ export function checkComfyReadiness(
       nextStep:
         "ComfyUI answered GET /object_info, but the body was not a map of node class names. Update ComfyUI and run this check again.",
     };
-    return { ok: false, blocksQueue: true, invalid: true, missingNodes: [issue], missingModels: [] };
+    return { ok: false, blocksQueue: true, invalid: true, missingNodes: [issue], missingModels: [], vaeWarnings: [] };
   }
 
   const nodes = collectNodes(workflow);
@@ -254,8 +262,72 @@ export function checkComfyReadiness(
 
   missingNodes.sort(byIssue);
   missingModels.sort(byIssue);
+  const vaeWarnings = wanVaePairingWarnings(slots);
   const ok = missingNodes.length === 0 && missingModels.length === 0;
-  return { ok, blocksQueue: !ok, invalid: false, missingNodes, missingModels };
+  return { ok, blocksQueue: !ok, invalid: false, missingNodes, missingModels, vaeWarnings };
+}
+
+function fileBase(name: string): string {
+  const parts = name.split(/[/\\]/);
+  return (parts[parts.length - 1] ?? "").trim();
+}
+
+/** 5B and 14B from a diffusion filename Star Dust sends. Other files are not Wan. */
+export function wanVariantFromDiffusion(filename: string): WanVariant | null {
+  const base = fileBase(filename).toLowerCase();
+  if (!base.includes("wan")) return null;
+  if (base.includes("14b")) return "14b";
+  if (base.includes("5b") || base.includes("ti2v")) return "5b";
+  return null;
+}
+
+/** True when the VAE filename is the one paired with that Wan variant. */
+export function vaeMatchesWanVariant(vaeName: string, variant: WanVariant): boolean {
+  const base = fileBase(vaeName).toLowerCase();
+  if (variant === "5b") return base === WAN_VAE.toLowerCase() || base.startsWith("wan2.2_vae");
+  return base === WAN_FLF_VAE.toLowerCase() || base.startsWith("wan_2.1_vae") || base.startsWith("wan2.1_vae");
+}
+
+/**
+ * Warns when a Wan diffusion slot is paired with the other variant's VAE.
+ * Wan 2.2 5B needs wan2.2_vae. Wan 2.2 14B uses wan_2.1_vae.
+ * SVD and LTX have no Wan diffusion slot, so they produce no note.
+ */
+export function wanVaePairingWarnings(slots: readonly ModelSlot[]): ReadinessIssue[] {
+  const variants: WanVariant[] = [];
+  const vaes: string[] = [];
+  for (const slot of slots) {
+    if (slot.input === "unet_name") {
+      const variant = wanVariantFromDiffusion(slot.filename);
+      if (variant && !variants.includes(variant)) variants.push(variant);
+    }
+    if (slot.input === "vae_name") vaes.push(slot.filename);
+  }
+  if (variants.length === 0 || vaes.length === 0) return [];
+  const notes: ReadinessIssue[] = [];
+  for (const variant of variants) {
+    for (const vae of vaes) {
+      if (vaeMatchesWanVariant(vae, variant)) continue;
+      notes.push({
+        kind: "vae",
+        classType: "VAELoader",
+        nodeId: "",
+        input: "vae_name",
+        filename: vae,
+        folder: VAE_FOLDER,
+        nextStep: vaePairingNote(variant, vae),
+      });
+    }
+  }
+  notes.sort(byIssue);
+  return notes;
+}
+
+function vaePairingNote(variant: WanVariant, vaeName: string): string {
+  if (variant === "5b") {
+    return `Wan 2.2 5B is paired with ${WAN_VAE}. This graph sends ${vaeName}. Wan 2.2 14B uses ${WAN_FLF_VAE}. A mismatched VAE is a reported cause of an all-black clip. This does not block the queue, and it does not promise the picture.`;
+  }
+  return `Wan 2.2 14B is paired with ${WAN_FLF_VAE}. This graph sends ${vaeName}. Wan 2.2 5B needs ${WAN_VAE}. A mismatched VAE is a reported cause of an all-black clip. This does not block the queue, and it does not promise the picture.`;
 }
 
 export function hostPhrase(check: Pick<ComfyServerCheck, "source" | "url">, revealUrl: boolean): string {
@@ -284,8 +356,13 @@ export function describeUnreachable(check: ComfyServerCheck, revealUrl: boolean)
 export function statusMessage(check: ComfyServerCheck, revealUrl: boolean): string {
   if (!check.reachable) return describeUnreachable(check, revealUrl);
   const failed = check.workflows.filter((workflow) => !workflow.ok);
-  if (failed.length === 0) {
+  const vae = check.workflows.filter((workflow) => workflow.vaeWarnings.length > 0);
+  if (failed.length === 0 && vae.length === 0) {
     return "Every checked graph can run on this server. Every node is listed, and every model filename Star Dust will send is in that loader's list.";
+  }
+  if (failed.length === 0) {
+    const names = vae.map((workflow) => workflow.title).join(", ");
+    return `Every checked graph can run on this server. ${names} sends a VAE filename that does not match the Wan model. That note does not block the queue.`;
   }
   const names = failed.map((workflow) => workflow.title).join(", ");
   return `${names} would not run. A render that uses a failing graph is refused before the shot is queued.`;
@@ -309,7 +386,7 @@ export function formatQueueRefusal(
   const closing = opts?.closing ?? "This render was not queued.";
   const lines = [statusMessage(check, revealUrl)];
   for (const workflow of check.workflows) {
-    const issues = [...workflow.missingNodes, ...workflow.missingModels];
+    const issues = [...workflow.missingNodes, ...workflow.missingModels, ...workflow.vaeWarnings];
     if (issues.length === 0) continue;
     lines.push(`${workflow.title} (${workflow.file}):`);
     for (const issue of issues) lines.push(issue.nextStep);
@@ -337,9 +414,12 @@ export function formatComfyCheckTable(check: ComfyServerCheck): string {
   lines.push("");
   for (const workflow of check.workflows) {
     const issues = [...workflow.missingNodes, ...workflow.missingModels];
-    if (issues.length === 0) continue;
+    const notes = workflow.vaeWarnings;
+    if (issues.length === 0 && notes.length === 0) continue;
     lines.push(workflow.title);
     for (const issue of issues) lines.push(`- ${issue.nextStep}`);
+    for (const note of notes) lines.push(`- ${note.nextStep}`);
+    if (notes.length > 0) lines.push("The VAE note does not block the queue.");
     lines.push("");
   }
   lines.push(check.blocksQueue ? "Result: fail" : "Result: pass");
@@ -456,5 +536,6 @@ export function workflowCheckFromReadiness(
     blocksQueue: readiness.blocksQueue,
     missingNodes: readiness.missingNodes,
     missingModels: readiness.missingModels,
+    vaeWarnings: readiness.vaeWarnings,
   };
 }

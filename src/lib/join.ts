@@ -48,13 +48,15 @@ export interface JoinRuntime {
   trimSec: number;
 }
 
-export type JoinOmissionReason = "disabled" | "no-clip" | "missing-file";
+export type JoinOmissionReason = "disabled" | "no-clip" | "missing-file" | "broken";
 
 export interface JoinOmission {
   shotId: string;
   position: number;
   prompt: string;
   reason: JoinOmissionReason;
+  /** Plain label when reason is broken, such as "all black" or "no motion". */
+  detail?: string;
 }
 
 export interface JoinPlanShot extends SeamRequest {
@@ -167,16 +169,17 @@ export function shotJoinName(shot: { position: number; prompt: string }): string
   return `shot ${shot.position} "${short || "untitled"}"`;
 }
 
-function omissionPhrase(reason: JoinOmissionReason): string {
-  if (reason === "disabled") return "disabled";
-  if (reason === "missing-file") return "clip file missing";
+function omissionPhrase(item: JoinOmission): string {
+  if (item.reason === "disabled") return "disabled";
+  if (item.reason === "missing-file") return "clip file missing";
+  if (item.reason === "broken") return item.detail ? `flagged clip: ${item.detail}` : "flagged clip";
   return "no rendered clip";
 }
 
 /** One sentence that names every shot the join will not include. */
 export function joinOmissionWarning(items: readonly JoinOmission[]): string | null {
   if (items.length === 0) return null;
-  const parts = items.map((item) => `${shotJoinName(item)} (${omissionPhrase(item.reason)})`);
+  const parts = items.map((item) => `${shotJoinName(item)} (${omissionPhrase(item)})`);
   return `Left out of this join: ${parts.join("; ")}.`;
 }
 
@@ -215,9 +218,14 @@ function runtimeFor(
 
 /**
  * Planned cut from the shot list, and the cut Export stitch can make from clips
- * that already exist. Disabled shots and shots with no clip are named.
+ * that already exist. Disabled shots, flagged clips, and shots with no clip are named.
  */
-export function planJoin(project: ProjectSeam, shots: JoinPlanShot[], clips: { shotId: string; durationSec: number }[], fps: number): JoinPlan {
+export function planJoin(
+  project: ProjectSeam,
+  shots: JoinPlanShot[],
+  clips: { shotId: string; durationSec: number; held?: boolean; heldDetail?: string }[],
+  fps: number
+): JoinPlan {
   const have = new Map(clips.map((clip) => [clip.shotId, clip.durationSec]));
   const omissions: JoinOmission[] = [];
   const readyShots: JoinPlanShot[] = [];
@@ -229,6 +237,17 @@ export function planJoin(project: ProjectSeam, shots: JoinPlanShot[], clips: { s
   for (const shot of shots) {
     if (shot.enabled === false) {
       omissions.push({ shotId: shot.id, position: shot.position, prompt: shot.prompt, reason: "disabled" });
+      continue;
+    }
+    const clip = clips.find((item) => item.shotId === shot.id);
+    if (clip?.held) {
+      omissions.push({
+        shotId: shot.id,
+        position: shot.position,
+        prompt: shot.prompt,
+        reason: "broken",
+        detail: clip.heldDetail,
+      });
       continue;
     }
     const clipSec = have.get(shot.id);

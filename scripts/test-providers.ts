@@ -16,6 +16,9 @@ for (const key of Object.keys(process.env)) {
 delete process.env.COMFYUI_BASE_URL;
 delete process.env.COMFYUI_AUTH_HEADER;
 delete process.env.COMFYUI_AUTH_HEADER_NAME;
+// This file is the CI provider suite. Mock clips are inspected and not flagged,
+// including a flat-color Ken Burns. GitHub Actions sets CI as well.
+if (!process.env.CI) process.env.CI = "true";
 
 function assert(cond: unknown, message: string) {
   if (!cond) throw new Error(message);
@@ -599,6 +602,63 @@ async function checkComfyObjectInfo() {
     shipped.every((item) => item.missingModels.length === 0),
     "LoadImage filenames are not treated as missing models"
   );
+  assert(
+    shipped.every((item) => item.vaeWarnings.length === 0),
+    `shipped graphs should not warn about the VAE: ${shipped
+      .flatMap((item) => item.vaeWarnings.map((note) => note.nextStep))
+      .join(" | ")}`
+  );
+  const swapped5 = readiness.modelSlotsFor("wan").map((slot) =>
+    slot.input === "vae_name" ? { ...slot, filename: info.WAN_FLF_VAE } : slot
+  );
+  const mismatch5 = readiness.checkComfyReadiness(run.loadShippedWorkflow("wan"), fixture, swapped5);
+  assert(mismatch5.ok && !mismatch5.blocksQueue, "a 5B graph with the 14B VAE still lists the file, so it does not block");
+  assert(mismatch5.vaeWarnings.length === 1, "5B paired with wan_2.1_vae warns");
+  assert(/wan2\.2_vae/.test(mismatch5.vaeWarnings[0]?.nextStep || ""), "the 5B note names wan2.2_vae");
+  assert(/wan_2\.1_vae/.test(mismatch5.vaeWarnings[0]?.nextStep || ""), "the 5B note names the file that was sent");
+  assert(/does not block the queue/.test(mismatch5.vaeWarnings[0]?.nextStep || ""), "the VAE note does not block");
+  assert(!/character lock|lip-sync|api[_ ]?key/i.test(mismatch5.vaeWarnings[0]?.nextStep || ""), "the VAE note stays plain");
+  const swapped14 = readiness.modelSlotsFor("wan-flf").map((slot) =>
+    slot.input === "vae_name" ? { ...slot, filename: info.WAN_VAE } : slot
+  );
+  const mismatch14 = readiness.checkComfyReadiness(run.loadShippedWorkflow("wan-flf"), fixture, swapped14);
+  assert(
+    mismatch14.ok && !mismatch14.blocksQueue && mismatch14.vaeWarnings.length === 1,
+    "14B paired with wan2.2_vae warns and does not block"
+  );
+  assert(/wan_2\.1_vae/.test(mismatch14.vaeWarnings[0]?.nextStep || ""), "the 14B note names wan_2.1_vae");
+  assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("svd")).length === 0, "SVD has no Wan VAE note");
+  assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("ltx")).length === 0, "LTX has no Wan VAE note");
+  const wanGraph = JSON.parse(fs.readFileSync(path.join(process.cwd(), "workflows/comfyui-wan22-ti2v-5b.api.json"), "utf8")) as {
+    [id: string]: { class_type?: string; inputs?: Record<string, string> };
+  };
+  const wanNodes = Object.values(wanGraph);
+  const wanUnet = wanNodes.find((node) => node.class_type === "UNETLoader")?.inputs?.unet_name || "";
+  const wanVae = wanNodes.find((node) => node.class_type === "VAELoader")?.inputs?.vae_name || "";
+  assert(readiness.wanVariantFromDiffusion(wanUnet) === "5b", "the shipped 5B file is the 5B variant");
+  assert(readiness.vaeMatchesWanVariant(wanVae, "5b"), "the shipped 5B graph uses wan2.2_vae");
+  assert(!readiness.vaeMatchesWanVariant(wanVae, "14b"), "wan2.2_vae is not the 14B pair");
+  const flfGraph = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "workflows/comfyui-wan22-14b-flf2v.api.json"), "utf8")
+  ) as { [id: string]: { class_type?: string; inputs?: Record<string, string> } };
+  const flfNodes = Object.values(flfGraph);
+  const flfUnet = flfNodes.find((node) => node.class_type === "UNETLoader")?.inputs?.unet_name || "";
+  const flfVae = flfNodes.find((node) => node.class_type === "VAELoader")?.inputs?.vae_name || "";
+  assert(readiness.wanVariantFromDiffusion(flfUnet) === "14b", "the shipped 14B file is the 14B variant");
+  assert(readiness.vaeMatchesWanVariant(flfVae, "14b"), "the shipped 14B graph uses wan_2.1_vae");
+  const vaeTable = readiness.formatComfyCheckTable(
+    run.serverCheck({
+      reachable: true,
+      url: "http://127.0.0.1:8188",
+      source: "cli",
+      timedOut: false,
+      httpStatus: 200,
+      detail: "",
+      workflows: [readiness.workflowCheckFromReadiness("wan", mismatch5)],
+    })
+  );
+  assert(/Result: pass/.test(vaeTable), "a VAE note does not fail comfy:check");
+  assert(/does not block the queue/.test(vaeTable), "the table says the VAE note does not block");
 
   const missingNodeInfo = JSON.parse(JSON.stringify(fixture)) as Record<string, unknown>;
   delete missingNodeInfo.WanFirstLastFrameToVideo;
@@ -836,9 +896,205 @@ async function checkComfyObjectInfo() {
   }
 }
 
+async function checkBrokenClips() {
+  const clip = await import("../src/lib/clip-check");
+  const storage = await import("../src/lib/storage");
+  const mock = await import("../src/lib/providers/mock");
+  const stitch = await import("../src/lib/stitch");
+  const edit = await import("../src/lib/edit-export");
+  const { CLIP_CHECK_HONESTY } = await import("../src/lib/types");
+  assert(/does not promise picture quality/.test(CLIP_CHECK_HONESTY), "clip check does not promise quality");
+  assert(/character lock/.test(CLIP_CHECK_HONESTY), "clip check keeps character lock out");
+  assert(/lip-sync/.test(CLIP_CHECK_HONESTY) && /long film/.test(CLIP_CHECK_HONESTY), "clip check keeps lip-sync and long film out");
+  assert(clip.BLACK_FRAME_FRACTION >= 0.95, "black detection stays at nearly all frames");
+  assert(clip.BLACK_YAVG_MAX <= 18 && clip.BLACK_YMAX_MAX <= 20, "black stays at black level, not a dark picture");
+  assert(clip.FROZEN_MEAN_YDIF_MAX <= 0.02 && clip.FROZEN_MAX_YDIF_MAX <= 0.04, "motion stays under a slow pan");
+  assert(clip.COMFY_BLACK_FRAME_HINTS.length === 4, "ComfyUI hints stay in one order");
+  assert(/--use-sage-attention/.test(clip.COMFY_BLACK_FRAME_HINTS[0]) && /fp16_accumulation/.test(clip.COMFY_BLACK_FRAME_HINTS[0]), "hint 1 is the launch flags");
+  assert(/--fp32-vae/.test(clip.COMFY_BLACK_FRAME_HINTS[1]), "hint 2 is the fp16 VAE");
+  assert(/wan2\.2_vae/.test(clip.COMFY_BLACK_FRAME_HINTS[2]) && /wan_2\.1_vae/.test(clip.COMFY_BLACK_FRAME_HINTS[2]), "hint 3 is the VAE pair");
+  assert(/VAE Decode \(Tiled\)/.test(clip.COMFY_BLACK_FRAME_HINTS[3]), "hint 4 is VAE Decode Tiled");
+
+  const dir = fs.mkdtempSync(path.join(dataDir, "clip-check-"));
+  const harbor = path.join(process.cwd(), "samples", "harbor-dusk.png");
+  const black = path.join(dir, "black.mp4");
+  const frozen = path.join(dir, "frozen.mp4");
+  const slow = path.join(dir, "slow.mp4");
+  const darkMove = path.join(dir, "dark-move.mp4");
+  const darkStill = path.join(dir, "dark-still.mp4");
+  const mostly = path.join(dir, "mostly-black.mp4");
+  const partly = path.join(dir, "partly-black.mp4");
+  runFfmpegSync(["-y", "-f", "lavfi", "-i", "color=c=black:s=160x90:r=24:d=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", black]);
+  runFfmpegSync([
+    "-y",
+    "-loop",
+    "1",
+    "-i",
+    harbor,
+    "-vf",
+    "scale=160:90:force_original_aspect_ratio=increase,crop=160:90,fps=24,format=yuv420p",
+    "-t",
+    "0.5",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    frozen,
+  ]);
+  runFfmpegSync([
+    "-y",
+    "-loop",
+    "1",
+    "-i",
+    harbor,
+    "-vf",
+    "scale=320:180:force_original_aspect_ratio=increase,crop=320:180,zoompan=z='1.02':x='(iw-iw/zoom)*on/96':y='(ih-ih/zoom)/2':d=96:s=160x90:fps=24,format=yuv420p",
+    "-t",
+    "4",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    slow,
+  ]);
+  runFfmpegSync([
+    "-y",
+    "-loop",
+    "1",
+    "-i",
+    harbor,
+    "-vf",
+    "scale=160:90:force_original_aspect_ratio=increase,crop=160:90,eq=brightness=-0.35:saturation=0.4,zoompan=z='min(1+(1.15-1)*on/48,1.15)':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d=48:s=160x90:fps=24,format=yuv420p",
+    "-t",
+    "2",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    darkMove,
+  ]);
+  runFfmpegSync([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0x303030:s=160x90:r=24:d=0.5",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    darkStill,
+  ]);
+  concatColors(mostly, [
+    { color: "black", frames: 19 },
+    { color: "red", frames: 1 },
+  ]);
+  concatColors(partly, [
+    { color: "black", frames: 18 },
+    { color: "red", frames: 2 },
+  ]);
+
+  const prevCi = process.env.CI;
+  try {
+    process.env.CI = "true";
+    const suppressed = clip.inspectClipFile(black, { provider: "mock" });
+    assert(!suppressed.flagged && suppressed.status === "", "Mock in CI is not flagged");
+    assert(suppressed.blackFraction >= 0.95 && suppressed.frames >= 4, "Mock in CI is still measured");
+    delete process.env.CI;
+    const open = clip.inspectClipFile(black, { provider: "mock" });
+    assert(open.flagged && open.black, `Mock outside CI flags a black clip (${open.blackFraction})`);
+    const comfyBlack = clip.inspectClipFile(black, { provider: "comfyui" });
+    assert(comfyBlack.flagged && comfyBlack.black, "ComfyUI flags a black clip");
+    assert(comfyBlack.hints.length === 4, "ComfyUI shows the four hints");
+    assert(comfyBlack.hints[0] === clip.COMFY_BLACK_FRAME_HINTS[0], "hints stay in order");
+    assert(/not a promise/.test(comfyBlack.status), "the status does not promise the cause");
+    assert(!/api[_ ]?key/i.test(comfyBlack.status), "the status names no key");
+    const falBlack = clip.inspectClipFile(black, { provider: "fal" });
+    assert(falBlack.flagged && falBlack.hints.length === 0, "fal has no ComfyUI hints");
+  } finally {
+    if (prevCi == null) process.env.CI = "true";
+    else process.env.CI = prevCi;
+  }
+
+  const frozenCheck = clip.inspectClipFile(frozen, { provider: "comfyui" });
+  assert(frozenCheck.flagged && frozenCheck.frozen && !frozenCheck.black, `a still is no motion, not black (${frozenCheck.meanMotion})`);
+  assert(/does not move/.test(frozenCheck.status), "the frozen status is plain");
+  const slowCheck = clip.inspectClipFile(slow, { provider: "comfyui" });
+  assert(!slowCheck.flagged, `a slow pan is not flagged (mean ${slowCheck.meanMotion}, black ${slowCheck.blackFraction})`);
+  const darkMoveCheck = clip.inspectClipFile(darkMove, { provider: "comfyui" });
+  assert(!darkMoveCheck.flagged, `a dark moving shot is not flagged (black ${darkMoveCheck.blackFraction}, mean ${darkMoveCheck.meanMotion})`);
+  const darkStillCheck = clip.inspectClipFile(darkStill, { provider: "comfyui" });
+  assert(darkStillCheck.flagged && darkStillCheck.frozen && !darkStillCheck.black, "a dark gray still is no motion, not black");
+  const mostlyCheck = clip.inspectClipFile(mostly, { provider: "replicate" });
+  assert(mostlyCheck.flagged && mostlyCheck.black, `19 of 20 black frames is nearly all black (${mostlyCheck.blackFraction})`);
+  const partlyCheck = clip.inspectClipFile(partly, { provider: "replicate" });
+  assert(!partlyCheck.flagged, `18 of 20 black frames is not nearly all (${partlyCheck.blackFraction})`);
+  assert(!clip.inspectClipFile(path.join(dir, "missing.mp4"), { provider: "comfyui" }).flagged, "an unreadable file is not flagged");
+
+  const project = storage.createProject("Broken clip");
+  const still = storage.saveUpload(project.id, "harbor.png", fs.readFileSync(harbor));
+  const goodShot = storage.createShot({
+    projectId: project.id,
+    prompt: "Harbor dusk, slow.",
+    presetId: "slow-zoom-in",
+    durationSec: 1,
+    startImagePath: still,
+  });
+  const badShot = storage.createShot({
+    projectId: project.id,
+    prompt: "Broken black clip.",
+    presetId: "slow-zoom-in",
+    durationSec: 1,
+    startImagePath: still,
+  });
+  const goodJob = storage.createJob({
+    projectId: project.id,
+    shotId: goodShot.id,
+    prompt: goodShot.prompt,
+    presetId: goodShot.presetId,
+    provider: "mock",
+    imagePath: still,
+    durationSec: 1,
+    status: "queued",
+  });
+  await mock.runMockGenerate(goodJob.id);
+  const goodDone = storage.getJob(goodJob.id);
+  assert(goodDone?.status === "completed" && goodDone.clipCheck && !goodDone.clipCheck.flagged, "Harbor Mock is not flagged in CI");
+  const badJob = storage.createJob({
+    projectId: project.id,
+    shotId: badShot.id,
+    prompt: badShot.prompt,
+    presetId: badShot.presetId,
+    provider: "comfyui",
+    imagePath: still,
+    modelName: "ComfyUI Wan 2.2 TI2V-5B",
+    durationSec: 1,
+    status: "running",
+  });
+  const badOut = storage.absoluteOutputPath(project.id, `${badJob.id}.mp4`);
+  fs.copyFileSync(black, badOut.abs);
+  clip.finishRenderedClip(badJob.id, badOut.rel);
+  const badDone = storage.getJob(badJob.id);
+  assert(badDone?.status === "completed" && badDone.clipCheck?.flagged && badDone.clipCheck.hints.length === 4, "the ComfyUI hook flags the black file");
+  const leftOut = await stitch.stitchProject(project.id);
+  assert(leftOut.includedShotIds.length === 1 && leftOut.includedShotIds[0] === goodShot.id, "the stitch leaves the flagged clip out");
+  assert(/flagged clip: all black/.test(leftOut.warning || ""), `warning names the clip: ${leftOut.warning}`);
+  const packed = await edit.buildEditExport(project.id);
+  const badManifest = packed.manifests.find((item) => item.shot === "SH020");
+  const goodManifest = packed.manifests.find((item) => item.shot === "SH010");
+  assert(goodManifest?.clipFlag == null, "a clean take has no clip flag");
+  assert(badManifest?.clipFlag && /all black/.test(badManifest.clipFlag), "the edit manifest names the flagged clip");
+  const included = clip.setClipIncludeAnyway(badJob.id, true);
+  assert(included?.clipCheck?.includeAnyway, "include anyway is stored");
+  const joined = await stitch.stitchProject(project.id);
+  assert(joined.includedShotIds.includes(badShot.id) && joined.includedShotIds.includes(goodShot.id), "include anyway puts the clip in the stitch");
+  assert(!/flagged clip/.test(joined.warning || ""), "an included clip is not listed as left out");
+}
+
 async function main() {
   await checkPreflight();
   await checkComfyObjectInfo();
+  await checkBrokenClips();
   const safety = await import("../src/lib/safety");
   const storage = await import("../src/lib/storage");
   const uploads = await import("../src/lib/uploads");
@@ -5816,6 +6072,7 @@ async function main() {
   assert(/Preflight/.test(harborCli.stdout || ""), "the cli prints Preflight");
   assert(/960×540/.test(harborCli.stdout || ""), "the cli names the Harbor still size");
   assert(/do not block a render/.test(harborCli.stdout || ""), "the cli says Preflight does not block");
+  assert(!/flagged clip|does not move/.test(harborCli.stdout || ""), "Harbor Mock is not flagged");
   assert(!/divisible by 16/.test(harborCli.stdout || ""), "Harbor on Mock has no divisible-by-16 note");
   const preflightRun = await import("../src/lib/preflight-run");
   const harborReport = preflightRun.preflightStoredProject(harborImport.project, harborShots, {
@@ -5874,6 +6131,7 @@ async function main() {
   assert(!/should-not-leak|sk_live/.test(lookCli.stdout || ""), "the fal note does not print a key");
   const lookMp4 = /mp4: (\S+)/.exec(lookCli.stdout || "");
   assert(lookMp4 && fs.existsSync(lookMp4[1]), "the fal-named file still writes an mp4");
+  assert(!/does not move|flagged clip|all black/.test(lookCli.stdout || ""), "a flat Mock clip is not flagged in CI");
 
   storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
 

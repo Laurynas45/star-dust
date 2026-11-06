@@ -4,6 +4,7 @@ import os from "os";
 import path from "path";
 import JSZip from "jszip";
 import { cuesOnTimeline, formatSrt, readSrtFile } from "./captions";
+import { clipFlagLabel } from "./clip-check";
 import { writeContactSheet } from "./contact-sheet";
 import { completedTakesFor, cutTake } from "./chain-stale";
 import { resolveConformTarget } from "./conform";
@@ -55,6 +56,8 @@ export interface TakeManifest {
   size: string;
   chainSource: ChainSource | null;
   sourceStillSha256: string;
+  /** Set when the clip was flagged. Null when it was not. */
+  clipFlag: string | null;
 }
 
 export interface EditEvent {
@@ -288,6 +291,7 @@ function manifestFor(
     size: `${info.width}x${info.height}`,
     chainSource: chainSourceFor(shot, job, shots, jobs),
     sourceStillSha256,
+    clipFlag: job.clipCheck?.flagged ? clipFlagLabel(job.clipCheck) : null,
   };
 }
 

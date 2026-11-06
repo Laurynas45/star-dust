@@ -18,6 +18,8 @@ npm run render:shotlist -- examples/harbor-dusk.shotlist.zip
 
 That imports into a temporary project, prints a Preflight list, renders with Mock, stitches, and prints the mp4 path. No API key and no server. Preflight does not block the render. `--first` renders and stitches only the first enabled shot. If the file names fal, Replicate, or ComfyUI, the command still uses Mock unless `--provider` is set and the matching environment value is present (`FAL_KEY`, `REPLICATE_API_TOKEN`, or `COMFYUI_BASE_URL`). It says so when it stays on Mock.
 
+After each clip is written, the command prints a note when the file is all black, nearly all black, or does not move, and that clip is left out of the mp4. The command then exits non-zero. `--include-flagged` puts those clips in the stitch. Mock clips are not flagged when `CI` is `true` or `1`. The thresholds are in the README. This does not promise picture quality.
+
 ## Top level
 
 | Field | What it is |

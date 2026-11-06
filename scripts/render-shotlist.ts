@@ -72,14 +72,19 @@ function resolveRunProvider(named: ProviderId, flag: ProviderId | null): { provi
   return { provider: flag, note: null };
 }
 
-function parseArgs(argv: string[]): { file: string; first: boolean; provider: ProviderId | null } {
+function parseArgs(argv: string[]): { file: string; first: boolean; provider: ProviderId | null; includeFlagged: boolean } {
   let first = false;
+  let includeFlagged = false;
   let provider: ProviderId | null = null;
   const files: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--first") {
       first = true;
+      continue;
+    }
+    if (arg === "--include-flagged") {
+      includeFlagged = true;
       continue;
     }
     if (arg === "--provider") {
@@ -95,9 +100,11 @@ function parseArgs(argv: string[]): { file: string; first: boolean; provider: Pr
     files.push(arg);
   }
   if (files.length !== 1) {
-    fail("Usage: npm run render:shotlist -- <file> [--first] [--provider mock|fal|replicate|comfyui]");
+    fail(
+      "Usage: npm run render:shotlist -- <file> [--first] [--include-flagged] [--provider mock|fal|replicate|comfyui]"
+    );
   }
-  return { file: files[0], first, provider };
+  return { file: files[0], first, provider, includeFlagged };
 }
 
 async function main() {
@@ -107,6 +114,7 @@ async function main() {
   const render = await import("../src/lib/render");
   const stitch = await import("../src/lib/stitch");
   const providers = await import("../src/lib/providers");
+  const clipCheck = await import("../src/lib/clip-check");
 
   const loaded = await shotlist.loadShotListPath(path.resolve(args.file));
   if (!loaded.bundle || loaded.errors.length > 0) {
@@ -145,10 +153,29 @@ async function main() {
   if (!result.ok) fail(result.error);
   for (const job of result.jobs) providers.enqueueJob(job.id);
   await providers.waitForQueue();
+  const finished = [];
   for (const job of result.jobs) {
     const done = storage.getJob(job.id);
     if (!done || done.status !== "completed" || !done.outputPath) {
       fail(done?.error || `Shot did not render (${done?.status ?? "missing"}).`);
+    }
+    finished.push(done!);
+  }
+
+  let held = false;
+  for (const done of finished) {
+    if (!done.clipCheck?.flagged) continue;
+    const shot = shots.find((item) => item.id === done.shotId);
+    const where = shot ? `Shot ${shot.position}` : "Clip";
+    if (args.includeFlagged) clipCheck.setClipIncludeAnyway(done.id, true);
+    const fresh = storage.getJob(done.id);
+    console.log(`${where}: ${fresh?.clipCheck?.status || done.clipCheck.status}`);
+    const hints = fresh?.clipCheck?.hints ?? done.clipCheck.hints;
+    hints.forEach((hint, index) => console.log(`${index + 1}. ${hint}`));
+    if (args.includeFlagged) {
+      console.log(`${where}: included in the stitch because you passed --include-flagged.`);
+    } else {
+      held = true;
     }
   }
 
@@ -171,6 +198,9 @@ async function main() {
   console.log(`mp4: ${abs}`);
   console.log(`bytes: ${size}`);
   console.log(`duration: ${stitched.durationSec}`);
+  if (held) {
+    fail("A flagged clip was left out of the stitch. Pass --include-flagged to include it, or render it again.");
+  }
 }
 
 main().catch((err) => {

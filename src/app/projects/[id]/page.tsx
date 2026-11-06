@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { ClipFlagNote } from "@/components/ClipFlagNote";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
 import { ComfyReadinessPanel, ShotComfyNote } from "@/components/ComfyReadinessPanel";
@@ -714,6 +715,21 @@ export default function ProjectStudioPage() {
     await load();
   }
 
+  async function onIncludeFlagged(jobId: string, include: boolean) {
+    setError(null);
+    const res = await fetch(`/api/jobs/${jobId}/include-flagged`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ include }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.error || "Could not update that clip");
+      return;
+    }
+    await load();
+  }
+
   async function onSelectTake(shotId: string, jobId: string) {
     setError(null);
     const res = await fetch(`/api/projects/${projectId}/shots/${shotId}/take`, {
@@ -1061,7 +1077,8 @@ export default function ProjectStudioPage() {
             ffmpeg joins the take you chose. An approved take stays in that stitch. Hard cut, or a
             short crossfade. A chained hard cut can trim a few start frames of the next clip. Mixed
             clips are conformed to one frame rate and size first. A music bed and an imported SRT
-            can ride on that same file. The stitch also writes a contact sheet of those shots.
+            can ride on that same file.             The stitch also writes a contact sheet of those shots.
+            A clip that is all black, or that does not move, is named and left out until you include it or render it again.
             The stitch is not a new model.
           </p>
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
@@ -1862,6 +1879,7 @@ export default function ProjectStudioPage() {
               const job = latestTake(shot.id);
               const takes = takesFor(shot.id);
               const chosen = stitchChoice(shot, takes);
+              const chosenTake = takes.find((take) => take.id === chosen);
               const takeBusy = job?.status === "queued" || job?.status === "running";
               const preset = presetById(shot.presetId);
               const prev = index > 0 ? shots[index - 1] : undefined;
@@ -1958,6 +1976,11 @@ export default function ProjectStudioPage() {
                         </span>
                       )}
                       {job && <StatusBadge status={job.status} />}
+                      {chosenTake?.clipCheck?.flagged && (
+                        <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
+                          Flagged clip
+                        </span>
+                      )}
                       {outOfDate && (
                         <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
                           Out of date
@@ -1974,6 +1997,14 @@ export default function ProjectStudioPage() {
                         </span>
                       )}
                     </div>
+                    <ClipFlagNote
+                      check={chosenTake?.clipCheck}
+                      busy={busy}
+                      onInclude={(include) => {
+                        if (!chosenTake) return;
+                        void onIncludeFlagged(chosenTake.id, include);
+                      }}
+                    />
                     {paid && <ShotCostNote line={cost?.shots?.find((item) => item.shotId === shot.id)} />}
                     <div className="mt-2 flex flex-wrap items-end gap-2">
                       <label className="text-[11px] text-[var(--muted)]">
@@ -2331,6 +2362,11 @@ export default function ProjectStudioPage() {
                                 {shot.approvedJobId === take.id ? " · approved" : ""}
                                 {locked ? " · locked" : ""}
                                 {take.seed != null ? ` · seed ${take.seed}` : ""}
+                                {take.clipCheck?.flagged
+                                  ? take.clipCheck.includeAnyway
+                                    ? " · flagged, included"
+                                    : " · flagged, left out"
+                                  : ""}
                               </span>
                             </label>
                             {reused && (
@@ -2517,6 +2553,11 @@ export default function ProjectStudioPage() {
                     <p className="text-xs leading-relaxed text-amber-100/80">{job.characterNote}</p>
                   )}
                   {job.error && <p className="text-xs text-rose-300">{job.error}</p>}
+                  <ClipFlagNote
+                    check={job.clipCheck}
+                    busy={busy}
+                    onInclude={(include) => void onIncludeFlagged(job.id, include)}
+                  />
                   {(job.status === "running" || job.status === "queued") && (
                     <div className="h-1 overflow-hidden rounded-full bg-white/10">
                       <div
@@ -2709,6 +2750,9 @@ export default function ProjectStudioPage() {
                 />
                 <div className="space-y-2 p-4">
                   <p className="line-clamp-2 text-sm text-white">{job.prompt}</p>
+                  {job.clipCheck?.flagged && (
+                    <p className="text-xs leading-relaxed text-amber-100">{job.clipCheck.status}</p>
+                  )}
                   <p className="text-[11px] text-[var(--muted)]">
                     {job.modelName || CAPABILITY[job.provider].label}
                   </p>
