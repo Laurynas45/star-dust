@@ -4215,6 +4215,129 @@ async function main() {
   assert(missingPrev, "the first shot has no seam to preview");
   assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "color seam previews stayed on ffmpeg");
 
+  const colourLib = await import("../src/lib/colour-match");
+  const colourTypes = await import("../src/lib/types");
+  assert(/first included shot/i.test(colourTypes.COLOUR_MATCH_HONESTY), "colour copy names the first included shot");
+  assert(/does not flicker/i.test(colourTypes.COLOUR_MATCH_HONESTY), "colour copy says the grade does not flicker");
+  assert(/does not fix a character, a face, or an outfit/i.test(colourTypes.COLOUR_MATCH_HONESTY), "colour copy does not promise a character or an outfit");
+  assert(/off by default/i.test(colourTypes.COLOUR_MATCH_HONESTY), "colour copy says the option is off by default");
+  assert(/off unless you turn it on/i.test(colourTypes.SEAM_HONESTY), "join copy says colour evening stays off until it is turned on");
+  assert(/does not fix a character or an outfit/i.test(colourTypes.SEAM_HONESTY), "join copy keeps the colour limit");
+  assert(/does not fix drift/i.test(colourTypes.SEAM_PREVIEW_HONESTY), "seam preview still does not claim to fix drift");
+  const whiteLab = colourLib.rgbToLab(255, 255, 255);
+  assert(whiteLab.L > 99 && Math.abs(whiteLab.a) < 0.2 && Math.abs(whiteLab.b) < 0.2, "sRGB white is CIE L 100");
+  const redBytes = Buffer.alloc(30);
+  const blueBytes = Buffer.alloc(30);
+  for (let index = 0; index < 10; index += 1) {
+    redBytes[index * 3] = 255;
+    blueBytes[index * 3 + 2] = 255;
+  }
+  const moved = colourLib.applyAffineToRgb(
+    { r: 0, g: 0, b: 255 },
+    colourLib.reinhardAffine(colourLib.labStatsFromRgb(blueBytes), colourLib.labStatsFromRgb(redBytes))
+  );
+  assert(moved.r > 200 && moved.g < 40 && moved.b < 40, `Reinhard moves flat blue onto flat red, got ${JSON.stringify(moved)}`);
+  const same = colourLib.reinhardAffine(colourLib.labStatsFromRgb(redBytes), colourLib.labStatsFromRgb(redBytes));
+  assert(colourLib.affineIsClose(same), "a clip that already matches the reference is not regraded");
+  assert(colourLib.resolveEvenColour({ evenColour: false }, {}) === false, "a missing override inherits off");
+  assert(colourLib.resolveEvenColour({ evenColour: true }, { evenColour: null }) === true, "a null override inherits on");
+  assert(colourLib.resolveEvenColour({ evenColour: true }, { evenColour: false }) === false, "a boundary can leave colour as rendered");
+  assert(colourLib.resolveEvenColour({ evenColour: false }, { evenColour: true }) === true, "a boundary can turn colour on");
+
+  const colourProject = storage.createProject("Even colour");
+  assert(storage.getProject(colourProject.id)?.evenColour === false, "a new project leaves colour as rendered");
+  const colourStill = storage.saveUpload(colourProject.id, "still.png", solidPng(dataDir, "even-colour-still.png", "gray"));
+  const colourShots = ["red", "blue", "green"].map((color, index) => {
+    const shot = storage.createShot({
+      projectId: colourProject.id,
+      prompt: `Colour ${color}.`,
+      presetId: "slow-zoom-in",
+      durationSec: 2,
+      startImagePath: colourStill,
+    });
+    const clip = storage.absoluteOutputPath(colourProject.id, `even-${color}.mp4`);
+    concatColors(clip.abs, [{ color, frames: 48 }]);
+    const job = storage.createJob({
+      projectId: colourProject.id,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: "slow-zoom-in",
+      provider: "mock",
+      status: "completed",
+      imagePath: colourStill,
+      durationSec: 2,
+      modelName: mockModel,
+    });
+    storage.updateJob(job.id, { status: "completed", outputPath: clip.rel, progress: 100 });
+    return { shot, color, index };
+  });
+  const offCut = await stitch.stitchProject(colourProject.id);
+  const offAbs = storage.resolveDataPath(offCut.outputPath);
+  assert(fs.statSync(offAbs).size > 1000, "colour off still writes an mp4");
+  assert(offCut.colour.active === false, "colour evening is off by default");
+  assert(/left as rendered/i.test(offCut.colour.summary), "the default summary says colour was left as rendered");
+  assert(offCut.colour.reference === "first-included-shot", "the reference is the first included shot");
+  assert(isRed(frameRgbAt(offAbs, 8)), "with the option off the first shot stays red");
+  assert(isBlue(frameRgbAt(offAbs, 60)), "with the option off the second shot stays blue");
+  const offThird = frameRgbAt(offAbs, 110);
+  assert(
+    offThird.g > 100 && offThird.r < 40 && offThird.b < 40,
+    `with the option off the third shot stays green, got ${JSON.stringify(offThird)}`
+  );
+  const offManifest = JSON.parse(fs.readFileSync(storage.resolveDataPath(offCut.manifestPath), "utf8")) as {
+    colour: { summary: string; referenceShotId: string; shots: { role: string }[] };
+  };
+  assert(offManifest.colour.summary === offCut.colour.summary, "the manifest repeats the colour summary");
+  assert(offManifest.colour.referenceShotId === colourShots[0].shot.id, "the manifest names the first shot");
+  assert(offManifest.colour.shots.every((shot) => shot.role !== "evened"), "nothing is evened while the option is off");
+
+  storage.updateProject(colourProject.id, { evenColour: true });
+  storage.updateShot(colourShots[2].shot.id, { evenColour: false });
+  assert(storage.getProject(colourProject.id)?.evenColour === true, "the project can even out colour");
+  assert(storage.getShot(colourShots[2].shot.id)?.evenColour === false, "a shot can keep its own colour");
+  const heldThird = await stitch.stitchProject(colourProject.id);
+  const heldAbs = storage.resolveDataPath(heldThird.outputPath);
+  assert(isRed(frameRgbAt(heldAbs, 8)), "the first shot is the reference and is not graded");
+  const matchedBlue = frameRgbAt(heldAbs, 60);
+  assert(isRed(matchedBlue), `the second shot moves to the first shot's colour, got ${JSON.stringify(matchedBlue)}`);
+  const heldGreen = frameRgbAt(heldAbs, 110);
+  assert(
+    heldGreen.g > 100 && heldGreen.r < 40 && heldGreen.b < 40,
+    `a boundary set off keeps that shot's own colour, got ${JSON.stringify(heldGreen)}`
+  );
+  assert(heldThird.colour.active === true, "the stitch reports that colour evening was on");
+  assert(/shot 2/i.test(heldThird.colour.summary), "the summary names the shot that was evened");
+  assert(/own colour/i.test(heldThird.colour.summary), "the summary names the shot that kept its colour");
+  assert(/does not fix a character or an outfit/i.test(heldThird.colour.summary), "the summary does not promise a character or an outfit");
+  assert(/does not flicker/i.test(heldThird.colour.summary), "the summary says the grade does not flicker");
+  assert(heldThird.seams[0]?.colourNote && /first included shot/i.test(heldThird.seams[0].colourNote), "the join note says colour was evened to the first shot");
+  assert(heldThird.seams[1]?.colourNote && /left this shot's colour/i.test(heldThird.seams[1].colourNote), "the next join says that shot was left as rendered");
+  const heldManifest = JSON.parse(fs.readFileSync(storage.resolveDataPath(heldThird.manifestPath), "utf8")) as {
+    colour: { shots: { shotId: string; role: string }[] };
+  };
+  assert(heldManifest.colour.shots.find((shot) => shot.shotId === colourShots[1].shot.id)?.role === "evened", "the manifest marks the evened shot");
+  assert(heldManifest.colour.shots.find((shot) => shot.shotId === colourShots[2].shot.id)?.role === "kept", "the manifest marks the shot that kept its colour");
+
+  storage.updateShot(colourShots[2].shot.id, { evenColour: null });
+  const toFirst = await stitch.stitchProject(colourProject.id);
+  const toFirstAbs = storage.resolveDataPath(toFirst.outputPath);
+  const third = frameRgbAt(toFirstAbs, 110);
+  assert(isRed(third), `shot 3 matches the first shot, not the previous shot, got ${JSON.stringify(third)}`);
+
+  const colourPreview = await stitch.previewSeam(colourProject.id, colourShots[1].shot.id);
+  const colourPreviewAbs = storage.resolveDataPath(colourPreview.outputPath);
+  assert(fs.statSync(colourPreviewAbs).size > 1000, "seam preview with colour evening is an mp4");
+  const previewHead = frameRgbAt(colourPreviewAbs, Math.max(0, frameCountOf(colourPreviewAbs) - 4));
+  assert(isRed(previewHead), `the seam preview grades the incoming shot toward the first shot, got ${JSON.stringify(previewHead)}`);
+  assert(/does not fix a character or an outfit/i.test(colourPreview.colour.summary), "the seam preview summary keeps the limit");
+
+  storage.updateProject(colourProject.id, { seamMode: "crossfade", seamFadeSec: 0.5, evenColour: true });
+  const colourFade = await stitch.stitchProject(colourProject.id);
+  assert(colourFade.colour.active === true, "a crossfade can still even colour");
+  assert(colourFade.durationSec < toFirst.durationSec - 0.3, "the colour-matched crossfade is shorter than the hard cut");
+  assert(fs.statSync(storage.resolveDataPath(colourFade.outputPath)).size > 1000, "the colour-matched crossfade is an mp4");
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "colour evening stayed on ffmpeg");
+
   const inputKey = await import("../src/lib/input-key");
   const keyTypes = await import("../src/lib/types");
   assert(/paying again/i.test(keyTypes.REUSE_HONESTY), "reuse says it avoids paying again");
@@ -5802,6 +5925,7 @@ async function main() {
     seamFadeFrames: 8,
     seamFadeSec: 0.5,
     chainTrimStartFrames: 2,
+    evenColour: true,
     outputFps: 24,
     outputWidth: 1280,
     outputHeight: 720,
@@ -5839,6 +5963,7 @@ async function main() {
     seamMode: "crossfade",
     seamFadeUnit: "seconds",
     seamFadeSec: 0.75,
+    evenColour: false,
   });
   const trip3 = storage.createShot({
     projectId: trip.id,
@@ -5855,6 +5980,9 @@ async function main() {
   assert(beforeSettings.shots[1].comfyuiWorkflow === "LTX-2.3 distilled FP8", "the shot workflow is exported by name");
   assert(beforeSettings.shots[0].seed === 4242 && beforeSettings.shots[0].seedPinned, "the pinned seed is in the shot list");
   assert(beforeSettings.shots[2].enabled === false, "a disabled shot stays in the file");
+  assert(beforeSettings.evenColour === true, "the shot list exports even colour");
+  assert(beforeSettings.shots[0].evenColour === null, "an unset boundary inherits colour");
+  assert(beforeSettings.shots[1].evenColour === false, "a boundary can leave colour as rendered");
 
   const shotFalSecret = "fal-secret-SHOULD-NOT-LEAK-9f3a";
   const shotHeaderSecret = "Bearer header-SHOULD-NOT-LEAK-77";
@@ -6048,6 +6176,31 @@ async function main() {
   assert(folder.bundle && folder.errors.length === 0, `harbor folder did not read: ${folder.errors.join(" | ")}`);
   const folderImport = shotlist.importShotList(folder.bundle!);
   assert(folderImport.ok, `harbor json import failed: ${folderImport.ok ? "" : folderImport.errors.join(" | ")}`);
+  if (!folder.bundle) throw new Error("unreachable");
+  const olderDoc = JSON.parse(folder.bundle.json) as { evenColour?: unknown; shots: { evenColour?: unknown }[] };
+  delete olderDoc.evenColour;
+  for (const shot of olderDoc.shots) delete shot.evenColour;
+  const olderImport = shotlist.importShotList({
+    json: JSON.stringify(olderDoc),
+    files: folder.bundle.files,
+    source: "json",
+  });
+  assert(olderImport.ok, `an older shot list failed: ${olderImport.ok ? "" : olderImport.errors.join(" | ")}`);
+  if (!olderImport.ok) throw new Error("unreachable");
+  assert(olderImport.project.evenColour === false, "an older shot list leaves colour off");
+  assert(
+    storage.listShots(olderImport.project.id).every((shot) => shot.evenColour == null),
+    "an older shot inherits the project colour setting"
+  );
+  olderDoc.evenColour = "yes";
+  const badColour = shotlist.importShotList({
+    json: JSON.stringify(olderDoc),
+    files: folder.bundle.files,
+    source: "json",
+  });
+  assert(!badColour.ok, "a non-boolean evenColour is not imported");
+  if (badColour.ok) throw new Error("unreachable");
+  assert(badColour.errors.some((error) => /evenColour must be true or false/.test(error)), `bad evenColour: ${badColour.errors.join(" | ")}`);
 
   function cliEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env };
@@ -6097,6 +6250,21 @@ async function main() {
   const firstDur = mediaDuration(firstMp4![1]);
   assert(firstDur > 3.5 && firstDur < 4.5, `--first duration ${firstDur} is the first shot`);
   assert(/--first:/.test(harborFirst.stdout || ""), "--first says it rendered one shot");
+
+  const harborColour = spawnSync(
+    "npm",
+    ["run", "render:shotlist", "--", "examples/harbor-dusk.shotlist.zip", "--even-colour"],
+    { encoding: "utf8", cwd: process.cwd(), env: cliEnv() }
+  );
+  assert(harborColour.status === 0, `harbor --even-colour failed\n${harborColour.stdout}\n${harborColour.stderr}`);
+  const colourMp4 = /mp4: (\S+)/.exec(harborColour.stdout || "");
+  assert(colourMp4 && fs.existsSync(colourMp4[1]) && fs.statSync(colourMp4[1]).size > 1000, "even-colour writes an mp4 with no API key");
+  const colourDur = mediaDuration(colourMp4![1]);
+  assert(colourDur > 7.5 && colourDur < 8.5, `even-colour stitch duration ${colourDur} is about 8s`);
+  assert(/does not fix a character or an outfit/i.test(harborColour.stdout || ""), "the cli says colour evening does not fix a character or an outfit");
+  assert(/Even out colour|Evened overall/i.test(harborColour.stdout || ""), "the cli says the colour setting was on");
+  assert(/first included shot/i.test(harborColour.stdout || ""), "the cli names the first included shot");
+  assert(!/FAL_KEY=|REPLICATE_API_TOKEN=|sk_live|should-not-leak/i.test(harborColour.stdout || ""), "the even-colour cli output has no key");
 
   const lookDir = fs.mkdtempSync(path.join(os.tmpdir(), "stardust-look-"));
   const lookStill = solidPng(lookDir, "look.png", "purple");

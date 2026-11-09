@@ -103,7 +103,8 @@ function openDatabase(): DB {
       music_fade_in_sec REAL NOT NULL DEFAULT 0.25,
       music_fade_out_sec REAL NOT NULL DEFAULT 1,
       captions_path TEXT,
-      caption_mode TEXT
+      caption_mode TEXT,
+      even_colour INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -133,6 +134,7 @@ function openDatabase(): DB {
       drop_duplicate_frame INTEGER,
       chain_trim_start_frames INTEGER,
       seed INTEGER,
+      even_colour INTEGER,
       approved_job_id TEXT,
       approved_start_stamp TEXT,
       approved_end_stamp TEXT
@@ -386,6 +388,12 @@ function migrate(db: DB) {
   if (!hasColumn(db, "jobs", "clip_check")) {
     db.exec("ALTER TABLE jobs ADD COLUMN clip_check TEXT");
   }
+  if (!hasColumn(db, "projects", "even_colour")) {
+    db.exec("ALTER TABLE projects ADD COLUMN even_colour INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "shots", "even_colour")) {
+    db.exec("ALTER TABLE shots ADD COLUMN even_colour INTEGER");
+  }
 }
 
 function seedSample(db: DB) {
@@ -496,6 +504,7 @@ function mapProject(row: Record<string, unknown>): Project {
     captionsPath: str(row.captions_path),
     captionMode: parseCaptionMode(row.caption_mode),
     provider: isProviderId(row.shotlist_provider) ? row.shotlist_provider : null,
+    evenColour: Number(row.even_colour) === 1,
     ...trimFields(
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
@@ -626,6 +635,8 @@ function mapShot(row: Record<string, unknown>): Shot {
     seamFadeSec: row.seam_fade_sec == null ? null : clampSeamFade(Number(row.seam_fade_sec)),
     seamFadeUnit: parseSeamFadeUnit(row.seam_fade_unit),
     seamFadeFrames: row.seam_fade_frames == null ? null : clampSeamFadeFrames(Number(row.seam_fade_frames)),
+    evenColour:
+      row.even_colour == null || row.even_colour === "" ? null : Number(row.even_colour) === 1,
     enabled: row.enabled == null ? true : Number(row.enabled) !== 0,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -749,6 +760,7 @@ export function createProject(name: string, description = ""): Project {
     musicFadeOutSec: DEFAULT_MUSIC_FADE_OUT_SEC,
     captionMode: null,
     provider: null,
+    evenColour: false,
   };
   getDb()
     .prepare(
@@ -786,6 +798,7 @@ export function updateProject(
       | "musicFadeOutSec"
       | "captionMode"
       | "provider"
+      | "evenColour"
     >
   > & {
     characterSheetPath?: string | null;
@@ -839,6 +852,7 @@ export function updateProject(
         : patch.provider && isProviderId(patch.provider)
           ? patch.provider
           : null,
+    evenColour: patch.evenColour === undefined ? current.evenColour : patch.evenColour,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -850,7 +864,7 @@ export function updateProject(
            style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?,
            output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
            music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
-           captions_path = ?, caption_mode = ?, shotlist_provider = ?
+           captions_path = ?, caption_mode = ?, shotlist_provider = ?, even_colour = ?
        WHERE id = ?`
     )
     .run(
@@ -878,6 +892,7 @@ export function updateProject(
       next.captionsPath,
       next.captionMode,
       next.provider,
+      next.evenColour ? 1 : 0,
       id
     );
   return getProject(id);
@@ -952,6 +967,7 @@ export function createShot(input: {
     comfyLowMemory: input.comfyLowMemory ?? null,
     chainFromPrevious: Boolean(input.chainFromPrevious),
     chainFrameBack: clampChainFrameBack(input.chainFrameBack ?? 0),
+    evenColour: null,
     enabled: true,
     createdAt: now,
     updatedAt: now,
@@ -1009,6 +1025,7 @@ export function updateShot(
         | "seamFadeSec"
         | "seamFadeUnit"
         | "seamFadeFrames"
+        | "evenColour"
         | "enabled"
         | "seed"
         | "seedPinned"
@@ -1085,6 +1102,7 @@ export function updateShot(
         : patch.seamFadeFrames == null
           ? null
           : clampSeamFadeFrames(patch.seamFadeFrames),
+    evenColour: patch.evenColour === undefined ? current.evenColour ?? null : patch.evenColour,
     enabled: patch.enabled === undefined ? current.enabled !== false : patch.enabled,
     updatedAt: new Date().toISOString(),
   };
@@ -1095,7 +1113,7 @@ export function updateShot(
            end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?,
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
            seam_mode = ?, seam_fade_sec = ?, seam_fade_unit = ?, seam_fade_frames = ?,
-           enabled = ?, chain_frame_back = ?,
+           even_colour = ?, enabled = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
            chain_trim_start_frames = ?, seed = ?, seed_pinned = ?, locked_job_id = ?, updated_at = ?
        WHERE id = ?`
@@ -1115,6 +1133,7 @@ export function updateShot(
       next.seamFadeSec,
       next.seamFadeUnit,
       next.seamFadeFrames,
+      next.evenColour == null ? null : next.evenColour ? 1 : 0,
       next.enabled ? 1 : 0,
       next.chainFrameBack,
       next.chainedFrameBack,
