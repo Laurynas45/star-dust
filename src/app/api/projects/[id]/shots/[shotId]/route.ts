@@ -117,6 +117,7 @@ export async function PATCH(
       seamFadeSec: fadeField(body.seamFadeSec),
       seamFadeUnit: fadeUnitField(body.seamFadeUnit),
       seamFadeFrames: fadeFramesField(body.seamFadeFrames),
+      evenColour: optionalBool(body.evenColour),
       enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
     });
     return NextResponse.json(updated);

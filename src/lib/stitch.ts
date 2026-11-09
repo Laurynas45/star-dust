@@ -17,6 +17,7 @@ import {
   resolveConformTarget,
 } from "./conform";
 import { clipFlagLabel, clipHeldFromStitch } from "./clip-check";
+import { evenOutClips, type StitchColour } from "./colour-match";
 import { contactVersion, writeContactSheet } from "./contact-sheet";
 import { finishedTake } from "./continuity";
 import {
@@ -61,6 +62,8 @@ export interface StitchSeam {
   droppedFrames: number;
   /** Set when this crossfade was chosen in frames. */
   frames?: number | null;
+  /** Even out colour on the shot this join leads into. Absent when the option is off. */
+  colourNote?: string;
 }
 
 export interface StitchResult {
@@ -83,6 +86,11 @@ export interface StitchResult {
   manifestPath: string;
   /** Music bed and captions actually applied. Absent on a seam preview. */
   finish?: FinishView;
+  /**
+   * Whole-clip colour match for this stitch. The reference is the first
+   * included shot. Off unless the project or a boundary turned it on.
+   */
+  colour: StitchColour;
 }
 
 function newestCompleted(jobs: Job[]): Job | undefined {
@@ -347,8 +355,9 @@ export function pairCutAudioFilter(dropStartFrames: number, fps: number): string
 }
 
 /**
- * Colour and brightness are not matched. A measured grade on a short generated
- * clip is easy to get wrong, so the seam is only a hard cut or a short crossfade.
+ * The join itself is a hard cut or a short crossfade. Even out colour between
+ * shots is a separate stitch step, off unless the project or this boundary
+ * turns it on. That step matches the whole clip to the first included shot.
  */
 function resolveSeam(
   project: Project,
@@ -469,7 +478,11 @@ function omissionFor(
   };
 }
 
-export async function stitchProject(projectId: string): Promise<StitchResult> {
+function collectTakes(projectId: string): {
+  included: Included[];
+  skipped: StitchResult["skipped"];
+  warning: string | null;
+} {
   const shots = listShots(projectId);
   const included: Included[] = [];
   const skipped: StitchResult["skipped"] = [];
@@ -505,7 +518,11 @@ export async function stitchProject(projectId: string): Promise<StitchResult> {
     included.push({ shotId: shot.id, jobId: job.id, abs, shot, imagePath: job.imagePath, frameCount: 0 });
   }
 
-  const warning = joinOmissionWarning(omissions);
+  return { included, skipped, warning: joinOmissionWarning(omissions) };
+}
+
+export async function stitchProject(projectId: string): Promise<StitchResult> {
+  const { included, skipped, warning } = collectTakes(projectId);
   if (included.length === 0) {
     throw new Error(warning ?? "No completed shots to stitch. Render at least one shot first.");
   }
@@ -596,35 +613,87 @@ function seamsFor(project: Project, included: Included[], fps = 24): StitchSeam[
   return seams;
 }
 
+interface ColourContext {
+  /** Whole file of the first included shot, when this stitch is only a window of it. */
+  referenceShotId?: string;
+  referenceAbs?: string;
+  /** Whole take to measure, keyed by shot id. The graded file can be a shorter window. */
+  measureAbs?: Map<string, string>;
+}
+
+function withColourNotes(seams: StitchSeam[], colour: StitchColour): StitchSeam[] {
+  if (!colour.active) return seams;
+  const byPosition = new Map(colour.shots.map((shot) => [shot.position, shot]));
+  return seams.map((seam) => {
+    const shot = byPosition.get(seam.position);
+    if (!shot?.note) return seam;
+    return { ...seam, colourNote: shot.note };
+  });
+}
+
 async function concatClips(
   projectId: string,
   prefix: string,
   kind: StitchResult["kind"],
   included: Included[],
   skipped: StitchResult["skipped"],
-  warning: string | null = null
+  warning: string | null = null,
+  colourContext?: ColourContext
 ): Promise<StitchResult> {
   const project = getProject(projectId);
   if (!project) throw new Error("Project not found");
   const counted = withFrameCounts(included);
-  const shapes = counted.map((part) => probeClipShape(part.abs));
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const colourTemps: string[] = [];
+  let clips = counted;
+  let colour: StitchColour = {
+    active: false,
+    reference: "first-included-shot",
+    referenceShotId: counted[0]?.shotId ?? "",
+    summary: "Colour and brightness were left as rendered.",
+    shots: [],
+  };
+  try {
+    const graded = await evenOutClips({
+      project,
+      clips: counted.map((part) => ({
+        shotId: part.shotId,
+        position: part.shot.position,
+        abs: part.abs,
+        evenColour: part.shot.evenColour,
+      })),
+      reference:
+        colourContext?.referenceShotId && colourContext.referenceAbs
+          ? { shotId: colourContext.referenceShotId, abs: colourContext.referenceAbs }
+          : undefined,
+      measureAbs: colourContext?.measureAbs,
+      destFor: (shotId) => absoluteOutputPath(projectId, `colour-${stamp}-${shotId}.mp4`).abs,
+    });
+    colourTemps.push(...graded.temps);
+    colour = graded.colour;
+    clips = withFrameCounts(
+      counted.map((part) => ({ ...part, abs: graded.paths.get(part.shotId) ?? part.abs }))
+    );
+  const shapes = clips.map((part) => probeClipShape(part.abs));
   const target = resolveConformTarget(project, shapes);
   const videoFilter = conformVideoFilter(target.width, target.height, target.fps);
   const anyAudio = shapes.some((shape) => shape.hasAudio);
   const withAudio = anyAudio;
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const { abs: outAbs, rel } = absoluteOutputPath(projectId, `${prefix}-${stamp}.mp4`);
-  const planned = seamsFor(project, counted, target.fps);
+  const planned = seamsFor(project, clips, target.fps);
   const crossfade = planned.some((seam) => seam.mode === "crossfade");
-  const seams = crossfade
-    ? await crossfadeJoin(project, projectId, stamp, counted, shapes, outAbs, videoFilter, withAudio, target.fps)
-    : planned;
+  const seams = withColourNotes(
+    crossfade
+      ? await crossfadeJoin(project, projectId, stamp, clips, shapes, outAbs, videoFilter, withAudio, target.fps)
+      : planned,
+    colour
+  );
   if (!crossfade) {
     const drops = planned.map((seam) => seam.droppedFrames);
     if (withAudio) {
-      await hardCutWithAudio(projectId, stamp, counted, shapes, outAbs, drops, videoFilter, target.fps);
+      await hardCutWithAudio(projectId, stamp, clips, shapes, outAbs, drops, videoFilter, target.fps);
     } else {
-      await hardCut(counted, outAbs, drops, videoFilter);
+      await hardCut(clips, outAbs, drops, videoFilter);
     }
   }
   const decorate = prefix === "stitch" || prefix === "preview";
@@ -646,7 +715,7 @@ async function concatClips(
   const jobs = listJobs(projectId);
   const { abs: sheetAbs, rel: sheetRel } = absoluteOutputPath(projectId, `${prefix}-${stamp}-contact.png`);
   await writeContactSheet(
-    counted.map((part, index) => {
+    clips.map((part, index) => {
       const job = jobs.find((item) => item.id === part.jobId);
       if (!job) {
         throw new Error("A clip in this stitch has no take record, so the contact sheet was not written.");
@@ -670,7 +739,7 @@ async function concatClips(
     sheetAbs
   );
   const { abs: manifestAbs, rel: manifestRel } = absoluteOutputPath(projectId, `${prefix}-${stamp}-manifest.json`);
-  const manifestShots = counted.map((part, index) => {
+  const manifestShots = clips.map((part, index) => {
     const job = jobs.find((item) => item.id === part.jobId);
     const preview = job?.kind === "preview";
     const pool = jobs.filter((item) => {
@@ -687,7 +756,28 @@ async function concatClips(
       ...(job?.clipCheck?.flagged ? { flag: clipFlagLabel(job.clipCheck) } : {}),
     };
   });
-  fs.writeFileSync(manifestAbs, `${JSON.stringify({ kind, shots: manifestShots }, null, 2)}\n`);
+  fs.writeFileSync(
+    manifestAbs,
+    `${JSON.stringify(
+      {
+        kind,
+        colour: {
+          reference: colour.reference,
+          referenceShotId: colour.referenceShotId,
+          summary: colour.summary,
+          shots: colour.shots.map((shot) => ({
+            shotId: shot.shotId,
+            position: shot.position,
+            role: shot.role,
+            ...(shot.note ? { note: shot.note } : {}),
+          })),
+        },
+        shots: manifestShots,
+      },
+      null,
+      2
+    )}\n`
+  );
   return {
     outputPath: rel,
     includedShotIds: included.map((part) => part.shotId),
@@ -702,7 +792,11 @@ async function concatClips(
     contactSheetPath: sheetRel,
     manifestPath: manifestRel,
     finish,
+    colour,
   };
+  } finally {
+    for (const file of colourTemps) fs.rmSync(file, { force: true });
+  }
 }
 
 async function applyProgram(
@@ -1114,7 +1208,14 @@ export async function previewSeam(projectId: string, shotId: string): Promise<St
         frameCount: 0,
       },
     ];
-    return await concatClips(projectId, "seam-preview", "takes", included, []);
+    const takes = collectTakes(projectId).included;
+    const reference = takes[0];
+    const measureAbs = new Map(takes.map((part) => [part.shotId, part.abs]));
+    return await concatClips(projectId, "seam-preview", "takes", included, [], null, {
+      referenceShotId: reference?.shotId,
+      referenceAbs: reference?.abs,
+      measureAbs,
+    });
   } finally {
     fs.rmSync(prevTrim.abs, { force: true });
     fs.rmSync(nextTrim.abs, { force: true });

@@ -36,6 +36,7 @@ import {
   CHAIN_FRAME_BACK_CHOICES,
   CHAIN_HONESTY,
   CHAIN_STALE_NOTE,
+  COLOUR_MATCH_HONESTY,
   CHAIN_TRIM_START_CHOICES,
   ComfyWorkflowId,
   CostEstimate,
@@ -200,7 +201,15 @@ type StitchResponse = {
   sumClipSec?: number;
   overlapSec?: number;
   warning?: string | null;
-  seams?: { position: number; mode: "cut" | "crossfade"; fadeSec: number; frames?: number | null; note?: string }[];
+  seams?: {
+    position: number;
+    mode: "cut" | "crossfade";
+    fadeSec: number;
+    frames?: number | null;
+    note?: string;
+    colourNote?: string;
+  }[];
+  colour?: { summary: string };
   finish?: FinishView;
   contactSheetPath?: string;
   manifestPath?: string;
@@ -818,7 +827,7 @@ export default function ProjectStudioPage() {
       const res = await fetch(`/api/projects/${projectId}/shots/${shotId}/seam`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Seam preview failed");
-      const seam = data.seam as { mode?: string; fadeSec?: number; note?: string } | null;
+      const seam = data.seam as { mode?: string; fadeSec?: number; note?: string; colourNote?: string } | null;
       const label =
         seam?.mode === "crossfade" ? `crossfade ${seam.fadeSec ?? ""}s` : "hard cut";
       setSeamClips((current) => ({
@@ -826,7 +835,7 @@ export default function ProjectStudioPage() {
         [shotId]: {
           outputPath: data.outputPath,
           durationSec: Number(data.durationSec) || 0,
-          note: seam?.note,
+          note: [seam?.note, seam?.colourNote].filter(Boolean).join(" "),
           label,
         },
       }));
@@ -871,6 +880,7 @@ export default function ProjectStudioPage() {
     musicFadeInSec?: number;
     musicFadeOutSec?: number;
     captionMode?: CaptionMode | null;
+    evenColour?: boolean;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -898,6 +908,7 @@ export default function ProjectStudioPage() {
       seamFadeSec?: number | null;
       seamFadeUnit?: SeamFadeUnit | null;
       seamFadeFrames?: number | null;
+      evenColour?: boolean | null;
       enabled?: boolean;
       seed?: number | null;
       seedPinned?: boolean;
@@ -1463,9 +1474,21 @@ export default function ProjectStudioPage() {
           </select>
           <span className="mt-1 block leading-relaxed">{SEAM_FRAME_HONESTY}</span>
         </label>
+        <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={project.evenColour}
+            onChange={(e) => void saveProjectPatch({ evenColour: e.target.checked })}
+          />
+          <span>
+            <span className="text-white">Even out colour between shots.</span> {COLOUR_MATCH_HONESTY}
+          </span>
+        </label>
         <p className="text-[11px] leading-relaxed text-[var(--muted)]">
-          A shot can override the join that leads into it, and how many start frames that chained
-          hard cut trims. The first shot has no join.
+          A shot can override the join that leads into it, how many start frames that chained
+          hard cut trims, and whether that shot&apos;s colour is evened out. The first shot is the
+          colour reference and has no join.
         </p>
       </section>
 
@@ -2299,6 +2322,29 @@ export default function ProjectStudioPage() {
                               re-enacted freeze. It does not lock a character or keep identity continuous.
                             </span>
                           </label>
+                          <label className="text-[11px] text-[var(--muted)]">
+                            Colour at this join
+                            <select
+                              className="input mt-1"
+                              value={shot.evenColour == null ? "" : shot.evenColour ? "on" : "off"}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                void saveShotPatch(shot.id, {
+                                  evenColour: value === "" ? null : value === "on",
+                                });
+                              }}
+                            >
+                              <option value="">
+                                Project default ({project.evenColour ? "even out" : "leave as rendered"})
+                              </option>
+                              <option value="on">Even out colour</option>
+                              <option value="off">Leave colour as rendered</option>
+                            </select>
+                            <span className="mt-1 block leading-relaxed">
+                              Overall colour and brightness only, matched to the first included shot.
+                              It does not fix a character or an outfit.
+                            </span>
+                          </label>
                         </div>
                       </div>
                     )}
@@ -2629,6 +2675,9 @@ export default function ProjectStudioPage() {
               {previewCut.finish?.line && (
                 <p className="text-xs text-white">{previewCut.finish.line}</p>
               )}
+              {previewCut.colour?.summary && (
+                <p className="text-xs leading-relaxed text-white">{previewCut.colour.summary}</p>
+              )}
               {previewCut.contactSheetPath && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -2693,6 +2742,9 @@ export default function ProjectStudioPage() {
                   : "."}
               </p>
               {stitch.finish?.line && <p className="text-xs text-white">{stitch.finish.line}</p>}
+              {stitch.colour?.summary && (
+                <p className="text-xs leading-relaxed text-white">{stitch.colour.summary}</p>
+              )}
               {stitch.finish?.loudnessNote && (
                 <p className="text-xs text-[var(--muted)]">{stitch.finish.loudnessNote}</p>
               )}
@@ -2700,7 +2752,7 @@ export default function ProjectStudioPage() {
                 <p className="text-xs text-[var(--muted)]">
                   {stitch.seams
                     .map((seam) => {
-                      return `Into shot ${seam.position}: ${seamLabel(seam)}${seam.note ? ` (${seam.note})` : ""}`;
+                      return `Into shot ${seam.position}: ${seamLabel(seam)}${seam.note ? ` (${seam.note})` : ""}${seam.colourNote ? ` — ${seam.colourNote}` : ""}`;
                     })
                     .join(" · ")}
                 </p>

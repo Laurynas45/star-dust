@@ -99,6 +99,13 @@ export interface Project {
   /** Null until an SRT is imported. Burn-in or a sidecar file. */
   captionMode: CaptionMode | null;
   /**
+   * When true, the stitch evens overall colour and brightness of each later
+   * included shot to the first included shot. One whole-clip measurement, so
+   * the grade does not flicker. Default false. A shot can override the
+   * boundary that leads into it. This does not fix a character or an outfit.
+   */
+  evenColour: boolean;
+  /**
    * Provider named on an imported shot list. Null on a project made in the studio.
    * Render all still uses the provider in Settings. Export writes this when it is set.
    */
@@ -178,6 +185,12 @@ export interface Shot {
   seamFadeUnit?: SeamFadeUnit | null;
   /** Null inherits the project frame count. Used when this join's unit is frames. */
   seamFadeFrames?: number | null;
+  /**
+   * Null inherits the project. The boundary that leads into this shot.
+   * True evens this shot's overall colour and brightness to the first included
+   * shot. False leaves this shot as rendered. The first shot is the reference.
+   */
+  evenColour?: boolean | null;
   /**
    * When false, Export stitch leaves this shot out and names it.
    * Unset means the shot is included. It can still render.
@@ -588,10 +601,13 @@ export function huntSeedCount(value: unknown): HuntSeedCount | null {
 export const SEAM_PREVIEW_SEC = 1.5;
 
 export const SEAM_PREVIEW_HONESTY =
-  "Preview seam plays about the last 1.5 seconds of the previous take and the first 1.5 seconds of this one, using the same join as the stitch. It helps you spot the seam. It does not fix drift, lock a character, or guarantee continuity. It does not replace any take.";
+  "Preview seam plays about the last 1.5 seconds of the previous take and the first 1.5 seconds of this one, using the same join as the stitch, including Even out colour between shots when that is on. It helps you spot the seam. It does not fix drift, a character, or an outfit, lock a character, or guarantee continuity. It does not replace any take.";
 
 export const SEAM_HONESTY =
-  "Hard cut is the default. A short crossfade blends the pixels at the join. Length is 0.25–1 second, or 0–24 frames (default 4, never longer than 1 second). A crossfade overlaps, so the joined cut is shorter than the clips added together. Star Dust does not match colour or brightness, does not lock a character, and does not lip-sync or build a long film.";
+  "Hard cut is the default. A short crossfade blends the pixels at the join. Length is 0.25–1 second, or 0–24 frames (default 4, never longer than 1 second). A crossfade overlaps, so the joined cut is shorter than the clips added together. Even out colour between shots is off unless you turn it on. That option evens overall colour and brightness only and does not fix a character or an outfit. Star Dust does not lock a character, and does not lip-sync or build a long film.";
+
+export const COLOUR_MATCH_HONESTY =
+  "Evens out overall colour and brightness of each later shot to the first included shot. One measurement covers the whole clip, so the grade does not flicker. It does not fix a character, a face, or an outfit. Off by default.";
 
 export const SEAM_FRAME_HONESTY =
   "On a chained hard cut from the previous shot's exact last frame, trim 0–4 frames from the start of the next clip. The default is 1, which drops that repeated frame. 2–4 also trims early frames a model often re-enacts, which softens that freeze at the seam. It does not fix identity or detail drift, and it does not keep identity continuous. A crossfade is left as-is, a shot that is not chained is left as-is, and stepping back from the last frame is left as-is. Star Dust does not lock a character, lip-sync, or build a long film.";

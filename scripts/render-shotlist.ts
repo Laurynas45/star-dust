@@ -72,9 +72,16 @@ function resolveRunProvider(named: ProviderId, flag: ProviderId | null): { provi
   return { provider: flag, note: null };
 }
 
-function parseArgs(argv: string[]): { file: string; first: boolean; provider: ProviderId | null; includeFlagged: boolean } {
+function parseArgs(argv: string[]): {
+  file: string;
+  first: boolean;
+  provider: ProviderId | null;
+  includeFlagged: boolean;
+  evenColour: boolean;
+} {
   let first = false;
   let includeFlagged = false;
+  let evenColour = false;
   let provider: ProviderId | null = null;
   const files: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -85,6 +92,10 @@ function parseArgs(argv: string[]): { file: string; first: boolean; provider: Pr
     }
     if (arg === "--include-flagged") {
       includeFlagged = true;
+      continue;
+    }
+    if (arg === "--even-colour") {
+      evenColour = true;
       continue;
     }
     if (arg === "--provider") {
@@ -101,10 +112,10 @@ function parseArgs(argv: string[]): { file: string; first: boolean; provider: Pr
   }
   if (files.length !== 1) {
     fail(
-      "Usage: npm run render:shotlist -- <file> [--first] [--include-flagged] [--provider mock|fal|replicate|comfyui]"
+      "Usage: npm run render:shotlist -- <file> [--first] [--include-flagged] [--even-colour] [--provider mock|fal|replicate|comfyui]"
     );
   }
-  return { file: files[0], first, provider, includeFlagged };
+  return { file: files[0], first, provider, includeFlagged, evenColour };
 }
 
 async function main() {
@@ -125,6 +136,9 @@ async function main() {
   if (!imported.ok) {
     for (const error of imported.errors) console.error(error);
     process.exit(1);
+  }
+  if (args.evenColour) {
+    storage.updateProject(imported.project.id, { evenColour: true });
   }
 
   const named = imported.project.provider ?? "mock";
@@ -195,6 +209,8 @@ async function main() {
   if (args.first) console.log("--first: rendered and stitched the first enabled shot.");
   if (run.note) console.log(run.note);
   if (stitched.warning) console.log(stitched.warning);
+  console.log(stitched.colour.summary);
+  if (args.evenColour) console.log("--even-colour: project setting on. The reference is the first included shot.");
   console.log(`mp4: ${abs}`);
   console.log(`bytes: ${size}`);
   console.log(`duration: ${stitched.durationSec}`);

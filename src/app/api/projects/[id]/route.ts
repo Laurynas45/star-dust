@@ -182,6 +182,7 @@ export async function PATCH(
     musicFadeOutSec:
       typeof body.musicFadeOutSec === "number" ? clampMusicFadeSec(body.musicFadeOutSec) : undefined,
     captionMode: captionModeField(body.captionMode),
+    evenColour: typeof body.evenColour === "boolean" ? body.evenColour : undefined,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

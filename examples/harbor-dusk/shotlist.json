@@ -18,6 +18,7 @@
     "fadeFrames": 4
   },
   "chainTrimStartFrames": 1,
+  "evenColour": false,
   "shots": [
     {
       "prompt": "Slow push toward the lanterns as the tide slides under the pier.",
@@ -36,6 +37,7 @@
       "chainFrameBack": 0,
       "chainTrimStartFrames": null,
       "transition": null,
+      "evenColour": null,
       "comfyuiWorkflow": null,
       "comfyLowMemory": null
     },
@@ -56,6 +58,7 @@
       "chainFrameBack": 0,
       "chainTrimStartFrames": null,
       "transition": null,
+      "evenColour": null,
       "comfyuiWorkflow": null,
       "comfyLowMemory": null
     }

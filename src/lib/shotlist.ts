@@ -76,6 +76,7 @@ const ROOT_KEYS = [
   "output",
   "transition",
   "chainTrimStartFrames",
+  "evenColour",
   "shots",
 ] as const;
 
@@ -91,6 +92,7 @@ const SHOT_KEYS = [
   "chainFrameBack",
   "chainTrimStartFrames",
   "transition",
+  "evenColour",
   "comfyuiWorkflow",
   "comfyLowMemory",
 ] as const;
@@ -126,6 +128,8 @@ export interface ShotListShot {
   chainFrameBack: number;
   chainTrimStartFrames: number | null;
   transition: ShotListTransition | null;
+  /** Null inherits the project. Omitted in an older file means null. */
+  evenColour: boolean | null;
   comfyuiWorkflow: string | null;
   comfyLowMemory: boolean | null;
 }
@@ -147,6 +151,8 @@ export interface ShotListDocument {
   output: ShotListOutput;
   transition: ShotListTransition;
   chainTrimStartFrames: number;
+  /** Omitted in an older file means false, so the stitch leaves colour as rendered. */
+  evenColour: boolean;
   shots: ShotListShot[];
 }
 
@@ -178,6 +184,7 @@ export interface ShotRenderSettings {
   output: ShotListOutput;
   transition: ShotListTransition;
   chainTrimStartFrames: number;
+  evenColour: boolean;
   shots: Array<{
     prompt: string;
     durationSec: number;
@@ -191,6 +198,7 @@ export interface ShotRenderSettings {
     chainFrameBack: number;
     chainTrimStartFrames: number | null;
     transition: ShotListTransition | null;
+    evenColour: boolean | null;
     comfyuiWorkflow: string | null;
     comfyLowMemory: boolean | null;
   }>;
@@ -326,6 +334,29 @@ function readFlag(value: unknown, where: string, errors: string[]): boolean | nu
   return value;
 }
 
+/**
+ * Project: omitted means false, so an older shot list stays off. null is an error.
+ * Shot: omitted or null means inherit.
+ */
+function readEvenColour(
+  value: unknown,
+  where: string,
+  errors: string[],
+  allowNull: boolean
+): boolean | null | undefined {
+  if (value === undefined) return allowNull ? null : false;
+  if (value === null) {
+    if (allowNull) return null;
+    errors.push(`${where} must be true or false.`);
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    errors.push(allowNull ? `${where} must be true, false, or null.` : `${where} must be true or false.`);
+    return undefined;
+  }
+  return value;
+}
+
 function fileBytes(files: ReadonlyMap<string, Buffer>, file: string): Buffer | undefined {
   const norm = normalizeShotListPath(file);
   return files.get(norm) ?? files.get(file);
@@ -453,6 +484,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
   }
 
   const transition = readTransition(parsed.transition, "Project transition", errors, false);
+  const evenColour = readEvenColour(parsed.evenColour, "evenColour", errors, false);
   const trim = parsed.chainTrimStartFrames;
   let chainTrim: number | undefined;
   if (typeof trim !== "number" || !Number.isInteger(trim)) {
@@ -609,6 +641,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       } else chainTrimStartFrames = entry.chainTrimStartFrames;
 
       const shotTransition = readTransition(entry.transition, `${label} transition`, errors, true);
+      const shotEvenColour = readEvenColour(entry.evenColour, `${label} evenColour`, errors, true);
       const shotWorkflow = readWorkflow(entry.comfyuiWorkflow, `${label} workflow`, errors);
       const shotLow = readFlag(entry.comfyLowMemory, `${label} low-memory preset`, errors);
       const starts = images.filter((image) => image.role === "start").length;
@@ -624,6 +657,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         chainFrameBack == null ||
         chainTrimStartFrames === undefined ||
         shotTransition === undefined ||
+        shotEvenColour === undefined ||
         shotWorkflow === undefined ||
         shotLow === undefined ||
         starts !== 1 ||
@@ -643,6 +677,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         chainFrameBack,
         chainTrimStartFrames,
         transition: shotTransition,
+        evenColour: shotEvenColour,
         comfyuiWorkflow: shotWorkflow,
         comfyLowMemory: shotLow,
       });
@@ -657,6 +692,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
     !output ||
     !transition ||
     chainTrim == null ||
+    typeof evenColour !== "boolean" ||
     typeof parsed.name !== "string" ||
     typeof parsed.description !== "string" ||
     typeof parsed.styleBase !== "string" ||
@@ -679,6 +715,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       output,
       transition,
       chainTrimStartFrames: chainTrim,
+      evenColour,
       shots,
     },
     errors: [],
@@ -760,6 +797,7 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
       project.seamFadeFrames
     ),
     chainTrimStartFrames: project.chainTrimStartFrames,
+    evenColour: project.evenColour === true,
     shots: shots.map((shot) => {
       const images: ShotListImage[] = [
         { file: place(shot.startImagePath, shot.position, "start"), role: "start" },
@@ -779,6 +817,7 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
         chainFrameBack: shot.chainFrameBack,
         chainTrimStartFrames: shot.chainTrimStartFrames ?? null,
         transition: shotTransition(shot, project),
+        evenColour: shot.evenColour ?? null,
         comfyuiWorkflow: workflowTitle(shot.comfyuiWorkflow),
         comfyLowMemory: shot.comfyLowMemory ?? null,
       };
@@ -851,6 +890,7 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
     output: document.output,
     transition: document.transition,
     chainTrimStartFrames: document.chainTrimStartFrames,
+    evenColour: document.evenColour,
     shots: document.shots.map((shot) => {
       const start = shot.images.find((image) => image.role === "start");
       const end = shot.images.find((image) => image.role === "end");
@@ -867,6 +907,7 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
         chainFrameBack: shot.chainFrameBack,
         chainTrimStartFrames: shot.chainTrimStartFrames,
         transition: shot.transition,
+        evenColour: shot.evenColour,
         comfyuiWorkflow: shot.comfyuiWorkflow,
         comfyLowMemory: shot.comfyLowMemory,
       };
@@ -903,6 +944,7 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
       seamFadeUnit: doc.transition.fadeUnit,
       seamFadeFrames: doc.transition.fadeFrames,
       chainTrimStartFrames: doc.chainTrimStartFrames,
+      evenColour: doc.evenColour,
       outputFps: doc.output.fps,
       outputWidth: doc.output.width,
       outputHeight: doc.output.height,
@@ -938,6 +980,7 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
         seed: shot.seed,
         seedPinned: shot.seedPinned,
         chainTrimStartFrames: shot.chainTrimStartFrames,
+        evenColour: shot.evenColour,
         seamMode: shot.transition ? shot.transition.mode : null,
         seamFadeSec: shot.transition ? shot.transition.fadeSec : null,
         seamFadeUnit: shot.transition ? shot.transition.fadeUnit : null,
