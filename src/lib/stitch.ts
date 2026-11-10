@@ -10,11 +10,13 @@ import {
 import {
   HISTORIC_NORMALIZE,
   LOUDNORM_FILTER,
-  conformVideoFilter,
+  conformClipFilters,
   loudnessOn,
   masterLoudnessOn,
   masterLoudnormFilter,
   resolveConformTarget,
+  smoothFpsReport,
+  type SmoothFpsReport,
 } from "./conform";
 import { clipFlagLabel, clipHeldFromStitch } from "./clip-check";
 import { evenOutClips, type StitchColour } from "./colour-match";
@@ -91,6 +93,12 @@ export interface StitchResult {
    * included shot. Off unless the project or a boundary turned it on.
    */
   colour: StitchColour;
+  /**
+   * Smooth frame rate for this stitch. Off unless the project turned it on.
+   * On, a clip below the target rate was raised with ffmpeg minterpolate.
+   * The length is unchanged. It is not RIFE or FILM.
+   */
+  smooth: SmoothFpsReport;
 }
 
 function newestCompleted(jobs: Job[]): Job | undefined {
@@ -197,10 +205,18 @@ export function applyDropLimit(requested: number, frameCount: number): number {
   return requested;
 }
 
-export function hardCutFilterComplex(dropStartFrames: number[], videoFilter = NORMALIZE): string {
+function videoFilterAt(videoFilter: string | readonly string[], index: number): string {
+  if (typeof videoFilter === "string") return videoFilter;
+  return videoFilter[index] ?? NORMALIZE;
+}
+
+export function hardCutFilterComplex(
+  dropStartFrames: number[],
+  videoFilter: string | readonly string[] = NORMALIZE
+): string {
   const filters = dropStartFrames.map((drop, index) => {
     const trim = drop > 0 ? `,trim=start_frame=${drop},setpts=PTS-STARTPTS` : "";
-    return `[${index}:v]${videoFilter}${trim}[v${index}]`;
+    return `[${index}:v]${videoFilterAt(videoFilter, index)}${trim}[v${index}]`;
   });
   const concat =
     dropStartFrames.map((_, index) => `[v${index}]`).join("") +
@@ -212,7 +228,7 @@ export function hardCutArgs(
   inputs: string[],
   output: string,
   dropStartFrames: number[],
-  videoFilter = NORMALIZE
+  videoFilter: string | readonly string[] = NORMALIZE
 ): string[] {
   const args = ["-y"];
   for (const file of inputs) args.push("-i", file);
@@ -676,7 +692,19 @@ async function concatClips(
     );
   const shapes = clips.map((part) => probeClipShape(part.abs));
   const target = resolveConformTarget(project, shapes);
-  const videoFilter = conformVideoFilter(target.width, target.height, target.fps);
+  const smooth = smoothFpsReport(
+    project.smoothFps === true,
+    clips.map((part, index) => ({
+      shotId: part.shotId,
+      position: part.shot.position,
+      fps: shapes[index]?.fps ?? target.fps,
+      durationSec: shapes[index]?.durationSec,
+    })),
+    target.fps
+  );
+  const filters = conformClipFilters(shapes, target, smooth.active);
+  const shared = filters[0];
+  const videoFilter = shared && filters.every((filter) => filter === shared) ? shared : filters;
   const anyAudio = shapes.some((shape) => shape.hasAudio);
   const withAudio = anyAudio;
   const { abs: outAbs, rel } = absoluteOutputPath(projectId, `${prefix}-${stamp}.mp4`);
@@ -761,6 +789,17 @@ async function concatClips(
     `${JSON.stringify(
       {
         kind,
+        smooth: {
+          active: smooth.active,
+          summary: smooth.summary,
+          shots: smooth.shots.map((shot) => ({
+            shotId: shot.shotId,
+            position: shot.position,
+            fromFps: shot.fromFps,
+            toFps: shot.toFps,
+            method: shot.method,
+          })),
+        },
         colour: {
           reference: colour.reference,
           referenceShotId: colour.referenceShotId,
@@ -793,6 +832,7 @@ async function concatClips(
     manifestPath: manifestRel,
     finish,
     colour,
+    smooth,
   };
   } finally {
     for (const file of colourTemps) fs.rmSync(file, { force: true });
@@ -947,7 +987,7 @@ async function hardCut(
   included: Included[],
   outAbs: string,
   droppedFrames: number[],
-  videoFilter: string
+  videoFilter: string | readonly string[]
 ): Promise<void> {
   const drops = [0, ...droppedFrames];
   await runFfmpeg(hardCutArgs(included.map((part) => part.abs), outAbs, drops, videoFilter));
@@ -960,7 +1000,7 @@ async function hardCutWithAudio(
   shapes: ClipShape[],
   outAbs: string,
   droppedFrames: number[],
-  videoFilter: string,
+  videoFilter: string | readonly string[],
   fps: number
 ): Promise<void> {
   const temps: string[] = [];
@@ -973,7 +1013,7 @@ async function hardCutWithAudio(
         conformClipArgs({
           src: included[index].abs,
           dest: abs,
-          videoFilter,
+          videoFilter: videoFilterAt(videoFilter, index),
           withAudio: true,
           hasAudio: shapes[index]?.hasAudio ?? false,
         })
@@ -1042,7 +1082,7 @@ async function crossfadeJoin(
   included: Included[],
   shapes: ClipShape[],
   outAbs: string,
-  videoFilter: string,
+  videoFilter: string | readonly string[],
   withAudio: boolean,
   fps: number
 ): Promise<StitchSeam[]> {
@@ -1057,7 +1097,7 @@ async function crossfadeJoin(
         conformClipArgs({
           src: included[index].abs,
           dest: abs,
-          videoFilter,
+          videoFilter: videoFilterAt(videoFilter, index),
           withAudio,
           hasAudio: shapes[index]?.hasAudio ?? false,
         })

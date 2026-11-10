@@ -106,6 +106,14 @@ export interface Project {
    */
   evenColour: boolean;
   /**
+   * When true, the stitch raises a clip below the target frame rate with ffmpeg
+   * motion interpolation (minterpolate) instead of repeating frames. The clip
+   * stays the same length. Default false. This can warp fast motion or thin
+   * edges. It is not RIFE or FILM. It does not add detail, fix a character,
+   * or regenerate motion. Export for edit keeps the original takes.
+   */
+  smoothFps: boolean;
+  /**
    * Provider named on an imported shot list. Null on a project made in the studio.
    * Render all still uses the provider in Settings. Export writes this when it is set.
    */
@@ -576,13 +584,16 @@ export interface FinishView {
 }
 
 export const CONFORM_HONESTY =
-  "Frame rate changes by duplicating or dropping frames, not by speeding a clip up. Letterbox and pillarbox keep the picture from being stretched. This does not lock a character, lip-sync, or build a long film.";
+  "Frame rate changes by duplicating or dropping frames, not by speeding a clip up. Smooth frame rate is off unless you turn it on. On, a lower frame rate is raised with ffmpeg motion interpolation (minterpolate) instead of repeated frames. The clip stays the same length. Fast motion and thin edges can warp. This is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. Letterbox and pillarbox keep the picture from being stretched. This does not lock a character, lip-sync, or build a long film.";
+
+export const SMOOTH_FPS_HONESTY =
+  "Raises a clip that is below the stitch frame rate with ffmpeg motion interpolation (minterpolate) instead of repeating frames. The clip stays the same length. It runs on CPU, with no GPU and no API key, including on Mock. Fast motion and thin edges can warp. This is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. Off by default.";
 
 export const SHOTLIST_HONESTY =
   "Export shot list zips shotlist.json and the stills it names. The schema is stardust.shotlist/1. API keys, auth headers, environment values, billing rates, and payment or license data are not written. Import creates a new project after the whole file is checked. It does not overwrite a project. This does not lock a character, lip-sync, or build a long film.";
 
 export const EDIT_EXPORT_HONESTY =
-  "Export for edit zips the chosen take of each shot: the approved take when one is set, otherwise the current take. Names look like SH010_v03.mp4, so a newer version does not overwrite an earlier file. The CMX3600 EDL follows the shot list, with the same hard cuts and crossfade lengths as the stitch, at the conformed frame rate. It carries cuts, dissolves, and in/out only. It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering codec. When the project has an SRT, the zip includes captions.srt with times snapped to that conformed frame rate. The zip also includes contact-sheet.png, one thumbnail per shot labelled with the shot id, take version, provider, seed, and duration. This does not lock a character, lip-sync, or build a long film.";
+  "Export for edit zips the chosen take of each shot: the approved take when one is set, otherwise the current take. Names look like SH010_v03.mp4, so a newer version does not overwrite an earlier file. The CMX3600 EDL follows the shot list, with the same hard cuts and crossfade lengths as the stitch, at the conformed frame rate. It carries cuts, dissolves, and in/out only. It is not a Premiere or Resolve project. The mp4 is a review codec, not a mastering codec. When the project has an SRT, the zip includes captions.srt with times snapped to that conformed frame rate. The zip also includes contact-sheet.png, one thumbnail per shot labelled with the shot id, take version, provider, seed, and duration. Smooth frame rate is not baked into these files. The manifest and the EDL say whether the stitch would raise a lower frame rate with ffmpeg motion interpolation (minterpolate). That can warp fast motion or thin edges. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. This does not lock a character, lip-sync, or build a long film.";
 
 export const HUNT_NOTE =
   "Try 2, 3, or 4 seeds of this one shot and pick a winner. Each candidate stays as a take. The estimate is shown first. A paid run above your typed rate is blocked. It does not lock a character.";
@@ -601,10 +612,10 @@ export function huntSeedCount(value: unknown): HuntSeedCount | null {
 export const SEAM_PREVIEW_SEC = 1.5;
 
 export const SEAM_PREVIEW_HONESTY =
-  "Preview seam plays about the last 1.5 seconds of the previous take and the first 1.5 seconds of this one, using the same join as the stitch, including Even out colour between shots when that is on. It helps you spot the seam. It does not fix drift, a character, or an outfit, lock a character, or guarantee continuity. It does not replace any take.";
+  "Preview seam plays about the last 1.5 seconds of the previous take and the first 1.5 seconds of this one, using the same join as the stitch, including Even out colour between shots when that is on. When Smooth frame rate is on, this preview uses that same ffmpeg motion interpolation. Fast motion and thin edges can warp. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. It helps you spot the seam. It does not fix drift, a character, or an outfit, lock a character, or guarantee continuity. It does not replace any take.";
 
 export const SEAM_HONESTY =
-  "Hard cut is the default. A short crossfade blends the pixels at the join. Length is 0.25–1 second, or 0–24 frames (default 4, never longer than 1 second). A crossfade overlaps, so the joined cut is shorter than the clips added together. Even out colour between shots is off unless you turn it on. That option evens overall colour and brightness only and does not fix a character or an outfit. Star Dust does not lock a character, and does not lip-sync or build a long film.";
+  "Hard cut is the default. A short crossfade blends the pixels at the join. Length is 0.25–1 second, or 0–24 frames (default 4, never longer than 1 second). A crossfade overlaps, so the joined cut is shorter than the clips added together. Even out colour between shots is off unless you turn it on. That option evens overall colour and brightness only and does not fix a character or an outfit. Smooth frame rate is off unless you turn it on. It raises a lower frame rate with ffmpeg motion interpolation (minterpolate). Fast motion and thin edges can warp. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. Star Dust does not lock a character, and does not lip-sync or build a long film.";
 
 export const COLOUR_MATCH_HONESTY =
   "Evens out overall colour and brightness of each later shot to the first included shot. One measurement covers the whole clip, so the grade does not flicker. It does not fix a character, a face, or an outfit. Off by default.";

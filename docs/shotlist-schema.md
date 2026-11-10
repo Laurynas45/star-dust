@@ -16,7 +16,7 @@ Mock is camera motion on the still, not AI motion. The file does not lock a char
 npm run render:shotlist -- examples/harbor-dusk.shotlist.zip
 ```
 
-That imports into a temporary project, prints a Preflight list, renders with Mock, stitches, and prints the mp4 path. No API key and no server. Preflight does not block the render. `--first` renders and stitches only the first enabled shot. `--even-colour` turns on Even out colour between shots for that run. The reference is the first included shot. The grade is overall colour and brightness only. If the file names fal, Replicate, or ComfyUI, the command still uses Mock unless `--provider` is set and the matching environment value is present (`FAL_KEY`, `REPLICATE_API_TOKEN`, or `COMFYUI_BASE_URL`). It says so when it stays on Mock.
+That imports into a temporary project, prints a Preflight list, renders with Mock, stitches, and prints the mp4 path. No API key and no server. Preflight does not block the render. `--first` renders and stitches only the first enabled shot. `--even-colour` turns on Even out colour between shots for that run. The reference is the first included shot. The grade is overall colour and brightness only. `--smooth-fps` turns on Smooth frame rate for that run. A clip below the stitch rate is raised with ffmpeg minterpolate. The clip stays the same length. Fast motion and thin edges can warp. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. If the file names fal, Replicate, or ComfyUI, the command still uses Mock unless `--provider` is set and the matching environment value is present (`FAL_KEY`, `REPLICATE_API_TOKEN`, or `COMFYUI_BASE_URL`). It says so when it stays on Mock.
 
 After each clip is written, the command prints a note when the file is all black, nearly all black, or does not move, and that clip is left out of the mp4. The command then exits non-zero. `--include-flagged` puts those clips in the stitch. Mock clips are not flagged when `CI` is `true` or `1`. The thresholds are in the README. This does not promise picture quality.
 
@@ -35,6 +35,7 @@ After each clip is written, the command prints a note when the file is all black
 | `transition` | The project join. See below. |
 | `chainTrimStartFrames` | Whole number from 0 to 4. Default in a new project is 1. |
 | `evenColour` | `true` or `false`. Off evens nothing. On, at stitch time, matches each later included shot's overall colour and brightness to the first included shot. One measurement for the whole clip, so the grade does not flicker. It does not fix a character or an outfit. Omitted means `false`, so an older file stays off. |
+| `smoothFps` | `true` or `false`. Off raises a lower frame rate by duplicating frames. On, at stitch time, raises a clip below the target rate with ffmpeg motion interpolation (minterpolate). The clip stays the same length. Fast motion and thin edges can warp. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. Omitted means `false`, so an older file stays off. |
 | `shots` | One object per shot, in order. At least one. At most 200. |
 
 ## Transition
@@ -65,4 +66,4 @@ On a shot, `transition` is that object, or `null` to inherit the project join. T
 | `comfyuiWorkflow` | A workflow name, or `null` to inherit the project, then the app default. |
 | `comfyLowMemory` | `true`, `false`, or `null` to inherit. |
 
-Unknown fields are an error. A missing field is an error, except `evenColour`. An older file that omits it stays off on the project and inherits on each shot. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.
+Unknown fields are an error. A missing field is an error, except `evenColour` and `smoothFps`. An older file that omits `evenColour` stays off on the project and inherits on each shot. An older file that omits `smoothFps` stays off. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.

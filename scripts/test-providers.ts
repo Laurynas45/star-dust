@@ -5087,6 +5087,205 @@ async function main() {
   assert(edit.framesToTimecode(25, 25) === "00:00:01:00", "25 frames at 25 fps is one second");
   assert(edit.framesToTimecode(25, 24) === "00:00:01:01", "25 frames at 24 fps is not the same timecode");
   assert(edit.formatCmx3600("Rate", at25, 25).includes("Timecode is 25 fps non-drop"), "EDL names the conformed rate");
+  assert(
+    edit.formatCmx3600("Rate", at25, 25).includes(
+      "Frame rate changes by duplicating or dropping frames, not by speeding a clip up."
+    ),
+    "an EDL with smooth frame rate off keeps the duplication sentence"
+  );
+  assert(!edit.formatCmx3600("Rate", at25, 25).includes("minterpolate"), "an EDL with smooth frame rate off does not name minterpolate");
+  const smoothEdl = edit.formatCmx3600("Rate", at25, 25, true);
+  assert(/original takes/.test(smoothEdl) && /minterpolate/.test(smoothEdl), "an EDL with smooth frame rate on names the original takes");
+  assert(/not RIFE or FILM/.test(smoothEdl) && /does not add detail/.test(smoothEdl), "the EDL says what interpolation does not do");
+  assert(!/character lock/.test(smoothEdl), "the EDL does not claim a character lock");
+
+  const smoothFilter = conform.conformVideoFilter(160, 90, 24, { smooth: true });
+  assert(conform.conformVideoFilter(160, 90, 24) === "scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,format=yuv420p", "smooth off keeps the fps filter");
+  assert(smoothFilter.includes("mi_mode=mci") && smoothFilter.includes("minterpolate"), "smooth uses motion-compensated interpolation");
+  assert(smoothFilter.includes(",fps=24"), "the fps filter after minterpolate keeps the length");
+  assert(!smoothFilter.includes("setpts"), "smooth does not speed the clip with setpts");
+  assert(conform.useMotionInterpolation({ fps: 16, durationSec: 1 }, 24, false) === false, "the option off does not interpolate");
+  assert(conform.useMotionInterpolation({ fps: 16, durationSec: 1 }, 24, true) === true, "a 16 fps clip is raised");
+  assert(conform.useMotionInterpolation({ fps: 24, durationSec: 1 }, 24, true) === false, "a matching rate is not interpolated");
+  assert(conform.useMotionInterpolation({ fps: 30, durationSec: 1 }, 24, true) === false, "a higher rate is dropped, not interpolated");
+  assert(conform.useMotionInterpolation({ fps: 16, durationSec: 1 / 16 }, 24, true) === false, "a single frame stays duplicated");
+  const smoothPlan = conform.planTakeConform(
+    { outputFps: 24, outputWidth: 160, outputHeight: 90, loudnessNormalize: null, smoothFps: true },
+    [
+      { shotId: "slow", fps: 16, width: 160, height: 90, hasAudio: false, durationSec: 1 },
+      { shotId: "mock", fps: 24, width: 1280, height: 720, hasAudio: false, durationSec: 1 },
+    ]
+  );
+  assert(smoothPlan.fps === 24, "the smooth plan targets 24 fps");
+  assert(
+    smoothPlan.shots[0].label === "16 fps → 24 fps, motion interpolation",
+    `smooth label: ${smoothPlan.shots[0].label}`
+  );
+  assert(smoothPlan.shots[1].label === "scaled", `the 24 fps clip is only scaled: ${smoothPlan.shots[1].label}`);
+  assert(/minterpolate/.test(smoothPlan.summary) && /not RIFE or FILM/.test(smoothPlan.summary), "the plan names minterpolate and its limit");
+  assert(/not by speeding a clip up/.test(smoothPlan.summary), "the plan says the length is not a speed change");
+  const mixedCut = stitch.hardCutFilterComplex(
+    [0, 0],
+    [conform.conformVideoFilter(160, 90, 24, { smooth: true }), conform.conformVideoFilter(160, 90, 24)]
+  ).split(";");
+  assert(mixedCut[0].includes("minterpolate") && !mixedCut[1].includes("minterpolate"), "only the low-rate input is interpolated");
+  assert(!stitch.hardCutFilterComplex([0, 0]).includes("minterpolate"), "the default hard cut does not interpolate");
+
+  const smoothProject = storage.createProject("Smooth frame rate");
+  assert(storage.getProject(smoothProject.id)?.smoothFps === false, "a new project leaves smooth frame rate off");
+  const smoothStill = storage.saveUpload(smoothProject.id, "still.png", solidPng(dataDir, "smooth-still.png", "teal"));
+  storage.updateProject(smoothProject.id, {
+    outputFps: 24,
+    outputWidth: 160,
+    outputHeight: 90,
+    chainTrimStartFrames: 0,
+    seamMode: "cut",
+  });
+  const slowShot = storage.createShot({
+    projectId: smoothProject.id,
+    prompt: "A 16 fps moving plate.",
+    presetId: "slow-zoom-in",
+    durationSec: 1,
+    startImagePath: smoothStill,
+  });
+  const mockShot = storage.createShot({
+    projectId: smoothProject.id,
+    prompt: "A 24 fps Mock move.",
+    presetId: "pan-right",
+    durationSec: 1,
+    startImagePath: smoothStill,
+  });
+  const slowFile = storage.absoluteOutputPath(smoothProject.id, "plate-16.mp4");
+  runFfmpegSync([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc2=size=160x90:rate=16:duration=1",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    slowFile.abs,
+  ]);
+  const slowJob = storage.createJob({
+    projectId: smoothProject.id,
+    shotId: slowShot.id,
+    prompt: slowShot.prompt,
+    presetId: slowShot.presetId,
+    provider: "mock",
+    status: "completed",
+    imagePath: smoothStill,
+    durationSec: 1,
+  });
+  storage.updateJob(slowJob.id, { status: "completed", outputPath: slowFile.rel, progress: 100 });
+  const mockJob = storage.createJob({
+    projectId: smoothProject.id,
+    shotId: mockShot.id,
+    prompt: mockShot.prompt,
+    presetId: mockShot.presetId,
+    provider: "mock",
+    status: "queued",
+    imagePath: smoothStill,
+    durationSec: 1,
+  });
+  await providers.startJob(mockJob.id);
+  const mockDone = storage.getJob(mockJob.id);
+  assert(mockDone?.status === "completed" && mockDone.outputPath, `Mock clip did not render (${mockDone?.status} ${mockDone?.error ?? ""})`);
+  const ffmpegLib = await import("../src/lib/ffmpeg");
+  const slowInfo = ffmpegLib.probeVideoStream(slowFile.abs);
+  const mockInfo = ffmpegLib.probeVideoStream(storage.resolveDataPath(mockDone!.outputPath!));
+  assert(Math.round(slowInfo.fps) === 16 && slowInfo.frames === 16, `the ffmpeg plate is 16 fps, got ${slowInfo.fps} fps ${slowInfo.frames} frames`);
+  assert(Math.round(mockInfo.fps) === 24, `the Mock clip is 24 fps, got ${mockInfo.fps}`);
+  const offSmooth = await stitch.stitchProject(smoothProject.id);
+  storage.updateProject(smoothProject.id, { smoothFps: true });
+  assert(storage.getProject(smoothProject.id)?.smoothFps === true, "the project can turn smooth frame rate on");
+  const onSmooth = await stitch.stitchProject(smoothProject.id);
+  const smoothOffAbs = storage.resolveDataPath(offSmooth.outputPath);
+  const smoothOnAbs = storage.resolveDataPath(onSmooth.outputPath);
+  const offInfo = ffmpegLib.probeVideoStream(smoothOffAbs);
+  const onInfo = ffmpegLib.probeVideoStream(smoothOnAbs);
+  assert(Math.round(offInfo.fps) === 24 && Math.round(onInfo.fps) === 24, `both stitches are 24 fps, off ${offInfo.fps} on ${onInfo.fps}`);
+  assert(offInfo.width === 160 && offInfo.height === 90 && onInfo.width === 160 && onInfo.height === 90, "both stitches use the target size");
+  const frame = 1 / 24;
+  assert(
+    Math.abs(offSmooth.durationSec - onSmooth.durationSec) <= frame + 0.01,
+    `smooth duration ${onSmooth.durationSec} differs from off ${offSmooth.durationSec} by more than a frame`
+  );
+  assert(offSmooth.smooth.active === false && /duplicating frames/.test(offSmooth.smooth.summary), "off says frames are duplicated");
+  assert(!/minterpolate/.test(offSmooth.smooth.summary), "off does not claim interpolation");
+  assert(onSmooth.smooth.active === true, "on reports smooth frame rate");
+  assert(onSmooth.smooth.shots.some((shot) => shot.shotId === slowShot.id && shot.method === "minterpolate"), "the 16 fps shot was interpolated");
+  assert(onSmooth.smooth.shots.some((shot) => shot.shotId === mockShot.id && shot.method === "unchanged"), "the Mock shot was already at the target rate");
+  assert(/minterpolate/.test(onSmooth.smooth.summary) && /Clip length is unchanged/.test(onSmooth.smooth.summary), "the summary says the length is unchanged");
+  assert(/not RIFE or FILM/.test(onSmooth.smooth.summary) && /does not add detail/.test(onSmooth.smooth.summary), "the summary says what this is not");
+  const onManifest = JSON.parse(fs.readFileSync(storage.resolveDataPath(onSmooth.manifestPath), "utf8")) as {
+    smooth: { summary: string; active: boolean };
+  };
+  assert(onManifest.smooth.summary === onSmooth.smooth.summary && onManifest.smooth.active === true, "the stitch manifest repeats the smooth summary");
+  const span = Math.round(slowInfo.durationSec * 24);
+  function rawFrames(file: string, count: number): Buffer[] {
+    const probe = spawnSync(
+      "ffmpeg",
+      ["-v", "error", "-i", file, "-frames:v", String(count), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+      { maxBuffer: 160 * 90 * 3 * count + 65536 }
+    );
+    if (probe.status !== 0) throw new Error(probe.stderr?.toString() || "raw frames failed");
+    const data = probe.stdout as Buffer;
+    const size = 160 * 90 * 3;
+    const frames: Buffer[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const chunk = data.subarray(index * size, (index + 1) * size);
+      if (chunk.length !== size) throw new Error(`frame ${index} of ${file} is short`);
+      frames.push(chunk);
+    }
+    return frames;
+  }
+  function meanAbs(a: Buffer, b: Buffer): number {
+    let sum = 0;
+    for (let index = 0; index < a.length; index += 1) sum += Math.abs(a[index] - b[index]);
+    return sum / a.length;
+  }
+  const offFrames = rawFrames(smoothOffAbs, span);
+  const onFrames = rawFrames(smoothOnAbs, span);
+  const duplicated: number[] = [];
+  for (let index = 0; index < span - 1; index += 1) {
+    if (meanAbs(offFrames[index], offFrames[index + 1]) < 0.5) duplicated.push(index);
+  }
+  assert(duplicated.length >= 3, `the off stitch should repeat frames, found ${duplicated.length}`);
+  const changed = duplicated.filter((index) => meanAbs(onFrames[index], onFrames[index + 1]) > 1);
+  assert(
+    changed.length >= 3,
+    `interpolated frames are still duplicates at ${duplicated.join(",")}`
+  );
+  const smoothExport = await edit.buildEditExport(smoothProject.id);
+  const smoothZip = await JSZip.loadAsync(smoothExport.bytes);
+  const originalName = "SH010_v01.mp4";
+  const zipped = await smoothZip.file(originalName)!.async("nodebuffer");
+  const sourceHash = createHash("sha256").update(fs.readFileSync(slowFile.abs)).digest("hex");
+  assert(createHash("sha256").update(zipped).digest("hex") === sourceHash, "export for edit keeps the original 16 fps take");
+  const zippedManifest = JSON.parse(await smoothZip.file("SH010_v01.json")!.async("string")) as {
+    fps: number;
+    smoothFrameRate: string;
+  };
+  assert(Math.round(zippedManifest.fps) === 16, "the edit manifest keeps the original frame rate");
+  assert(
+    /original takes/.test(zippedManifest.smoothFrameRate) && /minterpolate/.test(zippedManifest.smoothFrameRate),
+    "the edit manifest says the takes were not interpolated"
+  );
+  assert(/not RIFE or FILM/.test(smoothExport.edl) && /original takes/.test(smoothExport.edl), "the EDL says what the stitch would apply");
+  assert(!/FAL_KEY|REPLICATE_API_TOKEN/.test(smoothExport.edl + zippedManifest.smoothFrameRate), "the smooth export has no key");
+  storage.updateProject(smoothProject.id, { smoothFps: false });
+  const seamOff = await stitch.previewSeam(smoothProject.id, mockShot.id);
+  storage.updateProject(smoothProject.id, { smoothFps: true });
+  const seamOn = await stitch.previewSeam(smoothProject.id, mockShot.id);
+  assert(seamOff.smooth.active === false && /duplicating frames/.test(seamOff.smooth.summary), "preview seam off duplicates frames");
+  assert(seamOn.smooth.active === true && /minterpolate/.test(seamOn.smooth.summary), "preview seam on uses the same interpolation");
+  assert(
+    Math.abs(seamOff.durationSec - seamOn.durationSec) <= frame + 0.01,
+    `preview seam duration ${seamOn.durationSec} differs from off ${seamOff.durationSec} by more than a frame`
+  );
+  assert(!process.env.FAL_KEY && !process.env.REPLICATE_API_TOKEN, "smooth frame rate did not need an API key");
 
   function conformStill(projectId: string): string {
     const rel = `uploads/${projectId}/conform-still.png`;
@@ -5926,6 +6125,7 @@ async function main() {
     seamFadeSec: 0.5,
     chainTrimStartFrames: 2,
     evenColour: true,
+    smoothFps: true,
     outputFps: 24,
     outputWidth: 1280,
     outputHeight: 720,
@@ -5981,6 +6181,7 @@ async function main() {
   assert(beforeSettings.shots[0].seed === 4242 && beforeSettings.shots[0].seedPinned, "the pinned seed is in the shot list");
   assert(beforeSettings.shots[2].enabled === false, "a disabled shot stays in the file");
   assert(beforeSettings.evenColour === true, "the shot list exports even colour");
+  assert(beforeSettings.smoothFps === true, "the shot list exports smooth frame rate");
   assert(beforeSettings.shots[0].evenColour === null, "an unset boundary inherits colour");
   assert(beforeSettings.shots[1].evenColour === false, "a boundary can leave colour as rendered");
 
@@ -6170,6 +6371,7 @@ async function main() {
   assert(harborShots.length === 2, "harbor import has two shots");
   assert(harborShots[0].prompt.startsWith("Slow push"), "harbor keeps the first prompt");
   assert(harborShots[1].presetId === "pan-right", "harbor keeps the second preset");
+  assert(harborImport.project.smoothFps === false, "harbor leaves smooth frame rate off");
   assert(harborImport.project.id !== "sample-harbor-dusk", "harbor import does not take the sample id");
   assert(storage.listProjects().length === harborProjectCount + 1, "harbor import adds one project");
   const folder = await shotlist.loadShotListPath(path.join(process.cwd(), "examples", "harbor-dusk", "shotlist.json"));
@@ -6177,8 +6379,13 @@ async function main() {
   const folderImport = shotlist.importShotList(folder.bundle!);
   assert(folderImport.ok, `harbor json import failed: ${folderImport.ok ? "" : folderImport.errors.join(" | ")}`);
   if (!folder.bundle) throw new Error("unreachable");
-  const olderDoc = JSON.parse(folder.bundle.json) as { evenColour?: unknown; shots: { evenColour?: unknown }[] };
+  const olderDoc = JSON.parse(folder.bundle.json) as {
+    evenColour?: unknown;
+    smoothFps?: unknown;
+    shots: { evenColour?: unknown }[];
+  };
   delete olderDoc.evenColour;
+  delete olderDoc.smoothFps;
   for (const shot of olderDoc.shots) delete shot.evenColour;
   const olderImport = shotlist.importShotList({
     json: JSON.stringify(olderDoc),
@@ -6188,6 +6395,7 @@ async function main() {
   assert(olderImport.ok, `an older shot list failed: ${olderImport.ok ? "" : olderImport.errors.join(" | ")}`);
   if (!olderImport.ok) throw new Error("unreachable");
   assert(olderImport.project.evenColour === false, "an older shot list leaves colour off");
+  assert(olderImport.project.smoothFps === false, "an older shot list leaves smooth frame rate off");
   assert(
     storage.listShots(olderImport.project.id).every((shot) => shot.evenColour == null),
     "an older shot inherits the project colour setting"
@@ -6201,6 +6409,19 @@ async function main() {
   assert(!badColour.ok, "a non-boolean evenColour is not imported");
   if (badColour.ok) throw new Error("unreachable");
   assert(badColour.errors.some((error) => /evenColour must be true or false/.test(error)), `bad evenColour: ${badColour.errors.join(" | ")}`);
+  const smoothType = JSON.parse(folder.bundle.json) as { smoothFps?: unknown };
+  smoothType.smoothFps = "yes";
+  const badSmooth = shotlist.importShotList({
+    json: JSON.stringify(smoothType),
+    files: folder.bundle.files,
+    source: "json",
+  });
+  assert(!badSmooth.ok, "a non-boolean smoothFps is not imported");
+  if (badSmooth.ok) throw new Error("unreachable");
+  assert(
+    badSmooth.errors.some((error) => /smoothFps must be true or false/.test(error)),
+    `bad smoothFps: ${badSmooth.errors.join(" | ")}`
+  );
 
   function cliEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env };
@@ -6265,6 +6486,22 @@ async function main() {
   assert(/Even out colour|Evened overall/i.test(harborColour.stdout || ""), "the cli says the colour setting was on");
   assert(/first included shot/i.test(harborColour.stdout || ""), "the cli names the first included shot");
   assert(!/FAL_KEY=|REPLICATE_API_TOKEN=|sk_live|should-not-leak/i.test(harborColour.stdout || ""), "the even-colour cli output has no key");
+
+  const harborSmooth = spawnSync(
+    "npm",
+    ["run", "render:shotlist", "--", "examples/harbor-dusk.shotlist.zip", "--smooth-fps"],
+    { encoding: "utf8", cwd: process.cwd(), env: cliEnv() }
+  );
+  assert(harborSmooth.status === 0, `harbor --smooth-fps failed\n${harborSmooth.stdout}\n${harborSmooth.stderr}`);
+  const smoothMp4 = /mp4: (\S+)/.exec(harborSmooth.stdout || "");
+  assert(smoothMp4 && fs.existsSync(smoothMp4[1]) && fs.statSync(smoothMp4[1]).size > 1000, "smooth-fps writes an mp4 with no API key");
+  const smoothDur = mediaDuration(smoothMp4![1]);
+  assert(smoothDur > 7.5 && smoothDur < 8.5, `smooth-fps stitch duration ${smoothDur} is about 8s`);
+  assert(/--smooth-fps:/.test(harborSmooth.stdout || ""), "--smooth-fps says the setting is on");
+  assert(/none were interpolated/.test(harborSmooth.stdout || ""), "Harbor is already 24 fps, so nothing is interpolated");
+  assert(/not RIFE or FILM/.test(harborSmooth.stdout || ""), "the cli says this is not RIFE or FILM");
+  assert(/does not add detail/.test(harborSmooth.stdout || ""), "the cli says interpolation does not add detail");
+  assert(!/FAL_KEY=|REPLICATE_API_TOKEN=|sk_live|should-not-leak/i.test(harborSmooth.stdout || ""), "the smooth-fps cli output has no key");
 
   const lookDir = fs.mkdtempSync(path.join(os.tmpdir(), "stardust-look-"));
   const lookStill = solidPng(lookDir, "look.png", "purple");

@@ -27,6 +27,7 @@ import {
   APPROVE_HONESTY,
   APPROVED_LABEL,
   CONFORM_HONESTY,
+  SMOOTH_FPS_HONESTY,
   FINISH_HONESTY,
   FinishView,
   APPROVED_MISMATCH_NOTE,
@@ -210,6 +211,7 @@ type StitchResponse = {
     colourNote?: string;
   }[];
   colour?: { summary: string };
+  smooth?: { summary: string };
   finish?: FinishView;
   contactSheetPath?: string;
   manifestPath?: string;
@@ -835,7 +837,7 @@ export default function ProjectStudioPage() {
         [shotId]: {
           outputPath: data.outputPath,
           durationSec: Number(data.durationSec) || 0,
-          note: [seam?.note, seam?.colourNote].filter(Boolean).join(" "),
+          note: [seam?.note, seam?.colourNote, data.smoothSummary].filter(Boolean).join(" "),
           label,
         },
       }));
@@ -881,6 +883,7 @@ export default function ProjectStudioPage() {
     musicFadeOutSec?: number;
     captionMode?: CaptionMode | null;
     evenColour?: boolean;
+    smoothFps?: boolean;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -1087,7 +1090,9 @@ export default function ProjectStudioPage() {
           <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
             ffmpeg joins the take you chose. An approved take stays in that stitch. Hard cut, or a
             short crossfade. A chained hard cut can trim a few start frames of the next clip. Mixed
-            clips are conformed to one frame rate and size first. A music bed and an imported SRT
+            clips are conformed to one frame rate and size first. Smooth frame rate, off unless
+            you turn it on, raises a lower rate with ffmpeg motion interpolation instead of
+            repeated frames. A music bed and an imported SRT
             can ride on that same file.             The stitch also writes a contact sheet of those shots.
             A clip that is all black, or that does not move, is named and left out until you include it or render it again.
             The stitch is not a new model.
@@ -1181,6 +1186,17 @@ export default function ProjectStudioPage() {
             <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{detail.finish.fitNote}</p>
           )}
           <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">{CONFORM_HONESTY}</p>
+          <label className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={project.smoothFps === true}
+              onChange={(e) => void saveProjectPatch({ smoothFps: e.target.checked })}
+            />
+            <span>
+              <span className="text-white">Smooth frame rate.</span> {SMOOTH_FPS_HONESTY}
+            </span>
+          </label>
           {stitchReview?.warn && (
             <div className="mt-3 space-y-2 rounded-lg border border-amber-400/40 bg-amber-400/10 p-3" role="status">
               {stitchReview.paragraphs.map((paragraph, index) => (
@@ -2678,6 +2694,9 @@ export default function ProjectStudioPage() {
               {previewCut.colour?.summary && (
                 <p className="text-xs leading-relaxed text-white">{previewCut.colour.summary}</p>
               )}
+              {previewCut.smooth?.summary && (
+                <p className="text-xs leading-relaxed text-white">{previewCut.smooth.summary}</p>
+              )}
               {previewCut.contactSheetPath && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -2744,6 +2763,9 @@ export default function ProjectStudioPage() {
               {stitch.finish?.line && <p className="text-xs text-white">{stitch.finish.line}</p>}
               {stitch.colour?.summary && (
                 <p className="text-xs leading-relaxed text-white">{stitch.colour.summary}</p>
+              )}
+              {stitch.smooth?.summary && (
+                <p className="text-xs leading-relaxed text-white">{stitch.smooth.summary}</p>
               )}
               {stitch.finish?.loudnessNote && (
                 <p className="text-xs text-[var(--muted)]">{stitch.finish.loudnessNote}</p>

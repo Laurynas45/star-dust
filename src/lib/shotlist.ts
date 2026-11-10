@@ -77,6 +77,7 @@ const ROOT_KEYS = [
   "transition",
   "chainTrimStartFrames",
   "evenColour",
+  "smoothFps",
   "shots",
 ] as const;
 
@@ -153,6 +154,12 @@ export interface ShotListDocument {
   chainTrimStartFrames: number;
   /** Omitted in an older file means false, so the stitch leaves colour as rendered. */
   evenColour: boolean;
+  /**
+   * Omitted in an older file means false. On, the stitch raises a clip below
+   * the target rate with ffmpeg minterpolate. The length stays the same.
+   * It is not RIFE or FILM.
+   */
+  smoothFps: boolean;
   shots: ShotListShot[];
 }
 
@@ -185,6 +192,7 @@ export interface ShotRenderSettings {
   transition: ShotListTransition;
   chainTrimStartFrames: number;
   evenColour: boolean;
+  smoothFps: boolean;
   shots: Array<{
     prompt: string;
     durationSec: number;
@@ -485,6 +493,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
 
   const transition = readTransition(parsed.transition, "Project transition", errors, false);
   const evenColour = readEvenColour(parsed.evenColour, "evenColour", errors, false);
+  const smoothFps = readEvenColour(parsed.smoothFps, "smoothFps", errors, false);
   const trim = parsed.chainTrimStartFrames;
   let chainTrim: number | undefined;
   if (typeof trim !== "number" || !Number.isInteger(trim)) {
@@ -693,6 +702,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
     !transition ||
     chainTrim == null ||
     typeof evenColour !== "boolean" ||
+    typeof smoothFps !== "boolean" ||
     typeof parsed.name !== "string" ||
     typeof parsed.description !== "string" ||
     typeof parsed.styleBase !== "string" ||
@@ -716,6 +726,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       transition,
       chainTrimStartFrames: chainTrim,
       evenColour,
+      smoothFps,
       shots,
     },
     errors: [],
@@ -798,6 +809,7 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
     ),
     chainTrimStartFrames: project.chainTrimStartFrames,
     evenColour: project.evenColour === true,
+    smoothFps: project.smoothFps === true,
     shots: shots.map((shot) => {
       const images: ShotListImage[] = [
         { file: place(shot.startImagePath, shot.position, "start"), role: "start" },
@@ -891,6 +903,7 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
     transition: document.transition,
     chainTrimStartFrames: document.chainTrimStartFrames,
     evenColour: document.evenColour,
+    smoothFps: document.smoothFps,
     shots: document.shots.map((shot) => {
       const start = shot.images.find((image) => image.role === "start");
       const end = shot.images.find((image) => image.role === "end");
@@ -945,6 +958,7 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
       seamFadeFrames: doc.transition.fadeFrames,
       chainTrimStartFrames: doc.chainTrimStartFrames,
       evenColour: doc.evenColour,
+      smoothFps: doc.smoothFps,
       outputFps: doc.output.fps,
       outputWidth: doc.output.width,
       outputHeight: doc.output.height,

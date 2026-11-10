@@ -19,6 +19,7 @@ export async function POST(
       outputPath: result.outputPath,
       durationSec: result.durationSec,
       seam: result.seams[0] ?? null,
+      smoothSummary: result.smooth.summary,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Seam preview failed";
