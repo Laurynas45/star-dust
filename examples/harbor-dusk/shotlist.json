@@ -19,6 +19,7 @@
   },
   "chainTrimStartFrames": 1,
   "evenColour": false,
+  "smoothFps": false,
   "shots": [
     {
       "prompt": "Slow push toward the lanterns as the tide slides under the pier.",

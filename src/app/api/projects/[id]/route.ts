@@ -183,6 +183,7 @@ export async function PATCH(
       typeof body.musicFadeOutSec === "number" ? clampMusicFadeSec(body.musicFadeOutSec) : undefined,
     captionMode: captionModeField(body.captionMode),
     evenColour: typeof body.evenColour === "boolean" ? body.evenColour : undefined,
+    smoothFps: typeof body.smoothFps === "boolean" ? body.smoothFps : undefined,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

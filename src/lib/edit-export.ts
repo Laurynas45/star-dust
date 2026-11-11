@@ -7,7 +7,7 @@ import { cuesOnTimeline, formatSrt, readSrtFile } from "./captions";
 import { clipFlagLabel } from "./clip-check";
 import { writeContactSheet } from "./contact-sheet";
 import { completedTakesFor, cutTake } from "./chain-stale";
-import { resolveConformTarget } from "./conform";
+import { editRateNote, resolveConformTarget } from "./conform";
 import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
 import { joinOmissionWarning, type JoinOmission } from "./join";
 import { COMFY_WORKFLOWS, comfyWorkflowFromModelName } from "./provider-info";
@@ -58,6 +58,11 @@ export interface TakeManifest {
   sourceStillSha256: string;
   /** Set when the clip was flagged. Null when it was not. */
   clipFlag: string | null;
+  /**
+   * What the stitch does with frame rate. These files are the original takes.
+   * Off keeps the duplication sentence. On names ffmpeg minterpolate.
+   */
+  smoothFrameRate: string;
 }
 
 export interface EditEvent {
@@ -189,7 +194,7 @@ export function timelineEvents(
   });
 }
 
-export function formatCmx3600(title: string, events: EditEvent[], fps = EDIT_FPS): string {
+export function formatCmx3600(title: string, events: EditEvent[], fps = EDIT_FPS, smooth = false): string {
   const rate = timelineRate(fps);
   const safeTitle = title.replace(/[\r\n]+/g, " ").trim() || "Star Dust";
   const lines = [
@@ -200,7 +205,7 @@ export function formatCmx3600(title: string, events: EditEvent[], fps = EDIT_FPS
     "* Cuts, dissolves, and in/out only. This is not a Premiere or Resolve project.",
     "* MP4 is a review codec, not a mastering codec.",
     `* Timecode is ${rate} fps non-drop, the conformed rate the stitch uses.`,
-    "* Frame rate changes by duplicating or dropping frames, not by speeding a clip up.",
+    `* ${editRateNote(smooth)}`,
     "* This does not lock a character, lip-sync, or build a long film.",
     "",
   ];
@@ -267,7 +272,8 @@ function manifestFor(
   sharedStyleText: string,
   info: VideoStreamInfo,
   shots: Shot[],
-  jobs: Job[]
+  jobs: Job[],
+  smoothFrameRate: string
 ): TakeManifest {
   const stillAbs = resolveDataPath(job.imagePath);
   if (!fs.existsSync(stillAbs)) {
@@ -292,6 +298,7 @@ function manifestFor(
     chainSource: chainSourceFor(shot, job, shots, jobs),
     sourceStillSha256,
     clipFlag: job.clipCheck?.flagged ? clipFlagLabel(job.clipCheck) : null,
+    smoothFrameRate,
   };
 }
 
@@ -393,9 +400,10 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
     target.fps
   );
   const leftOut = joinOmissionWarning(omissions);
-  const edl = formatCmx3600(project.name, events, target.fps) + (leftOut ? `* ${leftOut}\n` : "");
+  const smoothNote = editRateNote(project.smoothFps === true);
+  const edl = formatCmx3600(project.name, events, target.fps, project.smoothFps === true) + (leftOut ? `* ${leftOut}\n` : "");
   const manifests = chosen.map((part) =>
-    manifestFor(part.shot, part.job, part.version, sharedStyle, part.info, shots, jobs)
+    manifestFor(part.shot, part.job, part.version, sharedStyle, part.info, shots, jobs, smoothNote)
   );
   const cutSec = events.length === 0 ? 0 : events[events.length - 1].recOutFrame / target.fps;
   let srt: string | null = null;

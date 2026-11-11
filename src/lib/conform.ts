@@ -2,6 +2,11 @@
  * One output rate and size for a cut whose clips came from different providers.
  * The fps filter holds the picture's duration and duplicates or drops frames.
  * It does not speed a clip up. Letterbox and pillarbox pad; they do not stretch.
+ *
+ * Smooth frame rate is off unless the project turns it on. A clip below the
+ * target rate then uses ffmpeg minterpolate (motion-compensated) instead of
+ * repeated frames. The length stays the same. It is not RIFE or FILM, and it
+ * does not add detail, fix a character, or regenerate motion.
  */
 
 export const HISTORIC_NORMALIZE =
@@ -45,7 +50,33 @@ export interface ConformClip extends FrameSize {
   shotId: string;
   fps: number;
   hasAudio: boolean;
+  durationSec?: number;
 }
+
+/** What the stitch did to one clip's frame rate. */
+export type SmoothFpsMethod = "unchanged" | "duplicate" | "drop" | "minterpolate";
+
+export interface SmoothFpsShot {
+  shotId: string;
+  position: number;
+  fromFps: number;
+  toFps: number;
+  method: SmoothFpsMethod;
+}
+
+/** What the stitch card and the manifest say about Smooth frame rate. */
+export interface SmoothFpsReport {
+  active: boolean;
+  summary: string;
+  shots: SmoothFpsShot[];
+}
+
+/**
+ * Limits of ffmpeg's block matcher. Shown whenever the option is on, including
+ * when no clip was below the target rate.
+ */
+export const SMOOTH_FPS_LIMIT =
+  "Fast motion and thin edges can warp. This is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion.";
 
 export interface ConformPlan {
   summary: string;
@@ -169,11 +200,58 @@ export function resolveConformTarget(
   };
 }
 
-export function conformVideoFilter(width: number, height: number, fps: number): string {
+/**
+ * Motion-compensated interpolation to `fps`, then the fps filter.
+ * minterpolate stops a couple of frames short of the source length. The fps
+ * filter fills that gap, so the clip is not slow motion and the length matches
+ * frame duplication. This is ffmpeg's block match. It is not RIFE or FILM.
+ */
+export function smoothRateFilter(fps: number): string {
+  const rate = canonicalFps(fps);
+  return `minterpolate=fps=${rate}:mi_mode=mci:mc_mode=obmc:me_mode=bidir:me=hexbs:mb_size=16:search_param=4:vsbmc=0,fps=${rate}`;
+}
+
+/**
+ * True when this clip should be raised with minterpolate.
+ * A clip that is already at the target, or above it, stays on the fps filter.
+ * Fewer than two frames has no motion to interpolate, so those stay duplicated.
+ */
+export function useMotionInterpolation(
+  clip: { fps: number; durationSec?: number },
+  targetFps: number,
+  smooth: boolean
+): boolean {
+  if (!smooth) return false;
+  if (!(canonicalFps(clip.fps) < canonicalFps(targetFps))) return false;
+  if (clip.durationSec == null) return true;
+  if (!(clip.durationSec > 0)) return false;
+  return clip.durationSec * clip.fps >= 2;
+}
+
+export function conformVideoFilter(
+  width: number,
+  height: number,
+  fps: number,
+  opts?: { smooth?: boolean }
+): string {
   const w = evenDim(width);
   const h = evenDim(height);
   const rate = canonicalFps(fps);
-  return `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${rate},format=yuv420p`;
+  const rateFilter = opts?.smooth ? smoothRateFilter(rate) : `fps=${rate}`;
+  return `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1,${rateFilter},format=yuv420p`;
+}
+
+/** One conform filter per clip. A string is shared when every clip uses the same filter. */
+export function conformClipFilters(
+  clips: readonly { fps: number; durationSec?: number }[],
+  target: { width: number; height: number; fps: number },
+  smooth: boolean
+): string[] {
+  return clips.map((clip) =>
+    conformVideoFilter(target.width, target.height, target.fps, {
+      smooth: useMotionInterpolation(clip, target.fps, smooth),
+    })
+  );
 }
 
 /** A silent clip needs a silent track when any other clip in the cut has audio. */
@@ -212,12 +290,14 @@ export function masterLoudnormFilter(hasMusic: boolean): string {
 export function conformShotLabel(
   clip: { fps: number; width: number; height: number; hasAudio?: boolean },
   target: { fps: number; width: number; height: number },
-  opts?: { anyAudio?: boolean }
+  opts?: { anyAudio?: boolean; smooth?: boolean }
 ): string | null {
   const parts: string[] = [];
   const srcFps = canonicalFps(clip.fps);
   const dstFps = canonicalFps(target.fps);
-  if (srcFps !== dstFps) parts.push(`${srcFps} fps → ${dstFps} fps`);
+  if (srcFps !== dstFps) {
+    parts.push(opts?.smooth ? `${srcFps} fps → ${dstFps} fps, motion interpolation` : `${srcFps} fps → ${dstFps} fps`);
+  }
   const fit = letterboxFit(clip.width, clip.height, target.width, target.height);
   if (fit.letterboxed || fit.pillarboxed) {
     parts.push(fit.letterboxed && fit.padY >= fit.padX ? "letterboxed" : "pillarboxed");
@@ -241,6 +321,8 @@ export function conformSummary(input: {
   labels: readonly (string | null)[];
   anyAudio: boolean;
   loudness: boolean;
+  /** When true and no clip is interpolated, say so. Off leaves the old sentence. */
+  smoothFps?: boolean;
 }): string {
   const changed = input.labels.filter((label): label is string => Boolean(label));
   const where = originPhrase(input.target.fpsSource, input.target.sizeSource);
@@ -251,9 +333,19 @@ export function conformSummary(input: {
       : changed.length === 1
         ? "1 shot is conformed."
         : `${changed.length} shots are conformed.`;
-  const retime = changed.some((label) => label.includes("fps →"))
-    ? " Frame rate changes by duplicating or dropping frames, not by speeding a clip up."
-    : "";
+  const interpolated = changed.some((label) => label.includes("motion interpolation"));
+  const dropped = changed.some((label) => label.includes("fps →") && !label.includes("motion interpolation"));
+  const idle = " Smooth frame rate is on. No clip is below the target rate, so none are interpolated.";
+  let retime = "";
+  if (interpolated) {
+    retime = ` A lower frame rate is raised with ffmpeg motion interpolation (minterpolate), not by speeding a clip up. ${SMOOTH_FPS_LIMIT}`;
+    if (dropped) retime += " A higher frame rate is still lowered by dropping frames.";
+  } else if (changed.some((label) => label.includes("fps →"))) {
+    retime = " Frame rate changes by duplicating or dropping frames, not by speeding a clip up.";
+    if (input.smoothFps) retime += idle;
+  } else if (input.smoothFps) {
+    retime = idle;
+  }
   const audio = !input.anyAudio
     ? ""
     : input.loudness
@@ -268,6 +360,7 @@ export function planTakeConform(
     outputWidth?: number | null;
     outputHeight?: number | null;
     loudnessNormalize?: boolean | null;
+    smoothFps?: boolean | null;
   },
   clips: readonly ConformClip[]
 ): ConformPlan {
@@ -275,8 +368,12 @@ export function planTakeConform(
     const fps = project.outputFps == null ? 24 : canonicalFps(project.outputFps);
     const width = project.outputWidth == null ? 1280 : evenDim(project.outputWidth, OUTPUT_DIM_MIN);
     const height = project.outputHeight == null ? 720 : evenDim(project.outputHeight, OUTPUT_DIM_MIN);
+    const smoothNote =
+      project.smoothFps === true
+        ? ` Smooth frame rate is on. A clip below the target rate is raised with ffmpeg motion interpolation (minterpolate), not by speeding a clip up. ${SMOOTH_FPS_LIMIT}`
+        : "";
     return {
-      summary: "No finished take yet. The stitch conforms clips to one frame rate and size before it joins them.",
+      summary: `No finished take yet. The stitch conforms clips to one frame rate and size before it joins them.${smoothNote}`,
       fps,
       width,
       height,
@@ -290,12 +387,22 @@ export function planTakeConform(
   const target = resolveConformTarget(project, clips);
   const anyAudio = clips.some((clip) => clip.hasAudio);
   const loudness = loudnessOn(project.loudnessNormalize, anyAudio);
+  const smooth = project.smoothFps === true;
   const shots = clips.map((clip) => ({
     shotId: clip.shotId,
-    label: conformShotLabel(clip, target, { anyAudio }),
+    label: conformShotLabel(clip, target, {
+      anyAudio,
+      smooth: useMotionInterpolation(clip, target.fps, smooth),
+    }),
   }));
   return {
-    summary: conformSummary({ target, labels: shots.map((shot) => shot.label), anyAudio, loudness }),
+    summary: conformSummary({
+      target,
+      labels: shots.map((shot) => shot.label),
+      anyAudio,
+      loudness,
+      smoothFps: smooth,
+    }),
     fps: target.fps,
     width: target.width,
     height: target.height,
@@ -305,4 +412,58 @@ export function planTakeConform(
     loudness,
     shots,
   };
+}
+
+function nameShots(shots: readonly { position: number }[]): string {
+  const names = shots.map((shot) => `shot ${shot.position}`);
+  if (names.length <= 1) return names[0] ?? "the shot";
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+/**
+ * What this stitch did. Off keeps the duplication sentence. On names the clips
+ * that were interpolated, and says when nothing was below the target rate.
+ * The length is not changed into slow motion.
+ */
+export function smoothFpsReport(
+  active: boolean,
+  clips: readonly { shotId: string; position: number; fps: number; durationSec?: number }[],
+  targetFps: number
+): SmoothFpsReport {
+  const toFps = canonicalFps(targetFps);
+  const shots: SmoothFpsShot[] = clips.map((clip) => {
+    const fromFps = canonicalFps(clip.fps);
+    let method: SmoothFpsMethod = "unchanged";
+    if (fromFps < toFps) {
+      method = useMotionInterpolation(clip, toFps, active) ? "minterpolate" : "duplicate";
+    } else if (fromFps > toFps) {
+      method = "drop";
+    }
+    return { shotId: clip.shotId, position: clip.position, fromFps, toFps, method };
+  });
+  const raised = shots.filter((shot) => shot.method === "minterpolate");
+  const dropped = shots.filter((shot) => shot.method === "drop");
+  let summary: string;
+  if (!active) {
+    summary =
+      "Smooth frame rate is off. A lower frame rate is raised by duplicating frames, not by speeding a clip up.";
+  } else if (raised.length === 0) {
+    summary = `Smooth frame rate is on. No clip is below ${toFps} fps, so none were interpolated. ${SMOOTH_FPS_LIMIT}`;
+  } else {
+    summary = `Smooth frame rate raised ${nameShots(raised)} to ${toFps} fps with ffmpeg motion interpolation (minterpolate). Clip length is unchanged. ${SMOOTH_FPS_LIMIT}`;
+    if (dropped.length > 0) summary += " A higher frame rate was lowered by dropping frames.";
+  }
+  return { active, summary, shots };
+}
+
+/**
+ * The line Export for edit writes. The files themselves are the original takes.
+ * Off keeps the sentence the EDL already used.
+ */
+export function editRateNote(smooth: boolean): string {
+  if (!smooth) {
+    return "Frame rate changes by duplicating or dropping frames, not by speeding a clip up.";
+  }
+  return `Smooth frame rate is on. These files are the original takes and were not interpolated. The stitch raises a lower frame rate with ffmpeg motion interpolation (minterpolate), not by speeding a clip up. ${SMOOTH_FPS_LIMIT}`;
 }

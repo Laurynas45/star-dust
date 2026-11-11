@@ -104,7 +104,8 @@ function openDatabase(): DB {
       music_fade_out_sec REAL NOT NULL DEFAULT 1,
       captions_path TEXT,
       caption_mode TEXT,
-      even_colour INTEGER NOT NULL DEFAULT 0
+      even_colour INTEGER NOT NULL DEFAULT 0,
+      smooth_fps INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -394,6 +395,9 @@ function migrate(db: DB) {
   if (!hasColumn(db, "shots", "even_colour")) {
     db.exec("ALTER TABLE shots ADD COLUMN even_colour INTEGER");
   }
+  if (!hasColumn(db, "projects", "smooth_fps")) {
+    db.exec("ALTER TABLE projects ADD COLUMN smooth_fps INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 function seedSample(db: DB) {
@@ -505,6 +509,7 @@ function mapProject(row: Record<string, unknown>): Project {
     captionMode: parseCaptionMode(row.caption_mode),
     provider: isProviderId(row.shotlist_provider) ? row.shotlist_provider : null,
     evenColour: Number(row.even_colour) === 1,
+    smoothFps: Number(row.smooth_fps) === 1,
     ...trimFields(
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
@@ -761,6 +766,7 @@ export function createProject(name: string, description = ""): Project {
     captionMode: null,
     provider: null,
     evenColour: false,
+    smoothFps: false,
   };
   getDb()
     .prepare(
@@ -799,6 +805,7 @@ export function updateProject(
       | "captionMode"
       | "provider"
       | "evenColour"
+      | "smoothFps"
     >
   > & {
     characterSheetPath?: string | null;
@@ -853,6 +860,7 @@ export function updateProject(
           ? patch.provider
           : null,
     evenColour: patch.evenColour === undefined ? current.evenColour : patch.evenColour,
+    smoothFps: patch.smoothFps === undefined ? current.smoothFps : patch.smoothFps,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -864,7 +872,8 @@ export function updateProject(
            style_base = ?, drop_duplicate_frame = ?, chain_trim_start_frames = ?,
            output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
            music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
-           captions_path = ?, caption_mode = ?, shotlist_provider = ?, even_colour = ?
+           captions_path = ?, caption_mode = ?, shotlist_provider = ?, even_colour = ?,
+           smooth_fps = ?
        WHERE id = ?`
     )
     .run(
@@ -893,6 +902,7 @@ export function updateProject(
       next.captionMode,
       next.provider,
       next.evenColour ? 1 : 0,
+      next.smoothFps ? 1 : 0,
       id
     );
   return getProject(id);

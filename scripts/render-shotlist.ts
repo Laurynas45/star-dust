@@ -78,10 +78,12 @@ function parseArgs(argv: string[]): {
   provider: ProviderId | null;
   includeFlagged: boolean;
   evenColour: boolean;
+  smoothFps: boolean;
 } {
   let first = false;
   let includeFlagged = false;
   let evenColour = false;
+  let smoothFps = false;
   let provider: ProviderId | null = null;
   const files: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -98,6 +100,10 @@ function parseArgs(argv: string[]): {
       evenColour = true;
       continue;
     }
+    if (arg === "--smooth-fps") {
+      smoothFps = true;
+      continue;
+    }
     if (arg === "--provider") {
       const value = argv[index + 1];
       if (!isProvider(value)) {
@@ -112,10 +118,10 @@ function parseArgs(argv: string[]): {
   }
   if (files.length !== 1) {
     fail(
-      "Usage: npm run render:shotlist -- <file> [--first] [--include-flagged] [--even-colour] [--provider mock|fal|replicate|comfyui]"
+      "Usage: npm run render:shotlist -- <file> [--first] [--include-flagged] [--even-colour] [--smooth-fps] [--provider mock|fal|replicate|comfyui]"
     );
   }
-  return { file: files[0], first, provider, includeFlagged, evenColour };
+  return { file: files[0], first, provider, includeFlagged, evenColour, smoothFps };
 }
 
 async function main() {
@@ -137,8 +143,11 @@ async function main() {
     for (const error of imported.errors) console.error(error);
     process.exit(1);
   }
-  if (args.evenColour) {
-    storage.updateProject(imported.project.id, { evenColour: true });
+  if (args.evenColour || args.smoothFps) {
+    storage.updateProject(imported.project.id, {
+      ...(args.evenColour ? { evenColour: true } : {}),
+      ...(args.smoothFps ? { smoothFps: true } : {}),
+    });
   }
 
   const named = imported.project.provider ?? "mock";
@@ -210,7 +219,13 @@ async function main() {
   if (run.note) console.log(run.note);
   if (stitched.warning) console.log(stitched.warning);
   console.log(stitched.colour.summary);
+  console.log(stitched.smooth.summary);
   if (args.evenColour) console.log("--even-colour: project setting on. The reference is the first included shot.");
+  if (args.smoothFps) {
+    console.log(
+      "--smooth-fps: project setting on. ffmpeg motion interpolation (minterpolate) raises a clip below the target rate. Clip length stays the same. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion."
+    );
+  }
   console.log(`mp4: ${abs}`);
   console.log(`bytes: ${size}`);
   console.log(`duration: ${stitched.durationSec}`);
