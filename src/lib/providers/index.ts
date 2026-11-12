@@ -5,6 +5,7 @@ import { killFfmpeg } from "../ffmpeg";
 import { runMockGenerate } from "./mock";
 import { runFalGenerate } from "./fal";
 import { runReplicateGenerate } from "./replicate";
+import { clearJobActivity } from "../job-activity";
 import { comfyAuthHeaders, resolveComfyBase, runComfyuiGenerate } from "./comfyui";
 
 let chain: Promise<void> = Promise.resolve();
@@ -87,6 +88,7 @@ export function requestCancel(jobId: string) {
     error: "Cancelled",
     progress: job.progress ?? 0,
   });
+  clearJobActivity(jobId);
   killFfmpeg(jobId);
   if (job.provider === "comfyui") {
     const base = resolveComfyBase(getSettings()).base;

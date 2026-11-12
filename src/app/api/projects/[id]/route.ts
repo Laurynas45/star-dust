@@ -9,6 +9,7 @@ import { planJoin } from "@/lib/join";
 import { preflightStoredProject } from "@/lib/preflight-run";
 import { probeClipShape } from "@/lib/ffmpeg";
 import { desiredClipKey, effectiveSeed } from "@/lib/input-key";
+import { presentJob } from "@/lib/job-activity";
 import { ensureJobWorker } from "@/lib/providers";
 import {
   deleteProject,
@@ -136,7 +137,7 @@ export async function GET(
         project.styleBase
       ),
     })),
-    jobs,
+    jobs: jobs.map((job) => presentJob(job)),
   });
 }
 

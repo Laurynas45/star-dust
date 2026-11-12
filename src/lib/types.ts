@@ -268,6 +268,12 @@ export interface Job {
   createdAt: string;
   updatedAt: string;
   progress?: number;
+  /**
+   * Live line while the job is queued or running. Not stored.
+   * Not part of the content key. ComfyUI may name a phase.
+   * Mock, fal, and Replicate are elapsed time only.
+   */
+  activity?: { label: string; percent?: number };
   modelName?: string;
   durationSec?: number;
   remoteId?: string;

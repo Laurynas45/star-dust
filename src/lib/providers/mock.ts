@@ -3,6 +3,7 @@ import path from "path";
 import { finishRenderedClip } from "../clip-check";
 import { runFfmpeg } from "../ffmpeg";
 import { MOCK_FRAME } from "../provider-info";
+import { clearJobActivity, noteRunStarted } from "../job-activity";
 import { absoluteOutputPath, getJob, resolveDataPath, updateJob } from "../storage";
 import { presetById } from "../types";
 
@@ -51,6 +52,8 @@ export async function runMockGenerate(jobId: string): Promise<void> {
 
   const job = updateJob(jobId, { status: "running", progress: 10 });
   if (!job) throw new Error("Job not found");
+  noteRunStarted(jobId);
+  try {
 
   const preset = presetById(job.presetId);
   const duration = job.durationSec && job.durationSec > 0 ? job.durationSec : preset.durationSec;
@@ -144,5 +147,9 @@ export async function runMockGenerate(jobId: string): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
     updateJob(jobId, { status: "failed", error: message, progress: 0 });
     throw err;
+  }
+  } finally {
+    const status = getJob(jobId)?.status;
+    if (status !== "queued" && status !== "running") clearJobActivity(jobId);
   }
 }
