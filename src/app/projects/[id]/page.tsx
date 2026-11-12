@@ -232,6 +232,11 @@ type Pending =
   | { kind: "hunt"; shotId: string; count: HuntSeedCount; confirmedApproval?: boolean }
   | { kind: "retry"; jobId: string; provider: ProviderId };
 
+function RunningLine({ job }: { job: Job }) {
+  if ((job.status !== "running" && job.status !== "queued") || !job.activity?.label) return null;
+  return <span className="text-xs text-sky-300">{job.activity.label}</span>;
+}
+
 export default function ProjectStudioPage() {
   const params = useParams();
   const projectId = String(params.id);
@@ -2015,6 +2020,7 @@ export default function ProjectStudioPage() {
                         </span>
                       )}
                       {job && <StatusBadge status={job.status} />}
+                      {job && <RunningLine job={job} />}
                       {chosenTake?.clipCheck?.flagged && (
                         <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
                           Flagged clip
@@ -2597,10 +2603,7 @@ export default function ProjectStudioPage() {
                     <span className="text-[11px] uppercase tracking-wide text-[var(--muted)]">
                       {job.kind === "preview" ? "Preview" : "Take"} · {CAPABILITY[job.provider].title}
                     </span>
-                    {typeof job.progress === "number" &&
-                      (job.status === "running" || job.status === "queued") && (
-                        <span className="text-xs text-sky-300">{job.progress}%</span>
-                      )}
+                    <RunningLine job={job} />
                   </div>
                   {job.modelName && (
                     <p className="text-sm text-white">
@@ -2622,10 +2625,19 @@ export default function ProjectStudioPage() {
                   />
                   {(job.status === "running" || job.status === "queued") && (
                     <div className="h-1 overflow-hidden rounded-full bg-white/10">
-                      <div
-                        className="h-full bg-sky-400"
-                        style={{ width: `${Math.max(4, job.progress ?? 4)}%` }}
-                      />
+                      {typeof job.activity?.percent === "number" ? (
+                        <div
+                          className="h-full bg-sky-400"
+                          style={{ width: `${Math.max(4, Math.min(100, job.activity.percent))}%` }}
+                        />
+                      ) : job.provider === "comfyui" ? (
+                        <div className="h-full w-1/3 animate-pulse bg-sky-400/80" />
+                      ) : (
+                        <div
+                          className="h-full bg-sky-400"
+                          style={{ width: `${Math.max(4, job.progress ?? 4)}%` }}
+                        />
+                      )}
                     </div>
                   )}
                   <div className="flex flex-wrap gap-2">

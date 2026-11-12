@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from "child_process";
+import crypto from "crypto";
 import fs from "fs";
 import http from "http";
+import type { Socket } from "net";
 import os from "os";
 import path from "path";
 
@@ -1089,6 +1091,524 @@ async function checkBrokenClips() {
   const joined = await stitch.stitchProject(project.id);
   assert(joined.includedShotIds.includes(badShot.id) && joined.includedShotIds.includes(goodShot.id), "include anyway puts the clip in the stitch");
   assert(!/flagged clip/.test(joined.warning || ""), "an included clip is not listed as left out");
+}
+
+function wsServerText(text: string): Buffer {
+  const payload = Buffer.from(text);
+  if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  const header = Buffer.alloc(4);
+  header[0] = 0x81;
+  header[1] = 126;
+  header.writeUInt16BE(payload.length, 2);
+  return Buffer.concat([header, payload]);
+}
+
+function openServer(
+  handler: http.RequestListener
+): Promise<{ url: string; server: http.Server; close: () => Promise<void> }> {
+  const server = http.createServer(handler);
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        server,
+        close: () => new Promise((done) => server.close(() => done())),
+      });
+    });
+  });
+}
+
+async function checkComfyProgress() {
+  const progress = await import("../src/lib/comfy-progress");
+  const activity = await import("../src/lib/job-activity");
+  const comfy = await import("../src/lib/providers/comfyui");
+  const socketMod = await import("../src/lib/comfy-socket");
+  const storage = await import("../src/lib/storage");
+  const { SAMPLE_PROJECT_ID } = await import("../src/lib/types");
+
+  assert(progress.formatElapsed(0) === "0s", "zero elapsed");
+  assert(progress.formatElapsed(41_000) === "41s", "seconds elapsed");
+  assert(progress.formatElapsed(60_000) === "1m 0s", "one minute");
+  assert(progress.formatElapsed(3 * 60_000 + 41_000) === "3m 41s", "minutes and seconds");
+  assert(progress.formatElapsed(3_600_000 + 2 * 60_000 + 3_000) === "1h 2m 3s", "hours");
+  assert(progress.formatElapsed(-50) === "0s", "negative elapsed clamps");
+
+  const frameBody = Buffer.from('{"type":"progress","data":{"value":1,"max":2}}');
+  const frame = Buffer.concat([Buffer.from([0x81, frameBody.length]), frameBody]);
+  const whole = socketMod.readWsFrames(frame);
+  assert(whole.frames.length === 1 && whole.frames[0].payload.toString() === frameBody.toString(), "websocket text frame");
+  assert(whole.rest.length === 0, "frame consumed");
+  const partial = socketMod.readWsFrames(frame.subarray(0, 4));
+  assert(partial.frames.length === 0 && partial.rest.length === 4, "partial frame waits");
+
+  const nodes = progress.nodesFromWorkflow(comfy.loadWanFlfWorkflow());
+  const ltxNodes = progress.nodesFromWorkflow(comfy.loadLtxWorkflow());
+  let snap = progress.emptyComfySnapshot();
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "progress", data: { value: 99, max: 100, prompt_id: "other-prompt", node: "12" } },
+    "ours",
+    nodes
+  );
+  assert(!snap.seenExecution && snap.step == null, "other prompt progress is ignored");
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "executing", data: { node: "12", prompt_id: "other-prompt" } },
+    "ours",
+    nodes
+  );
+  assert(snap.phase === "running" && snap.stage == null, "other prompt executing is ignored");
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "executing", data: { node: "12", prompt_id: "ours" } },
+    "ours",
+    nodes
+  );
+  assert(snap.phase === "sampling" && snap.stage === "stage 1", "high-noise sampler is stage 1");
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "progress", data: { value: 3, max: 20, prompt_id: "ours", node: "12" } },
+    "ours",
+    nodes
+  );
+  assert(snap.step === 3 && snap.stepMax === 20, "our prompt step is kept");
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "executing", data: { node: "13", prompt_id: "ours" } },
+    "ours",
+    nodes
+  );
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "progress", data: { value: 12, max: 20, prompt_id: "ours", node: "13" } },
+    "ours",
+    nodes
+  );
+  assert(snap.phase === "sampling" && snap.stage === "stage 2" && snap.step === 12, "low-noise sampler is stage 2");
+  assert(
+    progress.formatComfySnapshot(snap, "3m 41s") === "Sampling 12/20 · stage 2 · 3m 41s",
+    "sampling line"
+  );
+  assert(progress.samplingPercent(snap) === 60, "sampling percent is the step ratio");
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "progress", data: { value: 99, max: 100, prompt_id: "other-prompt", node: "12" } },
+    "ours",
+    nodes
+  );
+  assert(snap.step === 12 && snap.stage === "stage 2", "a later other prompt does not replace our step");
+  snap = progress.applyComfyMessage(
+    snap,
+    {
+      type: "progress_state",
+      data: {
+        prompt_id: "ours",
+        nodes: {
+          "13": { value: 8, max: 20, state: "running", prompt_id: "ours", real_node_id: "13" },
+          "12": { value: 1, max: 20, state: "running", prompt_id: "other-prompt", node_id: "12" },
+        },
+      },
+    },
+    "ours",
+    nodes
+  );
+  assert(snap.step === 8 && snap.stage === "stage 2", "progress_state keeps our prompt and skips the other");
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "executing", data: { node: "14", prompt_id: "ours" } },
+    "ours",
+    nodes
+  );
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "progress", data: { value: 4, max: 8, prompt_id: "ours", node: "14" } },
+    "ours",
+    nodes
+  );
+  assert(snap.phase === "decoding" && snap.step == null, "decode stays decoding without a step counter");
+  assert(progress.formatComfySnapshot(snap, "4m 2s") === "Decoding · 4m 2s", "decoding line");
+  snap = progress.applyComfyMessage(
+    snap,
+    { type: "executing", data: { node: "3", prompt_id: "ours" } },
+    "ours",
+    nodes
+  );
+  assert(progress.formatComfySnapshot(snap, "12s") === "Load CLIP · 12s", "other nodes show their title");
+
+  const swapped = {
+    "2": { classType: "KSamplerAdvanced", title: "Low-noise sampler" },
+    "9": { classType: "KSamplerAdvanced", title: "High-noise sampler" },
+  };
+  let ordered = progress.emptyComfySnapshot();
+  ordered = progress.applyComfyMessage(
+    ordered,
+    { type: "executing", data: { node: "9", prompt_id: "ours" } },
+    "ours",
+    swapped
+  );
+  assert(ordered.stage === "stage 1", "high-noise is stage 1 even when it is the later node");
+  ordered = progress.applyComfyMessage(
+    ordered,
+    { type: "executing", data: { node: "2", prompt_id: "ours" } },
+    "ours",
+    swapped
+  );
+  assert(ordered.stage === "stage 2", "low-noise is stage 2");
+
+  const plain = {
+    a: { classType: "KSampler", title: "First" },
+    b: { classType: "KSampler", title: "Second" },
+  };
+  let plainSnap = progress.applyComfyMessage(
+    progress.emptyComfySnapshot(),
+    { type: "executing", data: { node: "b" } },
+    "ours",
+    plain
+  );
+  assert(plainSnap.stage === "stage 2", "sampler order is the stage when the title does not say");
+  plainSnap = progress.applyComfyMessage(
+    plainSnap,
+    { type: "progress", data: { value: 1, max: 4, node: "b" } },
+    "ours",
+    plain
+  );
+  assert(plainSnap.step === 1, "a progress message with no prompt_id is kept on our socket");
+
+  const ltxSampler = Object.entries(ltxNodes).find(([, node]) => node.classType === "SamplerCustomAdvanced");
+  const ltxDecode = Object.entries(ltxNodes).find(([, node]) => node.classType === "VAEDecodeTiled");
+  assert(ltxSampler && ltxDecode, "ltx graph has a sampler and a tiled decode");
+  let ltxSnap = progress.applyComfyMessage(
+    progress.emptyComfySnapshot(),
+    { type: "progress", data: { value: 2, max: 8, prompt_id: "ours", node: ltxSampler?.[0] } },
+    "ours",
+    ltxNodes
+  );
+  assert(ltxSnap.phase === "sampling" && ltxSnap.stage == null, "one sampler has no stage");
+  ltxSnap = progress.applyComfyMessage(
+    ltxSnap,
+    { type: "executing", data: { node: ltxDecode?.[0], prompt_id: "ours" } },
+    "ours",
+    ltxNodes
+  );
+  assert(progress.formatComfySnapshot(ltxSnap, "5s") === "Decoding · 5s", "tiled decode reads as decoding");
+
+  const hidden = progress.applyComfyMessage(
+    progress.emptyComfySnapshot(),
+    { type: "executing", data: { node: "1", prompt_id: "ours" } },
+    "ours",
+    { "1": { classType: "http://secret.example/node", title: "http://secret.example/title" } }
+  );
+  assert(progress.formatComfySnapshot(hidden, "1s") === "1s", "a node label with a URL is not shown");
+
+  const queueBody = {
+    queue_running: [[0, "running-id"]],
+    queue_pending: [[1, "first"], [2, "ours"], [3, "third"]],
+  };
+  const pending = progress.queuePlacement(queueBody, "ours");
+  assert(pending?.where === "pending" && pending.position === 2, "queue position is 1-based");
+  assert(progress.queuePlacement(queueBody, "running-id")?.where === "running", "running queue entry");
+  assert(progress.queuePlacement(queueBody, "missing")?.where === "absent", "prompt not in the queue");
+  assert(progress.queuePlacement(null, "ours") === null, "queue body that is not a queue");
+  const queuedSnap = { ...progress.emptyComfySnapshot(), phase: "queued" as const, queuePosition: 2 };
+  assert(
+    progress.formatComfySnapshot(queuedSnap, "8s") === "Queued · position 2 · 8s",
+    "queued line"
+  );
+
+  const started = 1_700_000_000_000;
+  const mockId = "elapsed-only-mock";
+  activity.noteRunStarted(mockId, started);
+  const mockView = activity.presentJob(
+    {
+      id: mockId,
+      projectId: "p",
+      prompt: "p",
+      presetId: "slow-zoom-in",
+      provider: "mock",
+      kind: "take",
+      status: "running",
+      imagePath: "x",
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      inputKey: "same-key",
+    },
+    started + 221_000
+  );
+  assert(mockView.activity?.label === "3m 41s", "mock shows elapsed only");
+  assert(mockView.activity?.percent == null, "mock does not invent a step percent");
+  assert(mockView.inputKey === "same-key", "presenting activity does not change the content key");
+  activity.clearJobActivity(mockId);
+
+  const comfyId = "elapsed-comfy";
+  activity.noteRunStarted(comfyId, started);
+  activity.setComfyLive(comfyId, {
+    wsOpen: false,
+    socketDown: true,
+    snapshot: progress.emptyComfySnapshot(),
+  });
+  const downView = activity.presentJob(
+    {
+      id: comfyId,
+      projectId: "p",
+      prompt: "p",
+      presetId: "slow-zoom-in",
+      provider: "comfyui",
+      kind: "take",
+      status: "running",
+      imagePath: "x",
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      inputKey: "same-key",
+    },
+    started + 5_000
+  );
+  assert(downView.activity?.label === "5s", "socket down with no queue is elapsed only");
+  assert(downView.inputKey === "same-key", "comfy activity leaves the content key");
+  activity.clearJobActivity(comfyId);
+
+  const shot = storage.listShots(SAMPLE_PROJECT_ID).find((item) => item.startImagePath);
+  assert(shot?.startImagePath, "progress test needs a still");
+  const prevBase = process.env.COMFYUI_BASE_URL;
+  const prevAuth = process.env.COMFYUI_AUTH_HEADER;
+  const prevName = process.env.COMFYUI_AUTH_HEADER_NAME;
+  const prevSettings = storage.getSettings();
+  const mp4 = fs.readFileSync(tinyMp4());
+  const secret = "progress-secret-value";
+  const promptId = "progress-ours";
+  try {
+    let sawWs = false;
+    let sawQueue = false;
+    let progressSocket: Socket | null = null;
+    let jobId = "";
+    let observed = "";
+    const wsServer = await openServer((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const authed = req.headers["x-comfy-token"] === secret;
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(authed ? 200 : 401, { "Content-Type": "application/json" });
+        res.end(authed ? JSON.stringify({ ok: true }) : "unauthorized");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/queue") {
+        sawQueue = req.headers["x-comfy-token"] === secret;
+        res.writeHead(authed ? 200 : 401, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            queue_running: [],
+            queue_pending: [[1, "someone-else"], [2, promptId]],
+          })
+        );
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/upload/image") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(authed ? 200 : 401, { "Content-Type": "application/json" });
+          res.end(authed ? JSON.stringify({ name: "start.png", subfolder: "", type: "input" }) : "unauthorized");
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        req.resume();
+        req.on("end", () => {
+          if (!authed) {
+            res.writeHead(401);
+            res.end("unauthorized");
+            return;
+          }
+          if (progressSocket) {
+            const messages = [
+              { type: "executing", data: { node: "13", prompt_id: promptId } },
+              { type: "progress", data: { value: 12, max: 20, prompt_id: promptId, node: "13" } },
+              { type: "executing", data: { node: "12", prompt_id: "progress-other" } },
+              { type: "progress", data: { value: 99, max: 100, prompt_id: "progress-other", node: "12" } },
+            ];
+            for (const message of messages) progressSocket.write(wsServerText(JSON.stringify(message)));
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ prompt_id: promptId, node_errors: {} }));
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === `/history/${promptId}`) {
+        const deadline = Date.now() + 2000;
+        const wait = () => {
+          const job = jobId ? storage.getJob(jobId) : undefined;
+          const label = job ? activity.presentJob(job).activity?.label ?? "" : "";
+          if ((label.includes("Sampling 12/20") && label.includes("stage 2")) || Date.now() >= deadline) {
+            observed = label;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                [promptId]: {
+                  status: { status_str: "success", completed: true },
+                  outputs: { "16": { images: [{ filename: "wan.mp4", subfolder: "", type: "output" }] } },
+                },
+              })
+            );
+            return;
+          }
+          setTimeout(wait, 20);
+        };
+        wait();
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/view") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(mp4);
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    wsServer.server.on("upgrade", (req, socket) => {
+      sawWs = req.headers["x-comfy-token"] === secret;
+      const key = String(req.headers["sec-websocket-key"] || "");
+      const accept = crypto
+        .createHash("sha1")
+        .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+        .digest("base64");
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+          accept +
+          "\r\n\r\n"
+      );
+      progressSocket = socket;
+      socket.on("error", () => undefined);
+    });
+    process.env.COMFYUI_BASE_URL = wsServer.url;
+    process.env.COMFYUI_AUTH_HEADER = secret;
+    process.env.COMFYUI_AUTH_HEADER_NAME = "X-Comfy-Token";
+    storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: "http://127.0.0.1:9", comfyuiWorkflow: "wan-flf" });
+    const wsJob = storage.createJob({
+      projectId: SAMPLE_PROJECT_ID,
+      shotId: shot!.id,
+      prompt: shot!.prompt,
+      presetId: shot!.presetId,
+      provider: "comfyui",
+      imagePath: shot!.startImagePath!,
+      endImagePath: shot!.startImagePath,
+      durationSec: 2,
+      inputKey: "reuse-key-stays",
+      status: "queued",
+    });
+    jobId = wsJob.id;
+    await comfy.runComfyuiGenerate(wsJob.id);
+    const wsDone = storage.getJob(wsJob.id);
+    assert(wsDone?.status === "completed", `progress socket run: ${wsDone?.error}`);
+    assert(wsDone?.inputKey === "reuse-key-stays", "progress does not change the content key");
+    assert(sawWs, "progress socket sent the auth header");
+    assert(sawQueue, "queue call sent the auth header");
+    assert(observed.includes("Sampling 12/20") && observed.includes("stage 2"), `live line: ${observed}`);
+    assert(!observed.includes("99/100"), "other prompt step is not shown");
+    assert(!observed.includes(secret), "live line does not include the auth header");
+    assert(!observed.includes("127.0.0.1"), "live line does not include the server URL");
+    assert(!wsDone?.error?.includes(secret), "job error does not include the auth header");
+    await wsServer.close();
+
+    const fallbackSecret = "fallback-secret-value";
+    let fallbackWs = false;
+    let fallbackQueue = false;
+    let fallbackLabel = "";
+    let fallbackJobId = "";
+    const fallback = await openServer((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const authed = req.headers.authorization === fallbackSecret;
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(authed ? 200 : 401, { "Content-Type": "application/json" });
+        res.end(authed ? JSON.stringify({ ok: true }) : "unauthorized");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/queue") {
+        fallbackQueue = req.headers.authorization === fallbackSecret;
+        res.writeHead(404);
+        res.end("no queue");
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/upload/image") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ name: "start.png", subfolder: "", type: "input" }));
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ prompt_id: "fallback-1", node_errors: {} }));
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/history/fallback-1") {
+        const job = fallbackJobId ? storage.getJob(fallbackJobId) : undefined;
+        fallbackLabel = job ? activity.presentJob(job).activity?.label ?? "" : "";
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            "fallback-1": {
+              status: { status_str: "success", completed: true },
+              outputs: { "7": { images: [{ filename: "fallback.mp4", subfolder: "", type: "output" }] } },
+            },
+          })
+        );
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/view") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(mp4);
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    fallback.server.on("upgrade", (req, socket) => {
+      fallbackWs = req.headers.authorization === fallbackSecret;
+      socket.destroy();
+    });
+    process.env.COMFYUI_BASE_URL = fallback.url;
+    process.env.COMFYUI_AUTH_HEADER = fallbackSecret;
+    delete process.env.COMFYUI_AUTH_HEADER_NAME;
+    storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: "http://127.0.0.1:9", comfyuiWorkflow: "svd" });
+    const fallbackJob = storage.createJob({
+      projectId: SAMPLE_PROJECT_ID,
+      shotId: shot!.id,
+      prompt: shot!.prompt,
+      presetId: shot!.presetId,
+      provider: "comfyui",
+      imagePath: shot!.startImagePath!,
+      durationSec: 2,
+      inputKey: "reuse-key-stays",
+      status: "queued",
+    });
+    fallbackJobId = fallbackJob.id;
+    await comfy.runComfyuiGenerate(fallbackJob.id);
+    const fallbackDone = storage.getJob(fallbackJob.id);
+    assert(fallbackDone?.status === "completed", `socket fallback still finishes: ${fallbackDone?.error}`);
+    assert(fallbackDone?.inputKey === "reuse-key-stays", "fallback does not change the content key");
+    assert(fallbackWs, "fallback still sends the auth header on the socket attempt");
+    assert(fallbackQueue, "fallback still sends the auth header on the queue call");
+    assert(/^\d+s$|^\d+m \d+s$|^\d+h \d+m \d+s$/.test(fallbackLabel), `fallback line: ${fallbackLabel}`);
+    assert(!/sampling|decoding|queued|stage/i.test(fallbackLabel), `fallback does not invent a phase: ${fallbackLabel}`);
+    assert(!fallbackLabel.includes(fallbackSecret) && !fallbackLabel.includes("127.0.0.1"), "fallback line has no secret or URL");
+    await fallback.close();
+  } finally {
+    if (prevBase === undefined) delete process.env.COMFYUI_BASE_URL;
+    else process.env.COMFYUI_BASE_URL = prevBase;
+    if (prevAuth === undefined) delete process.env.COMFYUI_AUTH_HEADER;
+    else process.env.COMFYUI_AUTH_HEADER = prevAuth;
+    if (prevName === undefined) delete process.env.COMFYUI_AUTH_HEADER_NAME;
+    else process.env.COMFYUI_AUTH_HEADER_NAME = prevName;
+    storage.saveSettings({
+      provider: prevSettings.provider,
+      comfyuiBaseUrl: prevSettings.comfyuiBaseUrl,
+      comfyuiWorkflow: prevSettings.comfyuiWorkflow,
+      comfyLowMemory: prevSettings.comfyLowMemory,
+    });
+  }
 }
 
 async function main() {
@@ -6539,6 +7059,7 @@ async function main() {
   assert(!/does not move|flagged clip|all black/.test(lookCli.stdout || ""), "a flat Mock clip is not flagged in CI");
 
   storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  await checkComfyProgress();
 
   console.log("provider checks ok");
   console.log(dataDir);

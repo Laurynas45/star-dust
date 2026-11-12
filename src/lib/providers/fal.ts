@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { finishRenderedClip } from "../clip-check";
 import { missingKeyMessage } from "../provider-info";
+import { clearJobActivity, noteRunStarted } from "../job-activity";
 import {
   absoluteOutputPath,
   getJob,
@@ -27,6 +28,8 @@ export async function runFalGenerate(jobId: string): Promise<void> {
   const apiKey = process.env.FAL_KEY as string;
   const job = updateJob(jobId, { status: "running", progress: 10 });
   if (!job) throw new Error("Job not found");
+  noteRunStarted(jobId);
+  try {
 
   const settings = getSettings();
   const model = settings.falModel || job.modelName || "fal-ai/minimax/video-01/image-to-video";
@@ -129,4 +132,8 @@ export async function runFalGenerate(jobId: string): Promise<void> {
   fs.writeFileSync(abs, buf);
   if (getJob(jobId)?.status === "cancelled") return;
   finishRenderedClip(jobId, rel.split(path.sep).join("/"));
+  } finally {
+    const status = getJob(jobId)?.status;
+    if (status !== "queued" && status !== "running") clearJobActivity(jobId);
+  }
 }

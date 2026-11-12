@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { presentJob } from "@/lib/job-activity";
 import { getJob } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -12,5 +13,5 @@ export async function GET(
   if (!job) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  return NextResponse.json(job);
+  return NextResponse.json(presentJob(job));
 }

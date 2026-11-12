@@ -1,7 +1,10 @@
 import fs from "fs";
 import path from "path";
 import { finishRenderedClip } from "../clip-check";
+import { startComfyProgressWatch, type ComfyProgressWatch } from "../comfy-watch";
+import { nodesFromWorkflow } from "../comfy-progress";
 import { runFfmpeg } from "../ffmpeg";
+import { clearJobActivity, noteRunStarted } from "../job-activity";
 import { LTX_FPS, ltxFrameCount, ltxFrameSize } from "../ltx";
 import {
   COMFY_CHECKPOINT,
@@ -397,6 +400,20 @@ function collectFiles(value: unknown, found: ComfyFile[]) {
   for (const nested of Object.values(record)) collectFiles(nested, found);
 }
 
+/** GET /queue. A miss is not an error: the job still polls /history. */
+async function fetchComfyQueue(base: string): Promise<unknown | null> {
+  try {
+    const res = await comfyFetch(`${base}/queue`, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) {
+      await res.arrayBuffer().catch(() => undefined);
+      return null;
+    }
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 function historyError(entry: { status?: { status_str?: string; messages?: unknown } }, historyUrl: string): string | null {
   const status = entry.status?.status_str;
   if (status !== "error") return null;
@@ -434,7 +451,9 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   if (getJob(jobId)?.status === "cancelled") return;
   const job = updateJob(jobId, { status: "running", progress: 10 });
   if (!job) throw new Error("Job not found");
-
+  noteRunStarted(jobId);
+  let progressWatch: ComfyProgressWatch | null = null;
+  try {
   const duration = job.durationSec && job.durationSec > 0 ? job.durationSec : 4;
   const plan = comfyPlanForJob(job, settings);
   if (plan.workflow === "wan-flf" && !job.endImagePath) fail(jobId, WAN_FLF_MISSING_END);
@@ -523,6 +542,17 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
     });
   }
 
+  const watch = startComfyProgressWatch({
+    jobId,
+    base,
+    clientId: jobId,
+    nodes: nodesFromWorkflow(workflow),
+    headers: comfyAuthHeaders(),
+    fetchQueue: () => fetchComfyQueue(base),
+  });
+  progressWatch = watch;
+  await watch.ready;
+
   const promptUrl = `${base}/prompt`;
   let promptRes: Response;
   try {
@@ -559,6 +589,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
     fail(jobId, `ComfyUI at ${publicComfyUrl(promptUrl)} returned HTTP 200 without a prompt_id.`);
   }
   updateJob(jobId, { remoteId: queued.prompt_id, progress: 25 });
+  watch.setPromptId(queued.prompt_id);
 
   const historyUrl = `${base}/history/${queued.prompt_id}`;
   type HistoryEntry = {
@@ -569,6 +600,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
 
   for (let i = 0; i < MAX_POLLS; i++) {
     if (getJob(jobId)?.status === "cancelled") return;
+    await watch.pollQueue();
     let hist: Response;
     try {
       hist = await comfyFetch(historyUrl, { signal: AbortSignal.timeout(8000) });
@@ -589,7 +621,6 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       }
       if (entry.outputs && !entry.status) break;
     }
-    updateJob(jobId, { progress: Math.min(85, 30 + Math.floor(i / 2)) });
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
 
@@ -654,6 +685,11 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
 
   if (getJob(jobId)?.status === "cancelled") return;
   finishRenderedClip(jobId, rel.split(path.sep).join("/"));
+  } finally {
+    progressWatch?.stop();
+    const status = getJob(jobId)?.status;
+    if (status !== "queued" && status !== "running") clearJobActivity(jobId);
+  }
 }
 
 const DEFAULT_OBJECT_INFO_MS = 15000;
