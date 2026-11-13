@@ -8,6 +8,10 @@
  * A schema node (GET_NODE_INFO_V1) lists them on the combo metadata:
  *   "ckpt_name": ["COMBO", { "options": ["file.safetensors"] }]
  * Connected types are not file lists: "model": ["MODEL", {}].
+ *
+ * validate_inputs rejects a required input the prompt omits, and it does not
+ * write the schema default. A missing optional input is skipped. A combo value
+ * outside the server's list is "Value not in list".
  */
 
 import {
@@ -49,13 +53,17 @@ export type WorkflowNode = {
 };
 
 export type ReadinessIssue = {
-  kind: "node" | "model" | "vae";
+  kind: "node" | "model" | "vae" | "input";
   classType: string;
   nodeId: string;
   title?: string;
   input?: string;
   filename?: string;
   folder?: string;
+  /** Combo values from /object_info, when this finding is about a list. */
+  allowed?: string[];
+  /** Value Star Dust will send for an omitted required input. */
+  fill?: string | number | boolean;
   nextStep: string;
 };
 
@@ -73,6 +81,16 @@ export type ComfyReadiness = {
    * A note only. It does not block the queue.
    */
   vaeWarnings: ReadinessIssue[];
+  /**
+   * Required inputs the graph omits and Star Dust can fill.
+   * A note only. It does not block the queue.
+   */
+  inputNotes: ReadinessIssue[];
+  /**
+   * Omitted required inputs with nothing safe to send, or combo values
+   * outside the server's list. These block the queue.
+   */
+  inputBlocks: ReadinessIssue[];
 };
 
 export type ComfyWorkflowCheck = {
@@ -84,6 +102,8 @@ export type ComfyWorkflowCheck = {
   missingNodes: ReadinessIssue[];
   missingModels: ReadinessIssue[];
   vaeWarnings: ReadinessIssue[];
+  inputNotes: ReadinessIssue[];
+  inputBlocks: ReadinessIssue[];
 };
 
 export type ComfyCheckSource = "env" | "settings" | "cli";
@@ -101,6 +121,11 @@ export type ComfyServerCheck = {
   /** Short failure detail. Not a URL and not a secret. */
   detail: string;
   workflows: ComfyWorkflowCheck[];
+  /**
+   * The /object_info body, kept for the queue fill. toPublicCheck removes it.
+   * Not a URL and not an auth header.
+   */
+  objectInfo?: unknown;
 };
 
 /** Filenames Star Dust writes into each shipped graph. Same constants as the patch functions. */
@@ -189,7 +214,16 @@ export function checkComfyReadiness(
       nextStep:
         "ComfyUI answered GET /object_info, but the body was not a map of node class names. Update ComfyUI and run this check again.",
     };
-    return { ok: false, blocksQueue: true, invalid: true, missingNodes: [issue], missingModels: [], vaeWarnings: [] };
+    return {
+      ok: false,
+      blocksQueue: true,
+      invalid: true,
+      missingNodes: [issue],
+      missingModels: [],
+      vaeWarnings: [],
+      inputNotes: [],
+      inputBlocks: [],
+    };
   }
 
   const nodes = collectNodes(workflow);
@@ -263,8 +297,261 @@ export function checkComfyReadiness(
   missingNodes.sort(byIssue);
   missingModels.sort(byIssue);
   const vaeWarnings = wanVaePairingWarnings(slots);
-  const ok = missingNodes.length === 0 && missingModels.length === 0;
-  return { ok, blocksQueue: !ok, invalid: false, missingNodes, missingModels, vaeWarnings };
+  const inputs = collectInputFindings(workflow, objectInfo, slots);
+  const ok = missingNodes.length === 0 && missingModels.length === 0 && inputs.blocks.length === 0;
+  return {
+    ok,
+    blocksQueue: !ok,
+    invalid: false,
+    missingNodes,
+    missingModels,
+    vaeWarnings,
+    inputNotes: inputs.notes,
+    inputBlocks: inputs.blocks,
+  };
+}
+
+type Scalar = string | number | boolean;
+
+/**
+ * ComfyUI validate_inputs (execution.py, current master and v0.44):
+ * an omitted required input is required_input_missing, even when the schema
+ * has a default. The closed PR that would fill defaults was not merged.
+ * An omitted optional input is skipped. A present combo value outside the
+ * list is value_not_in_list. CreateVideo.chroma_subsampling is optional in
+ * v0.44; it fails an API prompt only when a server lists it as required, or
+ * when the prompt sends a value such as 'none' that the list does not allow.
+ */
+function collectInputFindings(
+  workflow: unknown,
+  objectInfo: Record<string, unknown>,
+  slots: readonly ModelSlot[]
+): { notes: ReadinessIssue[]; blocks: ReadinessIssue[] } {
+  const notes: ReadinessIssue[] = [];
+  const blocks: ReadinessIssue[] = [];
+  for (const { id, node } of collectNodes(workflow)) {
+    const classType = node.class_type;
+    if (!classType) continue;
+    const info = objectInfo[classType];
+    if (!isRecord(info)) continue;
+    const groups = inputGroups(info);
+    const inputs = nodeInputs(node);
+    const seen = new Set<string>();
+    const visit = (name: string, spec: unknown, required: boolean) => {
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      if (coveredByModelSlot(node, name, slots)) return;
+      const set = Boolean(inputs && Object.prototype.hasOwnProperty.call(inputs, name));
+      const value = set && inputs ? inputs[name] : undefined;
+      if (!set) {
+        if (!required) return;
+        const fill = safeRequiredValue(spec);
+        if (fill === null) {
+          blocks.push(inputBlock(node, id, name, spec, "missing"));
+          return;
+        }
+        notes.push(inputNote(node, id, name, spec, fill));
+        return;
+      }
+      if (isUploadSpec(spec) || isNodeLink(value)) return;
+      const options = comboOptions(spec);
+      if (!options || !isScalar(value)) return;
+      if (options.some((option) => option === value)) return;
+      blocks.push(inputBlock(node, id, name, spec, "list", value));
+    };
+    for (const [name, spec] of Object.entries(groups.required)) visit(name, spec, true);
+    for (const [name, spec] of Object.entries(groups.optional)) visit(name, spec, false);
+  }
+  notes.sort(byIssue);
+  blocks.sort(byIssue);
+  return { notes, blocks };
+}
+
+/**
+ * Writes omitted required inputs before a prompt is posted.
+ * Does not replace a value the graph already has. Model-file slots and upload
+ * widgets are left to the patch that names those files. When /object_info is
+ * not a node map, the graph is returned unchanged.
+ */
+export function fillMissingRequiredInputs(
+  workflow: unknown,
+  objectInfo: unknown,
+  slots: readonly ModelSlot[]
+): {
+  workflow: Record<string, WorkflowNode>;
+  filled: Array<{ nodeId: string; classType: string; input: string; value: Scalar }>;
+  blocked: ReadinessIssue[];
+} {
+  const copy = isRecord(workflow) ? (structuredClone(workflow) as Record<string, WorkflowNode>) : {};
+  if (!isRecord(workflow) || !isRecord(objectInfo)) {
+    return { workflow: copy, filled: [], blocked: [] };
+  }
+  const { notes, blocks } = collectInputFindings(workflow, objectInfo, slots);
+  if (blocks.length > 0) return { workflow: copy, filled: [], blocked: blocks };
+  const filled: Array<{ nodeId: string; classType: string; input: string; value: Scalar }> = [];
+  for (const note of notes) {
+    if (!note.input || note.fill === undefined) continue;
+    const node = copy[note.nodeId];
+    if (!node || !isNode(node)) continue;
+    if (!node.inputs || !isRecord(node.inputs)) node.inputs = {};
+    if (Object.prototype.hasOwnProperty.call(node.inputs, note.input)) continue;
+    node.inputs[note.input] = note.fill;
+    filled.push({ nodeId: note.nodeId, classType: note.classType, input: note.input, value: note.fill });
+  }
+  return { workflow: copy, filled, blocked: [] };
+}
+
+function isScalar(value: unknown): value is Scalar {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+function specMeta(spec: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(spec) || spec.length < 2) return null;
+  const meta = spec[1];
+  return isRecord(meta) ? meta : null;
+}
+
+function isUploadSpec(spec: unknown): boolean {
+  const meta = specMeta(spec);
+  return meta?.image_upload === true || meta?.video_upload === true;
+}
+
+function comboOptions(spec: unknown): Scalar[] | null {
+  if (!Array.isArray(spec) || spec.length === 0) return null;
+  const first = spec[0];
+  if (Array.isArray(first)) return first.filter(isScalar);
+  if (first === "COMBO") {
+    const options = specMeta(spec)?.options;
+    if (!Array.isArray(options)) return [];
+    return options.filter(isScalar);
+  }
+  return null;
+}
+
+function declaredDefault(spec: unknown): Scalar | undefined {
+  const meta = specMeta(spec);
+  if (!meta || !Object.prototype.hasOwnProperty.call(meta, "default")) return undefined;
+  return isScalar(meta.default) ? meta.default : undefined;
+}
+
+/** Upload lists are not a filename Star Dust may invent. */
+function safeRequiredValue(spec: unknown): Scalar | null {
+  if (isUploadSpec(spec)) return null;
+  const options = comboOptions(spec);
+  if (options) {
+    if (options.length === 0) return null;
+    const fallback = declaredDefault(spec);
+    if (fallback !== undefined && options.some((option) => option === fallback)) return fallback;
+    const auto = options.find((option) => option === "auto");
+    if (auto !== undefined) return auto;
+    return options[0];
+  }
+  const fallback = declaredDefault(spec);
+  return fallback === undefined ? null : fallback;
+}
+
+function inputGroups(nodeInfo: Record<string, unknown>): {
+  required: Record<string, unknown>;
+  optional: Record<string, unknown>;
+} {
+  const input = nodeInfo.input;
+  if (!isRecord(input)) return { required: {}, optional: {} };
+  return {
+    required: isRecord(input.required) ? input.required : {},
+    optional: isRecord(input.optional) ? input.optional : {},
+  };
+}
+
+function nodeInputs(node: WorkflowNode): Record<string, unknown> | null {
+  if (!node.inputs || !isRecord(node.inputs)) return null;
+  return node.inputs;
+}
+
+function coveredByModelSlot(node: WorkflowNode, inputName: string, slots: readonly ModelSlot[]): boolean {
+  return slots.some((slot) => slot.input === inputName && slotMatches(node, slot));
+}
+
+function isNodeLink(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length !== 2) return false;
+  const [id, slot] = value;
+  const idOk = typeof id === "string" || typeof id === "number";
+  return idOk && typeof slot === "number" && Number.isFinite(slot);
+}
+
+function inputNodeLabel(node: WorkflowNode, nodeId: string): string {
+  const classType = node.class_type || "node";
+  if (!nodeId) return classType;
+  const title = node._meta?.title;
+  return title ? `${classType} (node ${nodeId}, ${title})` : `${classType} (node ${nodeId})`;
+}
+
+function allowedList(spec: unknown): string[] | undefined {
+  const options = comboOptions(spec);
+  if (!options || options.length === 0) return undefined;
+  return options.map((option) => String(option));
+}
+
+function allowedPhrase(allowed: string[] | undefined): string {
+  if (!allowed || allowed.length === 0) return "";
+  const shown = allowed.slice(0, 12);
+  const more = allowed.length > shown.length ? `, and ${allowed.length - shown.length} more` : "";
+  return ` Allowed values: ${shown.join(", ")}${more}.`;
+}
+
+function shownFill(value: Scalar): string | null {
+  const text = String(value);
+  if (text.length > 80 || /:\/\//.test(text) || /[\r\n]/.test(text)) return null;
+  return text;
+}
+
+function shownReceived(value: Scalar): string | null {
+  if (typeof value === "string") {
+    if (value.length > 80 || /:\/\//.test(value) || /[\r\n]/.test(value)) return null;
+    return `'${value}'`;
+  }
+  const text = String(value);
+  if (text.length > 80) return null;
+  return text;
+}
+
+function inputNote(node: WorkflowNode, nodeId: string, name: string, spec: unknown, fill: Scalar): ReadinessIssue {
+  const allowed = allowedList(spec);
+  const shown = shownFill(fill);
+  return {
+    kind: "input",
+    classType: node.class_type || "",
+    nodeId,
+    title: node._meta?.title,
+    input: name,
+    allowed,
+    fill,
+    nextStep: `${inputNodeLabel(node, nodeId)} does not set required input ${name}.${allowedPhrase(allowed)} ComfyUI rejects a prompt that omits a required input, and it does not fill a default. Star Dust will send ${shown === null ? "a listed value" : shown}. This does not block the queue.`,
+  };
+}
+
+function inputBlock(
+  node: WorkflowNode,
+  nodeId: string,
+  name: string,
+  spec: unknown,
+  reason: "missing" | "list",
+  received?: Scalar
+): ReadinessIssue {
+  const allowed = allowedList(spec);
+  const label = inputNodeLabel(node, nodeId);
+  const nextStep =
+    reason === "list"
+      ? `${label} sets ${name} to ${received === undefined ? "a value that is not in the list" : (shownReceived(received) ?? "a value that is not in the list")}.${allowedPhrase(allowed)} ComfyUI rejects a value that is not in that list. Star Dust does not replace a value the graph already sets. The shot is not queued.`
+      : `${label} does not set required input ${name}.${allowedPhrase(allowed)} ComfyUI rejects a prompt that omits a required input, and this input has no default Star Dust can send. The shot is not queued.`;
+  return {
+    kind: "input",
+    classType: node.class_type || "",
+    nodeId,
+    title: node._meta?.title,
+    input: name,
+    allowed,
+    nextStep,
+  };
 }
 
 function fileBase(name: string): string {
@@ -357,12 +644,25 @@ export function statusMessage(check: ComfyServerCheck, revealUrl: boolean): stri
   if (!check.reachable) return describeUnreachable(check, revealUrl);
   const failed = check.workflows.filter((workflow) => !workflow.ok);
   const vae = check.workflows.filter((workflow) => workflow.vaeWarnings.length > 0);
-  if (failed.length === 0 && vae.length === 0) {
+  const inputs = check.workflows.filter((workflow) => workflow.inputNotes.length > 0);
+  if (failed.length === 0 && vae.length === 0 && inputs.length === 0) {
     return "Every checked graph can run on this server. Every node is listed, and every model filename Star Dust will send is in that loader's list.";
   }
   if (failed.length === 0) {
-    const names = vae.map((workflow) => workflow.title).join(", ");
-    return `Every checked graph can run on this server. ${names} sends a VAE filename that does not match the Wan model. That note does not block the queue.`;
+    const parts = ["Every checked graph can run on this server."];
+    if (vae.length > 0) {
+      const names = vae.map((workflow) => workflow.title).join(", ");
+      parts.push(
+        `${names} sends a VAE filename that does not match the Wan model. That note does not block the queue.`
+      );
+    }
+    if (inputs.length > 0) {
+      const names = inputs.map((workflow) => workflow.title).join(", ");
+      parts.push(
+        `${names} omits a required input this server added. Star Dust sends a listed value before the shot is queued. That does not block the queue.`
+      );
+    }
+    return parts.join(" ");
   }
   const names = failed.map((workflow) => workflow.title).join(", ");
   return `${names} would not run. A render that uses a failing graph is refused before the shot is queued.`;
@@ -371,11 +671,13 @@ export function statusMessage(check: ComfyServerCheck, revealUrl: boolean): stri
 /** UI payload. The env host is left blank so the page does not show COMFYUI_BASE_URL. */
 export function toPublicCheck(check: ComfyServerCheck): ComfyServerCheck {
   const revealUrl = check.source !== "env";
-  return {
+  const publicCheck: ComfyServerCheck = {
     ...check,
     url: revealUrl ? check.url : "",
     message: statusMessage(check, revealUrl),
   };
+  delete publicCheck.objectInfo;
+  return publicCheck;
 }
 
 export function formatQueueRefusal(
@@ -386,7 +688,12 @@ export function formatQueueRefusal(
   const closing = opts?.closing ?? "This render was not queued.";
   const lines = [statusMessage(check, revealUrl)];
   for (const workflow of check.workflows) {
-    const issues = [...workflow.missingNodes, ...workflow.missingModels, ...workflow.vaeWarnings];
+    const issues = [
+      ...workflow.missingNodes,
+      ...workflow.missingModels,
+      ...workflow.inputBlocks,
+      ...workflow.vaeWarnings,
+    ];
     if (issues.length === 0) continue;
     lines.push(`${workflow.title} (${workflow.file}):`);
     for (const issue of issues) lines.push(issue.nextStep);
@@ -413,8 +720,8 @@ export function formatComfyCheckTable(check: ComfyServerCheck): string {
   }
   lines.push("");
   for (const workflow of check.workflows) {
-    const issues = [...workflow.missingNodes, ...workflow.missingModels];
-    const notes = workflow.vaeWarnings;
+    const issues = [...workflow.missingNodes, ...workflow.missingModels, ...workflow.inputBlocks];
+    const notes = [...workflow.vaeWarnings, ...workflow.inputNotes];
     if (issues.length === 0 && notes.length === 0) continue;
     lines.push(workflow.title);
     for (const issue of issues) lines.push(`- ${issue.nextStep}`);
@@ -537,5 +844,7 @@ export function workflowCheckFromReadiness(
     missingNodes: readiness.missingNodes,
     missingModels: readiness.missingModels,
     vaeWarnings: readiness.vaeWarnings,
+    inputNotes: readiness.inputNotes,
+    inputBlocks: readiness.inputBlocks,
   };
 }

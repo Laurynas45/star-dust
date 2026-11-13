@@ -601,6 +601,10 @@ async function checkComfyObjectInfo() {
   const shipped = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx"], fixture);
   assert(shipped.every((item) => item.ok), `fixture should pass: ${JSON.stringify(shipped.filter((item) => !item.ok))}`);
   assert(
+    shipped.every((item) => item.inputNotes.length === 0 && item.inputBlocks.length === 0),
+    "the older object_info fixture still has no input findings"
+  );
+  assert(
     shipped.every((item) => item.missingModels.length === 0),
     "LoadImage filenames are not treated as missing models"
   );
@@ -695,6 +699,200 @@ async function checkComfyObjectInfo() {
     !missingFile.missingModels.some((item) => item.filename === info.WAN_FLF_LOW_NOISE),
     "the low-noise file that is listed is not reported"
   );
+
+  const newerPath = path.join(process.cwd(), "fixtures", "comfyui", "object-info-newer.json");
+  const newer = JSON.parse(fs.readFileSync(newerPath, "utf8")) as Record<string, unknown>;
+  const newerChecks = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx"], newer);
+  const newerById = Object.fromEntries(newerChecks.map((item) => [item.id, item]));
+  assert(newerById.svd?.ok && newerById.svd.inputNotes.length === 0, "SVD has no CreateVideo input to fill");
+  assert(newerById.wan?.ok && newerById.wan.inputNotes.length === 0, "Wan 5B has no CreateVideo input to fill");
+  for (const id of ["wan-flf", "ltx"] as const) {
+    const row = newerById[id];
+    assert(row?.ok && !row.blocksQueue && row.inputBlocks.length === 0, `${id} can still run after the fill`);
+    assert(row.inputNotes.length === 1, `${id} reports the omitted chroma input`);
+    const note = row.inputNotes[0];
+    assert(note?.classType === "CreateVideo" && note.input === "chroma_subsampling", `${id} names CreateVideo.chroma_subsampling`);
+    assert(note?.fill === "auto", `${id} will send auto`);
+    assert(
+      JSON.stringify(note?.allowed) === JSON.stringify(["auto", "444", "422", "420"]),
+      `${id} lists the server's allowed values`
+    );
+    assert(/does not block the queue/.test(note?.nextStep || ""), `${id} note does not block`);
+    assert(!/https?:\/\//.test(note?.nextStep || ""), `${id} note does not print a URL`);
+    assert(!/authorization|bearer|api[_ ]?key/i.test(note?.nextStep || ""), `${id} note does not print auth`);
+  }
+  const flfApi = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "workflows/comfyui-wan22-14b-flf2v.api.json"), "utf8")
+  ) as Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
+  const flfBefore = JSON.stringify(flfApi);
+  const flfFilled = readiness.fillMissingRequiredInputs(flfApi, newer, readiness.modelSlotsFor("wan-flf"));
+  assert(JSON.stringify(flfApi) === flfBefore, "fill does not mutate the shipped graph");
+  assert(flfFilled.blocked.length === 0, "the newer fixture has a safe chroma value");
+  const flfVideo = Object.values(flfFilled.workflow).find((node) => node.class_type === "CreateVideo");
+  assert(flfVideo?.inputs?.chroma_subsampling === "auto", "fill writes auto");
+  assert(flfVideo?.inputs?.fps === 16, "fill does not replace the fps already in the graph");
+  assert(
+    !Object.prototype.hasOwnProperty.call(flfVideo?.inputs || {}, "audio"),
+    "an omitted optional input is not filled"
+  );
+  assert(Array.isArray(flfVideo?.inputs?.images), "a linked images input stays a link");
+  const kept = structuredClone(flfApi);
+  const keptVideo = Object.values(kept).find((node) => node.class_type === "CreateVideo");
+  if (keptVideo?.inputs) keptVideo.inputs.chroma_subsampling = "444";
+  const keptFill = readiness.fillMissingRequiredInputs(kept, newer, readiness.modelSlotsFor("wan-flf"));
+  const keptAfter = Object.values(keptFill.workflow).find((node) => node.class_type === "CreateVideo");
+  assert(keptAfter?.inputs?.chroma_subsampling === "444", "fill does not replace a value the graph already sets");
+  const rejected = structuredClone(flfApi);
+  const rejectedVideo = Object.values(rejected).find((node) => node.class_type === "CreateVideo");
+  if (rejectedVideo?.inputs) rejectedVideo.inputs.chroma_subsampling = "none";
+  const rejectedCheck = readiness.checkComfyReadiness(rejected, newer, readiness.modelSlotsFor("wan-flf"));
+  const rejectedIssue = rejectedCheck.inputBlocks.find((item) => item.input === "chroma_subsampling");
+  assert(rejectedCheck.blocksQueue && rejectedIssue, "a combo value outside the list blocks");
+  assert(/'none'/.test(rejectedIssue?.nextStep || ""), "the block names the rejected value");
+  assert(/auto, 444, 422, 420/.test(rejectedIssue?.nextStep || ""), "the block names the allowed values");
+  assert(!/https?:\/\//.test(rejectedIssue?.nextStep || ""), "the block does not print a URL");
+  const rejectedFill = readiness.fillMissingRequiredInputs(rejected, newer, readiness.modelSlotsFor("wan-flf"));
+  const rejectedAfter = Object.values(rejectedFill.workflow).find((node) => node.class_type === "CreateVideo");
+  assert(rejectedAfter?.inputs?.chroma_subsampling === "none", "fill does not rewrite a value the graph set");
+  assert(rejectedFill.filled.length === 0, "a blocked graph is not partly filled");
+
+  const optionalInfo = structuredClone(newer) as {
+    CreateVideo: { input: { required: Record<string, unknown>; optional: Record<string, unknown> } };
+  };
+  const moved = optionalInfo.CreateVideo.input.required.chroma_subsampling;
+  delete optionalInfo.CreateVideo.input.required.chroma_subsampling;
+  optionalInfo.CreateVideo.input.optional.chroma_subsampling = moved;
+  const optionalCheck = readiness.checkComfyReadiness(
+    run.loadShippedWorkflow("ltx"),
+    optionalInfo,
+    readiness.modelSlotsFor("ltx")
+  );
+  assert(
+    optionalCheck.ok && optionalCheck.inputNotes.length === 0 && optionalCheck.inputBlocks.length === 0,
+    "an omitted optional input is not a finding"
+  );
+  const optionalFill = readiness.fillMissingRequiredInputs(
+    run.loadShippedWorkflow("ltx"),
+    optionalInfo,
+    readiness.modelSlotsFor("ltx")
+  );
+  assert(
+    !Object.values(optionalFill.workflow).some(
+      (node) => node.class_type === "CreateVideo" && Object.prototype.hasOwnProperty.call(node.inputs || {}, "chroma_subsampling")
+    ),
+    "an omitted optional input is not filled"
+  );
+
+  const preferDefault = {
+    CreateVideo: {
+      input: {
+        required: {
+          chroma_subsampling: ["COMBO", { options: ["auto", "444", "422", "420"], default: "420" }],
+        },
+      },
+    },
+  };
+  const preferred = readiness.fillMissingRequiredInputs(
+    { "1": { class_type: "CreateVideo", inputs: { fps: 24 } } },
+    preferDefault,
+    []
+  );
+  assert(preferred.workflow["1"]?.inputs?.chroma_subsampling === "420", "a default that is in the list wins over auto");
+  assert(preferred.workflow["1"]?.inputs?.fps === 24, "a set fps stays");
+  const staleDefault = {
+    CreateVideo: {
+      input: {
+        required: {
+          chroma_subsampling: ["COMBO", { options: ["auto", "444", "422", "420"], default: "none" }],
+        },
+      },
+    },
+  };
+  const stale = readiness.fillMissingRequiredInputs(
+    { "1": { class_type: "CreateVideo", inputs: {} } },
+    staleDefault,
+    []
+  );
+  assert(stale.workflow["1"]?.inputs?.chroma_subsampling === "auto", "a default outside the list is not sent");
+  const classic = readiness.fillMissingRequiredInputs(
+    { "1": { class_type: "CreateVideo", inputs: {} } },
+    { CreateVideo: { input: { required: { chroma_subsampling: [["auto", "444", "422", "420"], {}] } } } },
+    []
+  );
+  assert(classic.workflow["1"]?.inputs?.chroma_subsampling === "auto", "a classic combo list uses auto");
+  const firstAllowed = readiness.fillMissingRequiredInputs(
+    { "1": { class_type: "CreateVideo", inputs: {} } },
+    { CreateVideo: { input: { required: { chroma_subsampling: [["444", "422", "420"], {}] } } } },
+    []
+  );
+  assert(firstAllowed.workflow["1"]?.inputs?.chroma_subsampling === "444", "without auto, the first allowed value is sent");
+  const falsy = readiness.fillMissingRequiredInputs(
+    { "1": { class_type: "CreateVideo", inputs: { fps: 24 } } },
+    {
+      CreateVideo: {
+        input: {
+          required: {
+            hold: ["BOOLEAN", { default: false }],
+            seed: ["INT", { default: 0 }],
+          },
+        },
+      },
+    },
+    []
+  );
+  assert(falsy.workflow["1"]?.inputs?.hold === false, "a false default is sent");
+  assert(falsy.workflow["1"]?.inputs?.seed === 0, "a zero default is sent");
+  assert(falsy.workflow["1"]?.inputs?.fps === 24, "falsy defaults do not clear fps");
+  const noDefault = readiness.checkComfyReadiness(
+    { "4": { class_type: "CreateVideo", inputs: { fps: 24 }, _meta: { title: "Create Video" } } },
+    { CreateVideo: { input: { required: { mystery: ["STRING", {}] } } } },
+    []
+  );
+  assert(noDefault.blocksQueue && noDefault.inputBlocks.length === 1, "a required input with no default blocks");
+  assert(/CreateVideo/.test(noDefault.inputBlocks[0]?.nextStep || ""), "the block names the node");
+  assert(/mystery/.test(noDefault.inputBlocks[0]?.nextStep || ""), "the block names the input");
+  assert(/not queued/.test(noDefault.inputBlocks[0]?.nextStep || ""), "the block says the shot is not queued");
+  assert(!/https?:\/\//.test(noDefault.inputBlocks[0]?.nextStep || ""), "the block does not print a URL");
+  const unchanged = readiness.fillMissingRequiredInputs(flfApi, null, []);
+  assert(
+    !Object.values(unchanged.workflow).some(
+      (node) => node.class_type === "CreateVideo" && Object.prototype.hasOwnProperty.call(node.inputs || {}, "chroma_subsampling")
+    ),
+    "no object_info means the graph is not filled"
+  );
+  const publicCheck = readiness.toPublicCheck(
+    run.serverCheck({
+      reachable: true,
+      url: "http://127.0.0.1:8188",
+      source: "settings",
+      timedOut: false,
+      httpStatus: 200,
+      detail: "",
+      workflows: newerChecks,
+    })
+  );
+  const leaked = publicCheck as typeof publicCheck & { objectInfo?: unknown };
+  leaked.objectInfo = { authorization: secret };
+  const stripped = readiness.toPublicCheck(leaked);
+  assert(!("objectInfo" in stripped), "the UI payload drops object_info");
+  assert(!JSON.stringify(stripped).includes(secret), "the UI payload does not include an auth value");
+  const newerTable = readiness.formatComfyCheckTable(
+    run.serverCheck({
+      reachable: true,
+      url: "http://127.0.0.1:8188",
+      source: "cli",
+      timedOut: false,
+      httpStatus: 200,
+      detail: "",
+      workflows: newerChecks,
+    })
+  );
+  assert(/Result: pass/.test(newerTable), "a fillable input does not fail comfy:check");
+  assert(/chroma_subsampling/.test(newerTable), "comfy:check shows the omitted input");
+  assert(/auto, 444, 422, 420/.test(newerTable), "comfy:check shows the allowed values");
+  assert(/CreateVideo/.test(newerTable), "comfy:check names the node");
+  const findingLines = newerTable.split("\n").filter((line) => line.includes("chroma_subsampling"));
+  assert(findingLines.length > 0 && findingLines.every((line) => !/https?:/.test(line)), "the finding line has no URL");
 
   const before = storage.getSettings();
   const prevTimeout = process.env.STAR_DUST_COMFY_OBJECT_INFO_MS;
@@ -882,6 +1080,171 @@ async function checkComfyObjectInfo() {
     const downCli = await runCli(["--url", hanging.url], { ...cliEnv, STAR_DUST_COMFY_OBJECT_INFO_MS: "400" });
     assert(downCli.status !== 0, "comfy:check exits non-zero when the server does not answer");
     assert(/did not answer GET \/object_info/.test(downCli.stdout || ""), `cli hang:\n${downCli.stdout}\n${downCli.stderr}`);
+
+    const chromaServer = await serve((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/object_info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(newer));
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    servers.push(chromaServer);
+    const chromaCli = await runCli(["--url", chromaServer.url, "--workflow", "wan22-14b-flf2v"], {
+      ...cliEnv,
+      COMFYUI_AUTH_HEADER: secret,
+    });
+    assert(chromaCli.status === 0, `comfy:check on a newer server failed\n${chromaCli.stdout}\n${chromaCli.stderr}`);
+    assert(/chroma_subsampling/.test(chromaCli.stdout || ""), "npm run comfy:check shows chroma_subsampling");
+    assert(/auto, 444, 422, 420/.test(chromaCli.stdout || ""), "npm run comfy:check shows the allowed values");
+    assert(/CreateVideo/.test(chromaCli.stdout || ""), "npm run comfy:check names CreateVideo");
+    assert(/Result: pass/.test(chromaCli.stdout || ""), "a fillable input does not fail the command");
+    assert(!(chromaCli.stdout || "").includes(secret) && !(chromaCli.stderr || "").includes(secret), "the finding does not print the auth header");
+    const chromaLines = (chromaCli.stdout || "").split("\n").filter((line) => line.includes("chroma_subsampling"));
+    assert(chromaLines.length > 0 && chromaLines.every((line) => !line.includes(chromaServer.url)), "the finding does not print the server URL");
+
+    const bare = structuredClone(newer) as {
+      CreateVideo: { input: { required: Record<string, unknown> } };
+    };
+    bare.CreateVideo.input.required.mystery = ["STRING", {}];
+    let mysteryPosted = false;
+    const mysteryServer = await serve((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/object_info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(bare));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        mysteryPosted = true;
+        req.resume();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: "should-not-queue" }));
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    servers.push(mysteryServer);
+    storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: mysteryServer.url, comfyuiWorkflow: "ltx" });
+    const mysteryGuard = await comfy.guardComfyWorkflows(["ltx"]);
+    assert(mysteryGuard?.status === 400, "an input with no safe value refuses the queue");
+    assert(/CreateVideo/.test(mysteryGuard?.error || "") && /mystery/.test(mysteryGuard?.error || ""), "the refusal names the node and input");
+    assert(/was not queued/.test(mysteryGuard?.error || ""), "the refusal says the render was not queued");
+    assert(!mysteryGuard?.error?.includes(mysteryServer.url), "the refusal does not print the server URL");
+    assert(!mysteryGuard?.error?.includes(secret), "the refusal does not print a secret");
+    const mysteryJob = storage.createJob({
+      projectId: SAMPLE_PROJECT_ID,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: shot.presetId,
+      provider: "comfyui",
+      imagePath: shot.startImagePath!,
+      modelName: info.LTX_MODEL_NAME,
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(mysteryJob.id).catch(() => undefined);
+    const mysteryFailed = storage.getJob(mysteryJob.id);
+    assert(mysteryFailed?.status === "failed" && mysteryFailed.status !== "running", "an unfilled required input is not left running");
+    assert(!mysteryPosted, "an unfilled required input is not posted to /prompt");
+    assert(/CreateVideo/.test(mysteryFailed?.error || "") && /mystery/.test(mysteryFailed?.error || ""), `job error: ${mysteryFailed?.error}`);
+    assert(/not left running/.test(mysteryFailed?.error || ""), "the job says it was not left running");
+
+    const mp4 = fs.readFileSync(tinyMp4());
+    let postedPrompt = "";
+    const fillServer = await serve((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/object_info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(newer));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/upload/image") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ name: "filled-start.png", subfolder: "", type: "input" }));
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        let body = "";
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          postedPrompt = body;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ prompt_id: "filled-1", node_errors: {} }));
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/history/filled-1") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            "filled-1": {
+              status: { status_str: "success", completed: true },
+              outputs: { "22": { images: [{ filename: "filled.mp4", subfolder: "", type: "output" }] } },
+            },
+          })
+        );
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/view") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(mp4);
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    servers.push(fillServer);
+    storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: fillServer.url, comfyuiWorkflow: "ltx" });
+    const ltxMod = await import("../src/lib/ltx");
+    const fillJob = storage.createJob({
+      projectId: SAMPLE_PROJECT_ID,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: shot.presetId,
+      provider: "comfyui",
+      imagePath: shot.startImagePath!,
+      modelName: info.LTX_MODEL_NAME,
+      durationSec: 2,
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(fillJob.id);
+    const fillDone = storage.getJob(fillJob.id);
+    assert(fillDone?.status === "completed", `chroma fill job: ${fillDone?.status} ${fillDone?.error}`);
+    const fillPosted = JSON.parse(postedPrompt) as {
+      prompt?: Record<string, { class_type?: string; inputs?: Record<string, unknown>; _meta?: { title?: string } }>;
+    };
+    const fillNodes = Object.values(fillPosted.prompt || {});
+    const fillVideo = fillNodes.find((node) => node.class_type === "CreateVideo");
+    assert(fillVideo?.inputs?.chroma_subsampling === "auto", "the queued prompt sends auto");
+    assert(fillVideo?.inputs?.fps === ltxMod.LTX_FPS, "the queued prompt keeps the fps Star Dust set");
+    assert(Array.isArray(fillVideo?.inputs?.images), "the queued prompt keeps the images link");
+    assert(
+      !Object.prototype.hasOwnProperty.call(fillVideo?.inputs || {}, "audio"),
+      "the queued prompt does not add the optional audio input"
+    );
+    assert(
+      fillNodes.some((node) => node.class_type === "LoadImage" && node.inputs?.image === "filled-start.png"),
+      "the queued prompt keeps the uploaded image name"
+    );
+    assert(!postedPrompt.includes(secret), "the queued prompt does not include the auth header");
   } finally {
     if (prevTimeout === undefined) delete process.env.STAR_DUST_COMFY_OBJECT_INFO_MS;
     else process.env.STAR_DUST_COMFY_OBJECT_INFO_MS = prevTimeout;
@@ -2107,6 +2470,12 @@ async function main() {
     "flf low-noise file"
   );
   assert(!flfNodes.some((node) => node.class_type === "Wan22ImageToVideoLatent"), "flf does not post the TI2V latent");
+  const flfVideo = flfNodes.find((node) => node.class_type === "CreateVideo");
+  assert(flfVideo?.inputs?.fps === wan.WAN_FPS, "flf keeps the fps Star Dust sets when object_info is missing");
+  assert(
+    flfVideo?.inputs && !Object.prototype.hasOwnProperty.call(flfVideo.inputs, "chroma_subsampling"),
+    "a stand-in with no object_info does not gain chroma_subsampling"
+  );
   assert(!flfNodes.some((node) => node.class_type === "LoraLoaderModelOnly"), "flf does not load the lightx2v lora");
   assert(!/gguf|svi2pro|minimax|freevideo/i.test(flfBody), "flf graph has no custom-node packs");
   assert(info.comfyWorkflowFromModelName(info.WAN_FLF_MODEL_NAME) === "wan-flf", "flf model name does not route to TI2V");

@@ -35,8 +35,8 @@ export function ComfyReadinessPanel(props: {
             {report.message}
           </p>
           {report.workflows.map((workflow) => {
-            const issues = [...workflow.missingNodes, ...workflow.missingModels];
-            const notes = workflow.vaeWarnings;
+            const issues = [...workflow.missingNodes, ...workflow.missingModels, ...workflow.inputBlocks];
+            const notes = [...workflow.vaeWarnings, ...workflow.inputNotes];
             const warnOnly = workflow.ok && notes.length > 0;
             return (
               <div
@@ -87,7 +87,7 @@ export function ShotComfyNote(props: { report: Shown | null; workflow: ComfyWork
   const row = props.report?.workflows.find((item) => item.id === props.workflow);
   if (!row) return null;
   if (!row.ok) {
-    const first = [...row.missingNodes, ...row.missingModels][0];
+    const first = [...row.missingNodes, ...row.missingModels, ...row.inputBlocks][0];
     return (
       <p className="mt-2 text-[11px] leading-relaxed text-rose-100">
         ComfyUI check: {row.title} would not run, so a render of this shot is refused.
@@ -95,7 +95,18 @@ export function ShotComfyNote(props: { report: Shown | null; workflow: ComfyWork
       </p>
     );
   }
-  const note = row.vaeWarnings[0];
-  if (!note) return null;
-  return <p className="mt-2 text-[11px] leading-relaxed text-amber-100">ComfyUI check: {note.nextStep}</p>;
+  const notes = [...row.vaeWarnings, ...row.inputNotes];
+  if (notes.length === 0) return null;
+  return (
+    <>
+      {notes.map((note) => (
+        <p
+          key={`${note.kind}:${note.input ?? ""}:${note.filename ?? ""}:${note.nodeId}`}
+          className="mt-2 text-[11px] leading-relaxed text-amber-100"
+        >
+          ComfyUI check: {note.nextStep}
+        </p>
+      ))}
+    </>
+  );
 }
