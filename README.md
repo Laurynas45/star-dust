@@ -155,6 +155,8 @@ The command prints a pass/fail table and exits non-zero when a checked graph wou
 
 The same check warns when a Wan graph's VAE filename does not match the model. Wan 2.2 5B is paired with `wan2.2_vae`. Wan 2.2 14B uses `wan_2.1_vae`. The shipped graphs already match. A mismatch is a note on the project page and in the table. It does not block the queue. It does not promise the picture.
 
+ComfyUI rejects an API prompt that leaves out a required input. A default on the node does not fill that gap. An optional input the graph leaves out is allowed. The check uses the same `/object_info` response. It names the node, the input, and the allowed values. Before the shot is queued, Star Dust sends the server's default, or `auto` when a combo list includes it, or else the first allowed value. It does not replace a value the graph already has, including `fps`. A combo value outside that list is reported, and the shot is not queued. An omitted input with nothing safe to send is not queued either. `npm run comfy:check` prints the finding. A value Star Dust can send does not change the exit code.
+
 ## After a clip finishes
 
 When a clip file is written, on Mock, fal, Replicate, or ComfyUI, Star Dust reads it with ffmpeg `signalstats`. Two cases are flagged:
@@ -287,7 +289,7 @@ src/lib/preflight.ts     advisory still, prompt, and chain notes before a render
 src/lib/clip-check.ts    after a clip finishes, ffmpeg flags a black or frozen file
 src/lib/colour-match.ts  whole-clip CIE LAB match at stitch time, ffmpeg only, off by default
 src/lib/conform.ts       one frame rate and size; Smooth frame rate is optional ffmpeg minterpolate, off by default
-src/lib/comfy-readiness.ts  ComfyUI node and model-file check before a shot is queued
+src/lib/comfy-readiness.ts  ComfyUI node, model-file, and required-input check before a shot is queued
 fixtures/comfyui/        object_info fixtures for that check. No live server.
 docs/shotlist-schema.md  fields in that file
 examples/                Harbor dusk shot list zip, and the JSON plus stills

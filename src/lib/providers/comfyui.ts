@@ -28,7 +28,13 @@ import {
   resolveDataPath,
   updateJob,
 } from "../storage";
-import { formatQueueRefusal, toPublicCheck, type ComfyCheckSource } from "../comfy-readiness";
+import {
+  fillMissingRequiredInputs,
+  formatQueueRefusal,
+  modelSlotsFor,
+  toPublicCheck,
+  type ComfyCheckSource,
+} from "../comfy-readiness";
 import { assessShippedWorkflows, serverCheck } from "../comfy-readiness-run";
 import { ComfyWorkflowId } from "../types";
 import {
@@ -542,6 +548,21 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
     });
   }
 
+  // Stand-in servers used in tests do not expose /object_info. Leave the graph alone then.
+  // A real ComfyUI lists required inputs. Omitted ones fail validation, and the server does not fill defaults.
+  if (readiness.reachable && readiness.objectInfo !== undefined) {
+    const filled = fillMissingRequiredInputs(workflow, readiness.objectInfo, modelSlotsFor(plan.workflow));
+    if (filled.blocked.length > 0) {
+      fail(
+        jobId,
+        [...filled.blocked.map((issue) => issue.nextStep), "The job was not left running. ComfyUI was not asked to run this graph."].join(
+          "\n"
+        )
+      );
+    }
+    workflow = filled.workflow;
+  }
+
   const watch = startComfyProgressWatch({
     jobId,
     base,
@@ -777,7 +798,7 @@ export async function checkComfyServer(
       workflows: [],
     });
   }
-  return serverCheck({
+  const check = serverCheck({
     reachable: true,
     url: fetched.publicUrl,
     source: resolved.source,
@@ -786,6 +807,8 @@ export async function checkComfyServer(
     detail: "",
     workflows: assessShippedWorkflows(ids, fetched.objectInfo),
   });
+  check.objectInfo = fetched.objectInfo;
+  return check;
 }
 
 /** Refuses a ComfyUI render before any job row is created. Empty means nothing to queue. */
