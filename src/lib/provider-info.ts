@@ -41,7 +41,19 @@ export const LTX_TEXT_ENCODER = "gemma_3_12B_it_fp4_mixed.safetensors";
 
 export const LTX_MODEL_NAME = "ComfyUI LTX-2.3 distilled FP8";
 
-export const COMFY_WORKFLOW_ORDER: ComfyWorkflowId[] = ["svd", "wan", "wan-flf", "ltx"];
+/** Files the MiniMax H3 graph writes. Same names as the current official I2V template. */
+export const H3_DIFFUSION = "minimax_h3_fl2va_pruned_int8_convrot.safetensors";
+export const H3_TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors";
+export const H3_VIDEO_VAE = "minimax_h3_video_vae_int8_convrot.safetensors";
+export const H3_AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors";
+
+export const H3_MODEL_NAME = "ComfyUI MiniMax H3";
+
+/** Shown when MiniMax H3 is selected. The end still is optional. The job still runs without one. */
+export const H3_END_NOTE =
+  "An end still is sent as the last frame when this shot has one. A shot with no end still still runs.";
+
+export const COMFY_WORKFLOW_ORDER: ComfyWorkflowId[] = ["svd", "wan", "wan-flf", "ltx", "minimax-h3"];
 
 export type ComfyWorkflowInfo = {
   title: string;
@@ -104,17 +116,33 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
     detail:
       "Reads the prompt. Star Dust injects the start image, prompt, frame count, size, and seed. Distilled FP8 checkpoint on core ComfyUI nodes. Not an 8 GB guarantee.",
   },
+  "minimax-h3": {
+    title: "MiniMax H3",
+    file: "workflows/comfyui-minimax-h3-i2v.api.json",
+    goodAt:
+      "Image-to-video from one still, with an optional end still as the last frame. One short clip. The graph writes audio into the mp4.",
+    memory:
+      "The official I2V template lists the four files at about 19.53 GB (diffusion), 14.61 GB (text encoder), 2.62 GB (video VAE), and 577.2 MB (audio VAE). That is a large download for a big or rented GPU. Star Dust did not measure VRAM or system RAM. The low-memory preset still loads these weights.",
+    defaults:
+      "The still fitted inside 1344×768, the node's default and the template's official 768p. 24 fps, length snapped up to 17k+5, capped at 124 frames (about five seconds). 20 steps, res_multistep, simple. The optional turbo LoRA is not loaded.",
+    lowMemory:
+      "The still fitted inside 864×480 (the template's 0.4 megapixel 16:9 size, about 480p) and the frame count capped at 22, just under one second. The same weights are still loaded.",
+    detail:
+      "Reads the prompt. Star Dust injects the start image, the prompt, the frame count, the size, and the seed. An end still is sent as the last frame when the shot has one. The graph writes audio into the mp4. The stitch keeps that audio when the file has an audio stream. Core nodes. ComfyUI 0.31.0 or later.",
+  },
 };
 
 export function comfyModelName(workflow: ComfyWorkflowId, lowMemory: boolean): string {
   const base =
-    workflow === "ltx"
-      ? LTX_MODEL_NAME
-      : workflow === "wan-flf"
-        ? WAN_FLF_MODEL_NAME
-        : workflow === "wan"
-          ? WAN_MODEL_NAME
-          : COMFY_MODEL_NAME;
+    workflow === "minimax-h3"
+      ? H3_MODEL_NAME
+      : workflow === "ltx"
+        ? LTX_MODEL_NAME
+        : workflow === "wan-flf"
+          ? WAN_FLF_MODEL_NAME
+          : workflow === "wan"
+            ? WAN_MODEL_NAME
+            : COMFY_MODEL_NAME;
   return lowMemory ? `${base}${LOW_MEMORY_MARK}` : base;
 }
 
@@ -132,6 +160,7 @@ export const COMFY_WORKFLOW_TITLES = COMFY_WORKFLOW_ORDER.map((id) => COMFY_WORK
 
 export function comfyWorkflowFromModelName(modelName?: string): ComfyWorkflowId | null {
   if (!modelName) return null;
+  if (modelName.includes("MiniMax H3")) return "minimax-h3";
   if (modelName.includes("FLF2V")) return "wan-flf";
   if (modelName.includes("LTX-2.3")) return "ltx";
   if (modelName.includes("Wan 2.2")) return "wan";
@@ -165,7 +194,7 @@ export const CAPABILITY: Record<
   comfyui: {
     title: "ComfyUI",
     label:
-      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, and LTX-2.3 distilled FP8 graphs. Not a node editor.",
+      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3 distilled FP8, and MiniMax H3 graphs. Not a node editor.",
   },
 };
 
@@ -282,6 +311,26 @@ export function describeProviderUse(opts: {
     if (opts.hasCharacterSheet) {
       characterNote =
         "Character sheet was not sent. This first-last workflow has no reference-image input, so the face will not match the sheet.";
+    }
+  } else if (opts.provider === "comfyui" && comfy.workflow === "minimax-h3") {
+    parts.push(
+      `${modelName} posts workflows/comfyui-minimax-h3-i2v.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the prompt, a frame count from the shot duration (24 fps, snapped up to 17k+5, capped at 124 frames, about five seconds), the output size (the still fitted inside ${comfy.lowMemory ? "864×480" : "1344×768"}), and the seed. The graph decodes the audio latent and writes it into the mp4. The stitch keeps that audio when the file has an audio stream. It is one short clip. ${COMFY_SERVER_NOTE}`
+    );
+    if (comfy.lowMemory) {
+      parts.push(
+        "The low-memory preset is on: the still is fitted inside 864×480 (about 480p) and the frame count is capped at 22. The same weights are still loaded."
+      );
+    }
+    if (opts.hasEndImage) {
+      parts.push(
+        "The end image is sent as the last frame. The node stretches the first frame to the canvas and center-crops the last frame. This is not a character lock."
+      );
+    } else {
+      parts.push("This shot has no end still. The last-frame input is left off, and the job still runs.");
+    }
+    if (opts.hasCharacterSheet) {
+      characterNote =
+        "Character sheet was not sent. This MiniMax H3 workflow has no reference-image input, so the face will not match the sheet.";
     }
   } else if (opts.provider === "comfyui") {
     parts.push(

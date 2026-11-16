@@ -19,6 +19,7 @@ import {
   CLOUD_RISK_NOTE,
   COMFY_WORKFLOW_ORDER,
   COMFY_WORKFLOWS,
+  H3_END_NOTE,
   WAN_FLF_MISSING_END,
   isPaidProvider,
   modelNameFor,
@@ -1636,6 +1637,9 @@ export default function ProjectStudioPage() {
               TI2V-5B. This steers one clip between two stills. It is not a character lock.
             </p>
           )}
+          {projectChoice.workflow === "minimax-h3" && (
+            <p className="mt-2 text-xs leading-relaxed text-sky-50/90">{H3_END_NOTE}</p>
+          )}
           <p className="mt-2 text-xs text-sky-50/70">
             A shot can override this. The server is the URL in Providers, or COMFYUI_BASE_URL if that
             is set. This is not a node editor.
@@ -1875,6 +1879,11 @@ export default function ProjectStudioPage() {
                   ? "First-last frame steers this clip between the two stills. It is not a character lock. Identity can still drift. One short clip."
                   : WAN_FLF_MISSING_END}
               </p>
+            )}
+          {provider === "comfyui" &&
+            projectChoice &&
+            (shotWorkflow === "minimax-h3" || (!shotWorkflow && projectChoice.workflow === "minimax-h3")) && (
+              <p className="text-xs leading-relaxed text-[var(--muted)]">{H3_END_NOTE}</p>
             )}
           {shots.length > 0 && (
             <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
@@ -3061,6 +3070,9 @@ function ShotWorkflowFields(props: {
             ? "Steers this clip between the start still and the end still. Not a character lock. Identity can still drift. One short clip."
             : WAN_FLF_MISSING_END}
         </p>
+      )}
+      {props.resolved.workflow === "minimax-h3" && (
+        <p className="text-[11px] leading-relaxed text-[var(--muted)]">{H3_END_NOTE}</p>
       )}
       <div className="grid gap-2 sm:grid-cols-2">
         <label className="text-[11px] text-[var(--muted)]">

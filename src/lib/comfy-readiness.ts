@@ -17,6 +17,10 @@
 import {
   COMFY_CHECKPOINT,
   COMFY_WORKFLOWS,
+  H3_AUDIO_VAE,
+  H3_DIFFUSION,
+  H3_TEXT_ENCODER,
+  H3_VIDEO_VAE,
   LTX_CHECKPOINT,
   LTX_TEXT_ENCODER,
   WAN_DIFFUSION,
@@ -165,6 +169,26 @@ export function modelSlotsFor(workflow: ComfyWorkflowId): ModelSlot[] {
       },
       { classType: "CLIPLoader", input: "clip_name", filename: WAN_TEXT_ENCODER, folder: TEXT_ENCODERS },
       { classType: "VAELoader", input: "vae_name", filename: WAN_FLF_VAE, folder: VAE_FOLDER },
+    ];
+  }
+  if (workflow === "minimax-h3") {
+    return [
+      { classType: "UNETLoader", input: "unet_name", filename: H3_DIFFUSION, folder: DIFFUSION },
+      { classType: "CLIPLoader", input: "clip_name", filename: H3_TEXT_ENCODER, folder: TEXT_ENCODERS },
+      {
+        classType: "VAELoader",
+        title: "Load video VAE",
+        input: "vae_name",
+        filename: H3_VIDEO_VAE,
+        folder: VAE_FOLDER,
+      },
+      {
+        classType: "VAELoader",
+        title: "Load audio VAE",
+        input: "vae_name",
+        filename: H3_AUDIO_VAE,
+        folder: VAE_FOLDER,
+      },
     ];
   }
   return [
@@ -754,6 +778,10 @@ export function workflowIdFromFlag(flag: string): ComfyWorkflowId | null {
     "comfyui-ltx23-i2v": "ltx",
     "ltx-2.3": "ltx",
     "ltx-2.3-i2v": "ltx",
+    "minimax-h3": "minimax-h3",
+    "minimax-h3-i2v": "minimax-h3",
+    "comfyui-minimax-h3-i2v": "minimax-h3",
+    h3: "minimax-h3",
   };
   return table[key] ?? null;
 }
@@ -763,6 +791,7 @@ export const COMFY_CHECK_WORKFLOW_FLAGS = [
   "wan22-ti2v-5b",
   "wan22-14b-flf2v",
   "ltx23-i2v",
+  "minimax-h3-i2v",
 ] as const;
 
 function missingNodeStep(classType: string): string {
