@@ -10,12 +10,12 @@ export type CaptionMode = "burn" | "sidecar";
 
 export type JobKind = "take" | "preview";
 
-export const COMFY_WORKFLOW_IDS = ["svd", "wan", "wan-flf", "ltx"] as const;
+export const COMFY_WORKFLOW_IDS = ["svd", "wan", "wan-flf", "ltx", "minimax-h3"] as const;
 
 export type ComfyWorkflowId = (typeof COMFY_WORKFLOW_IDS)[number];
 
 export function isComfyWorkflowId(value: unknown): value is ComfyWorkflowId {
-  return value === "svd" || value === "wan" || value === "wan-flf" || value === "ltx";
+  return value === "svd" || value === "wan" || value === "wan-flf" || value === "ltx" || value === "minimax-h3";
 }
 
 export function isProviderId(value: unknown): value is ProviderId {

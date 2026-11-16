@@ -6,10 +6,15 @@ import { nodesFromWorkflow } from "../comfy-progress";
 import { runFfmpeg } from "../ffmpeg";
 import { clearJobActivity, noteRunStarted } from "../job-activity";
 import { LTX_FPS, ltxFrameCount, ltxFrameSize } from "../ltx";
+import { H3_FPS, h3FrameCount, h3FrameSize } from "../minimax-h3";
 import {
   COMFY_CHECKPOINT,
   LOW_MEMORY_MARK,
   SVD_LOW_FRAME,
+  H3_AUDIO_VAE,
+  H3_DIFFUSION,
+  H3_TEXT_ENCODER,
+  H3_VIDEO_VAE,
   LTX_CHECKPOINT,
   LTX_TEXT_ENCODER,
   WAN_DIFFUSION,
@@ -153,10 +158,10 @@ export function explainComfyProblem(raw: string, url: string): string | null {
       lower
     )
   ) {
-    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, and LTX-2.3. Star Dust does not download weights. The job was not left running. Server said: ${text}`;
+    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, and MiniMax H3. Star Dust does not download weights. The job was not left running. Server said: ${text}`;
   }
   if (/does not exist|missing node|unknown node|node type|class_type|custom node/.test(lower)) {
-    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, and the shipped LTX-2.3 graph use core nodes from a current ComfyUI. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. The job was not left running. Server said: ${text}`;
+    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, the shipped LTX-2.3 graph, and MiniMax H3 use core nodes from a current ComfyUI. MiniMax H3 needs ComfyUI 0.31.0 or later. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. The job was not left running. Server said: ${text}`;
   }
   return null;
 }
@@ -189,6 +194,11 @@ export function loadWanFlfWorkflow(): Workflow {
 
 export function loadLtxWorkflow(): Workflow {
   const file = path.join(process.cwd(), "workflows", "comfyui-ltx23-i2v.api.json");
+  return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
+}
+
+export function loadMinimaxH3Workflow(): Workflow {
+  const file = path.join(process.cwd(), "workflows", "comfyui-minimax-h3-i2v.api.json");
   return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
 }
 
@@ -354,6 +364,55 @@ export function patchLtxWorkflow(
   return next;
 }
 
+export function patchMinimaxH3Workflow(
+  workflow: Workflow,
+  opts: {
+    imageName: string;
+    endImageName?: string | null;
+    prompt: string;
+    seed: number;
+    frames: number;
+    width: number;
+    height: number;
+    fps: number;
+  }
+): Workflow {
+  const next = structuredClone(workflow);
+  for (const node of Object.values(next)) {
+    if (!node.inputs) continue;
+    if (node.class_type === "LoadImage" && node._meta?.title === "Start image") {
+      node.inputs.image = opts.imageName;
+    }
+    if (node.class_type === "UNETLoader") node.inputs.unet_name = H3_DIFFUSION;
+    if (node.class_type === "CLIPLoader") node.inputs.clip_name = H3_TEXT_ENCODER;
+    if (node.class_type === "VAELoader" && node._meta?.title === "Load video VAE") {
+      node.inputs.vae_name = H3_VIDEO_VAE;
+    }
+    if (node.class_type === "VAELoader" && node._meta?.title === "Load audio VAE") {
+      node.inputs.vae_name = H3_AUDIO_VAE;
+    }
+    if (node.class_type === "MiniMaxH3ImageToVideo") {
+      node.inputs.prompt = opts.prompt;
+      node.inputs.width = opts.width;
+      node.inputs.height = opts.height;
+      node.inputs.length = opts.frames;
+      if (!opts.endImageName) delete node.inputs.last_frame;
+    }
+    if (node.class_type === "RandomNoise") node.inputs.noise_seed = opts.seed;
+    if (node.class_type === "CreateVideo") node.inputs.fps = opts.fps;
+  }
+  if (opts.endImageName) {
+    next["16"] = {
+      class_type: "LoadImage",
+      inputs: { image: opts.endImageName },
+      _meta: { title: "End image" },
+    };
+    const latent = Object.values(next).find((node) => node.class_type === "MiniMaxH3ImageToVideo");
+    if (latent?.inputs) latent.inputs.last_frame = ["16", 0];
+  }
+  return next;
+}
+
 /** Uses the clip's stored seed so a reused key would send the same seed. */
 export function providerSeed(seed: number | undefined): number {
   if (seed != null && Number.isFinite(seed)) return Math.floor(Math.abs(seed)) % 1_000_000_000;
@@ -431,7 +490,7 @@ function historyError(entry: { status?: { status_str?: string; messages?: unknow
 }
 
 /**
- * Queues the selected shipped workflow (SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, or LTX-2.3), polls /history, downloads the file.
+ * Queues the selected shipped workflow (SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, or MiniMax H3), polls /history, downloads the file.
  * Not a node editor. If the server is down, or it reports OOM or a missing node or model, the job fails.
  * FLF2V requires an end image and does not fall back to TI2V-5B.
  */
@@ -467,7 +526,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const inputAbs = resolveDataPath(job.imagePath);
   if (!fs.existsSync(inputAbs)) fail(jobId, `Image not found: ${job.imagePath}`);
   const endAbs = job.endImagePath ? resolveDataPath(job.endImagePath) : null;
-  if (plan.workflow === "wan-flf") {
+  if (plan.workflow === "wan-flf" || (plan.workflow === "minimax-h3" && job.endImagePath)) {
     if (!endAbs || !fs.existsSync(endAbs)) {
       fail(jobId, `End image not found: ${job.endImagePath}`);
     }
@@ -488,8 +547,8 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
 
   const bytes = fs.readFileSync(inputAbs);
   const imageName = await uploadComfyImage(base, jobId, inputAbs, "start image");
-  const endImageName =
-    plan.workflow === "wan-flf" && endAbs ? await uploadComfyImage(base, jobId, endAbs, "end image") : null;
+  const sendEnd = (plan.workflow === "wan-flf" || plan.workflow === "minimax-h3") && Boolean(endAbs);
+  const endImageName = sendEnd && endAbs ? await uploadComfyImage(base, jobId, endAbs, "end image") : null;
 
   const seed = providerSeed(job.seed);
   let workflow: Workflow;
@@ -534,6 +593,19 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       width: size.width,
       height: size.height,
       fps: WAN_FPS,
+    });
+  } else if (plan.workflow === "minimax-h3") {
+    const pixels = imagePixelSize(bytes);
+    const size = h3FrameSize(pixels?.width ?? 0, pixels?.height ?? 0, plan.lowMemory);
+    workflow = patchMinimaxH3Workflow(loadMinimaxH3Workflow(), {
+      imageName,
+      endImageName,
+      prompt: job.prompt,
+      seed,
+      frames: h3FrameCount(duration, plan.lowMemory),
+      width: size.width,
+      height: size.height,
+      fps: H3_FPS,
     });
   } else {
     const fps = 6;

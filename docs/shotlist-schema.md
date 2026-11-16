@@ -29,7 +29,7 @@ After each clip is written, the command prints a note when the file is all black
 | `description` | Note. A string. Empty is fine. |
 | `styleBase` | Shared style / character text. Empty sends each shot prompt alone. Text only, not a character lock. |
 | `provider` | `mock`, `fal`, `replicate`, or `comfyui`. The name of the backend. Render all in the studio still uses Settings. |
-| `comfyuiWorkflow` | A workflow name, or `null` to inherit the app default. Names: Stable Video Diffusion, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3 distilled FP8. The internal ids (`svd`, `wan`, `wan-flf`, `ltx`) are not accepted. |
+| `comfyuiWorkflow` | A workflow name, or `null` to inherit the app default. Names: Stable Video Diffusion, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3 distilled FP8, MiniMax H3. The internal ids (`svd`, `wan`, `wan-flf`, `ltx`, `minimax-h3`) are not accepted. |
 | `comfyLowMemory` | `true`, `false`, or `null` to inherit. |
 | `output` | `{ "fps", "width", "height" }`. Each is a number or `null`. `null` leaves that stitch choice to the clips. fps is a whole number from 1 to 60. Width and height are both set, or both `null`, and each is an even number from 16 to 4096. |
 | `transition` | The project join. See below. |

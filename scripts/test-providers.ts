@@ -259,7 +259,13 @@ async function checkPreflight() {
   assert(/hints about common failure modes/i.test(PREFLIGHT_HONESTY), "preflight calls the notes hints");
   assert(/do not guarantee/i.test(PREFLIGHT_HONESTY), "preflight does not guarantee a result");
   assert(isWanLike("comfyui", "wan") && isWanLike("comfyui", "wan-flf"), "Wan graphs are Wan-like");
-  assert(!isWanLike("comfyui", "svd") && !isWanLike("comfyui", "ltx") && !isWanLike("mock", "wan"), "SVD, LTX, and Mock are not Wan-like");
+  assert(
+    !isWanLike("comfyui", "svd") &&
+      !isWanLike("comfyui", "ltx") &&
+      !isWanLike("comfyui", "minimax-h3") &&
+      !isWanLike("mock", "wan"),
+    "SVD, LTX, MiniMax H3, and Mock are not Wan-like"
+  );
 
   type ShotPartial = {
     id?: string;
@@ -267,7 +273,7 @@ async function checkPreflight() {
     prompt?: string;
     presetId?: string;
     chainFromPrevious?: boolean;
-    comfyuiWorkflow?: "svd" | "wan" | "wan-flf" | "ltx" | null;
+    comfyuiWorkflow?: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3" | null;
     comfyLowMemory?: boolean | null;
     width?: number | null;
     height?: number | null;
@@ -290,8 +296,8 @@ async function checkPreflight() {
     provider?: "mock" | "fal" | "replicate" | "comfyui";
     outputWidth?: number | null;
     outputHeight?: number | null;
-    settings?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx"; comfyLowMemory: boolean };
-    project?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | null; comfyLowMemory: boolean | null };
+    settings?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3"; comfyLowMemory: boolean };
+    project?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3" | null; comfyLowMemory: boolean | null };
     shots: ReturnType<typeof one>[];
   }) {
     return {
@@ -365,7 +371,7 @@ async function checkPreflight() {
 
   function at(
     provider: "mock" | "fal" | "replicate" | "comfyui",
-    workflow: "svd" | "wan" | "wan-flf" | "ltx",
+    workflow: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3",
     width: number,
     height: number
   ) {
@@ -380,6 +386,12 @@ async function checkPreflight() {
   assert(!at("mock", "svd", 960, 540).notes.some((note) => note.code === "divisible-16"), "Mock does not warn about multiples of 16");
   assert(!at("comfyui", "svd", 960, 540).notes.some((note) => note.code === "divisible-16"), "SVD does not warn about multiples of 16");
   assert(!at("comfyui", "ltx", 960, 540).notes.some((note) => note.code === "divisible-16"), "LTX does not warn about multiples of 16");
+  const h3Still = at("comfyui", "minimax-h3", 960, 540);
+  assert(!h3Still.notes.some((note) => note.code === "divisible-16"), "MiniMax H3 does not warn about multiples of 16");
+  assert(
+    h3Still.notes.some((note) => note.code === "still-small" && /1344×768/.test(note.note)),
+    `960×540 is smaller than the MiniMax H3 box: ${h3Still.notes.map((note) => note.note).join(" | ")}`
+  );
   assert(!at("fal", "wan", 960, 540).notes.some((note) => note.code === "divisible-16"), "fal does not warn about multiples of 16");
   const wan = at("comfyui", "wan", 960, 540);
   assert(
@@ -530,6 +542,7 @@ async function checkComfyObjectInfo() {
   );
   assert(JSON.stringify(readiness.modelChoicesFromInput([[], {}])) === "[]", "an empty combo is a real list");
   assert(readiness.workflowIdFromFlag("wan22-14b-flf2v") === "wan-flf", "cli workflow flag");
+  assert(readiness.workflowIdFromFlag("minimax-h3-i2v") === "minimax-h3", "minimax cli workflow flag");
   assert(/does not promise quality/i.test(readiness.COMFY_CHECK_HONESTY), "the check does not promise quality");
   assert(/character lock/i.test(readiness.COMFY_CHECK_HONESTY), "the check keeps character lock out");
   assert(/lip-sync/i.test(readiness.COMFY_CHECK_HONESTY), "the check keeps lip-sync out");
@@ -583,6 +596,20 @@ async function checkComfyObjectInfo() {
       slot
     );
   }
+  for (const slot of readiness.modelSlotsFor("minimax-h3")) {
+    written(
+      comfy.patchMinimaxH3Workflow(comfy.loadMinimaxH3Workflow(), {
+        imageName: "start.png",
+        prompt: "a harbor",
+        seed: 1,
+        frames: 124,
+        width: 1344,
+        height: 768,
+        fps: 24,
+      }),
+      slot
+    );
+  }
   for (const slot of readiness.modelSlotsFor("ltx")) {
     written(
       comfy.patchLtxWorkflow(comfy.loadLtxWorkflow(), {
@@ -598,7 +625,7 @@ async function checkComfyObjectInfo() {
     );
   }
 
-  const shipped = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx"], fixture);
+  const shipped = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx", "minimax-h3"], fixture);
   assert(shipped.every((item) => item.ok), `fixture should pass: ${JSON.stringify(shipped.filter((item) => !item.ok))}`);
   assert(
     shipped.every((item) => item.inputNotes.length === 0 && item.inputBlocks.length === 0),
@@ -635,6 +662,7 @@ async function checkComfyObjectInfo() {
   assert(/wan_2\.1_vae/.test(mismatch14.vaeWarnings[0]?.nextStep || ""), "the 14B note names wan_2.1_vae");
   assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("svd")).length === 0, "SVD has no Wan VAE note");
   assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("ltx")).length === 0, "LTX has no Wan VAE note");
+  assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("minimax-h3")).length === 0, "MiniMax H3 has no Wan VAE note");
   const wanGraph = JSON.parse(fs.readFileSync(path.join(process.cwd(), "workflows/comfyui-wan22-ti2v-5b.api.json"), "utf8")) as {
     [id: string]: { class_type?: string; inputs?: Record<string, string> };
   };
@@ -702,11 +730,11 @@ async function checkComfyObjectInfo() {
 
   const newerPath = path.join(process.cwd(), "fixtures", "comfyui", "object-info-newer.json");
   const newer = JSON.parse(fs.readFileSync(newerPath, "utf8")) as Record<string, unknown>;
-  const newerChecks = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx"], newer);
+  const newerChecks = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx", "minimax-h3"], newer);
   const newerById = Object.fromEntries(newerChecks.map((item) => [item.id, item]));
   assert(newerById.svd?.ok && newerById.svd.inputNotes.length === 0, "SVD has no CreateVideo input to fill");
   assert(newerById.wan?.ok && newerById.wan.inputNotes.length === 0, "Wan 5B has no CreateVideo input to fill");
-  for (const id of ["wan-flf", "ltx"] as const) {
+  for (const id of ["wan-flf", "ltx", "minimax-h3"] as const) {
     const row = newerById[id];
     assert(row?.ok && !row.blocksQueue && row.inputBlocks.length === 0, `${id} can still run after the fill`);
     assert(row.inputNotes.length === 1, `${id} reports the omitted chroma input`);
@@ -947,7 +975,10 @@ async function checkComfyObjectInfo() {
     });
     servers.push(ready);
     storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: ready.url, comfyuiWorkflow: "wan-flf" });
-    assert((await comfy.guardComfyWorkflows(["svd", "wan", "wan-flf", "ltx"])) === null, "a ready server does not block");
+    assert(
+      (await comfy.guardComfyWorkflows(["svd", "wan", "wan-flf", "ltx", "minimax-h3"])) === null,
+      "a ready server does not block"
+    );
 
     const broken = await serve((req, res) => {
       const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -1070,6 +1101,10 @@ async function checkComfyObjectInfo() {
     assert(/does not promise quality/.test(passCli.stdout || ""), "the table keeps the honesty line");
     assert(!(passCli.stdout || "").includes(secret) && !(passCli.stderr || "").includes(secret), "comfy:check does not print the auth header");
     assert(sawAuth === secret, "comfy:check sends the auth header");
+    const h3Cli = await runCli(["--url", ready.url, "--workflow", "minimax-h3-i2v"], cliEnv);
+    assert(h3Cli.status === 0, `comfy:check MiniMax H3 failed\n${h3Cli.stdout}\n${h3Cli.stderr}`);
+    assert(/MiniMax H3/.test(h3Cli.stdout || ""), "the table names MiniMax H3");
+    assert(/Result: pass/.test(h3Cli.stdout || ""), "MiniMax H3 comfy:check passes the fixture");
 
     const failCli = await runCli(["--url", broken.url, "--workflow", "wan22-14b-flf2v"], cliEnv);
     assert(failCli.status !== 0, "comfy:check exits non-zero on a missing node");
@@ -2676,6 +2711,204 @@ async function main() {
     "ltx fps"
   );
   await ltxStandin.close();
+
+  const h3 = await import("../src/lib/minimax-h3");
+  assert(h3.h3FrameCount(5, false) === h3.H3_MAX_FRAMES, "five seconds snaps up to 124 frames");
+  assert(h3.h3FrameCount(4, false) === 107, "four seconds snaps up to 107 frames");
+  assert(h3.h3FrameCount(10, false) === h3.H3_MAX_FRAMES, "ten seconds stays at the five-second cap");
+  assert(h3.h3FrameCount(10, true) === h3.H3_LOW_MAX_FRAMES, "low memory caps a long shot at 22 frames");
+  assert(h3.h3FrameCount(0.1, false) === h3.H3_MIN_FRAMES, "a very short shot stays on the 5-frame minimum");
+  assert(h3.h3AlignFrames(120) % 17 === 5, "the length rule is 17k+5");
+  const h3LowSize = h3.h3FrameSize(pixels!.width, pixels!.height, true);
+  const h3FullSize = h3.h3FrameSize(pixels!.width, pixels!.height, false);
+  const h3LowFrames = h3.h3FrameCount(10, true);
+  const h3FullFrames = h3.h3FrameCount(5, false);
+  const h3LowDescribed = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: false,
+    comfy: { workflow: "minimax-h3", lowMemory: true },
+  });
+  assert(/reads the text prompt/i.test(h3LowDescribed.providerNote), "h3 note reads the prompt");
+  assert(/864×480/.test(h3LowDescribed.providerNote), "h3 low-memory note names the smaller box");
+  assert(/no end still/i.test(h3LowDescribed.providerNote), "h3 without an end still says the job still runs");
+  assert(!/character lock|lip-sync|long film/i.test(h3LowDescribed.providerNote), "h3 note makes no extra claims");
+  const h3FullDescribed = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: true,
+    comfy: { workflow: "minimax-h3", lowMemory: false },
+  });
+  assert(/end image is sent as the last frame/i.test(h3FullDescribed.providerNote), "h3 note sends the end still");
+  assert(/audio/i.test(h3FullDescribed.providerNote), "h3 note says the graph writes audio");
+  assert(/keeps that audio/i.test(h3FullDescribed.providerNote), "h3 note says the stitch keeps clip audio");
+  let h3Uploads = 0;
+  const h3Bodies: string[] = [];
+  const h3Standin = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      h3Uploads += 1;
+      req.resume();
+      req.on("end", () => {
+        const name = h3Uploads === 1 ? "h3-start.png" : h3Uploads === 2 ? "h3-start-2.png" : "h3-end.png";
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ name, subfolder: "", type: "input" }));
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        h3Bodies.push(body);
+        const promptId = h3Bodies.length === 1 ? "standin-h3-low" : "standin-h3";
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: promptId, node_errors: {} }));
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/history/")) {
+      const promptId = url.pathname.split("/").pop();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          [promptId || ""]: {
+            status: { status_str: "success", completed: true },
+            outputs: {
+              "15": { images: [{ filename: "h3.mp4", subfolder: "", type: "output" }] },
+            },
+          },
+        })
+      );
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/view") {
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      res.end(mp4);
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  storage.saveSettings({ comfyuiBaseUrl: h3Standin.url, comfyuiWorkflow: "svd" });
+  const h3LowJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    durationSec: 10,
+    modelName: h3LowDescribed.modelName,
+    providerNote: h3LowDescribed.providerNote,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(h3LowJob.id);
+  assert(storage.getJob(h3LowJob.id)?.status === "completed", `h3 low-memory completed: ${storage.getJob(h3LowJob.id)?.error}`);
+  const h3FullJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    endImagePath: shot.startImagePath,
+    durationSec: 5,
+    modelName: h3FullDescribed.modelName,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(h3FullJob.id);
+  assert(storage.getJob(h3FullJob.id)?.status === "completed", `h3 completed: ${storage.getJob(h3FullJob.id)?.error}`);
+  assert(h3Uploads === 3, `h3 uploads the start still, then the start and end stills: ${h3Uploads}`);
+  function h3Nodes(index: number) {
+    const posted = JSON.parse(h3Bodies[index] || "{}") as {
+      prompt?: Record<string, { class_type?: string; inputs?: Record<string, unknown>; _meta?: { title?: string } }>;
+    };
+    return Object.values(posted.prompt || {});
+  }
+  const h3LowNodes = h3Nodes(0);
+  const h3FullNodes = h3Nodes(1);
+  const h3LowLatent = h3LowNodes.find((node) => node.class_type === "MiniMaxH3ImageToVideo");
+  assert(h3LowLatent?.inputs?.prompt === shot.prompt, "h3 injects the prompt");
+  assert(h3LowLatent?.inputs?.length === h3LowFrames, `h3 low frames ${h3LowLatent?.inputs?.length} != ${h3LowFrames}`);
+  assert(h3LowLatent?.inputs?.width === h3LowSize.width && h3LowLatent?.inputs?.height === h3LowSize.height, "h3 low size");
+  assert(!Object.prototype.hasOwnProperty.call(h3LowLatent?.inputs || {}, "last_frame"), "h3 without an end still leaves last_frame off");
+  assert(
+    h3LowNodes.some((node) => node.class_type === "LoadImage" && node.inputs?.image === "h3-start.png"),
+    "h3 injects the start image"
+  );
+  assert(!h3LowNodes.some((node) => node._meta?.title === "End image"), "h3 without an end still does not add an end LoadImage");
+  const h3FullLatent = h3FullNodes.find((node) => node.class_type === "MiniMaxH3ImageToVideo");
+  assert(h3FullLatent?.inputs?.length === h3FullFrames, `h3 frames ${h3FullLatent?.inputs?.length} != ${h3FullFrames}`);
+  assert(
+    h3FullLatent?.inputs?.width === h3FullSize.width && h3FullLatent?.inputs?.height === h3FullSize.height,
+    "h3 size"
+  );
+  assert(
+    Array.isArray(h3FullLatent?.inputs?.last_frame),
+    "h3 connects last_frame when the shot has an end still"
+  );
+  assert(
+    h3FullNodes.some(
+      (node) => node.class_type === "LoadImage" && node._meta?.title === "End image" && node.inputs?.image === "h3-end.png"
+    ),
+    "h3 injects the end image"
+  );
+  assert(
+    h3FullNodes.some((node) => node.class_type === "RandomNoise" && typeof node.inputs?.noise_seed === "number"),
+    "h3 injects a seed"
+  );
+  assert(
+    h3FullNodes.some((node) => node.class_type === "UNETLoader" && node.inputs?.unet_name === info.H3_DIFFUSION),
+    "h3 diffusion file"
+  );
+  assert(
+    h3FullNodes.some(
+      (node) =>
+        node.class_type === "CLIPLoader" &&
+        node.inputs?.clip_name === info.H3_TEXT_ENCODER &&
+        node.inputs?.type === "minimax"
+    ),
+    "h3 text encoder and clip type"
+  );
+  assert(
+    h3FullNodes.some(
+      (node) => node.class_type === "VAELoader" && node._meta?.title === "Load video VAE" && node.inputs?.vae_name === info.H3_VIDEO_VAE
+    ),
+    "h3 video vae"
+  );
+  assert(
+    h3FullNodes.some(
+      (node) => node.class_type === "VAELoader" && node._meta?.title === "Load audio VAE" && node.inputs?.vae_name === info.H3_AUDIO_VAE
+    ),
+    "h3 audio vae"
+  );
+  assert(
+    h3FullNodes.some((node) => node.class_type === "KSamplerSelect" && node.inputs?.sampler_name === "res_multistep"),
+    "h3 sampler"
+  );
+  assert(
+    h3FullNodes.some(
+      (node) => node.class_type === "BasicScheduler" && node.inputs?.scheduler === "simple" && node.inputs?.steps === 20
+    ),
+    "h3 scheduler"
+  );
+  const h3Video = h3FullNodes.find((node) => node.class_type === "CreateVideo");
+  assert(h3Video?.inputs?.fps === h3.H3_FPS, "h3 fps");
+  assert(Array.isArray(h3Video?.inputs?.audio), "h3 connects decoded audio into CreateVideo");
+  assert(h3FullNodes.some((node) => node.class_type === "VAEDecodeAudio"), "h3 decodes the audio latent");
+  assert(!h3FullNodes.some((node) => node.class_type === "LoraLoaderModelOnly"), "h3 does not load the turbo lora");
+  assert(info.comfyWorkflowFromModelName(info.H3_MODEL_NAME) === "minimax-h3", "h3 model name routes to the h3 graph");
+  await h3Standin.close();
 
   const secret = "Bearer secret-token-do-not-store";
   let sawAuth = false;

@@ -12,6 +12,7 @@ import {
   LTX_MAX_HEIGHT,
   LTX_MAX_WIDTH,
 } from "./ltx";
+import { H3_LOW_HEIGHT, H3_LOW_WIDTH, H3_MAX_HEIGHT, H3_MAX_WIDTH } from "./minimax-h3";
 import {
   MOCK_FRAME,
   SVD_FRAME,
@@ -322,6 +323,20 @@ function workingFrame(input: PreflightInput, shot: PreflightShotInput): WorkingF
       writes: `The Wan 2.2 first-last graph fits the still inside ${width}×${height}`,
       name,
       workflow: "wan-flf",
+      lowMemory: choice.lowMemory,
+    };
+  }
+  if (choice.workflow === "minimax-h3") {
+    const width = choice.lowMemory ? H3_LOW_WIDTH : H3_MAX_WIDTH;
+    const height = choice.lowMemory ? H3_LOW_HEIGHT : H3_MAX_HEIGHT;
+    const name = choice.lowMemory ? "the MiniMax H3 low-memory box" : "the MiniMax H3 box";
+    return {
+      width,
+      height,
+      mode: "fit",
+      writes: `The MiniMax H3 graph fits the still inside ${width}×${height}`,
+      name,
+      workflow: "minimax-h3",
       lowMemory: choice.lowMemory,
     };
   }
