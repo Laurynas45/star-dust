@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { effectiveSeed, normalizeSeed } from "@/lib/input-key";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getJob, getProject, getShot, updateShot } from "@/lib/storage";
-import { ComfyWorkflowId, SeamFadeUnit, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, clampSeamFadeFrames, effectivePrompt, isComfyWorkflowId, isSeamFadeUnit, presetById } from "@/lib/types";
+import { ComfyGraphId, SeamFadeUnit, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, clampSeamFadeFrames, effectivePrompt, isComfyGraphId, isSeamFadeUnit, presetById } from "@/lib/types";
 
-function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
+function workflowField(value: unknown): ComfyGraphId | null | undefined {
   if (value === null) return null;
-  if (isComfyWorkflowId(value)) return value;
+  if (isComfyGraphId(value)) return value;
   return undefined;
 }
 

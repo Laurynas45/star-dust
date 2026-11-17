@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import { ComfyReadinessPanel } from "@/components/ComfyReadinessPanel";
 import { ComfyWorkflowCards } from "@/components/ComfyWorkflowCards";
 import type { ComfyServerCheck } from "@/lib/comfy-readiness";
-import { CAPABILITY, CLOUD_RISK_NOTE, COMFY_WORKFLOWS } from "@/lib/provider-info";
+import { graphBlurb } from "@/lib/comfy-graph-view";
+import type { CustomGraphCard } from "@/lib/custom-workflow";
+import { CAPABILITY, CLOUD_RISK_NOTE } from "@/lib/provider-info";
 import {
   AppSettings,
   BillingUnit,
@@ -16,7 +18,7 @@ import {
   billingUnitOf,
 } from "@/lib/types";
 
-type SettingsResponse = AppSettings & { env: StudioEnv };
+type SettingsResponse = AppSettings & { env: StudioEnv; customWorkflows?: CustomGraphCard[] };
 
 const EMPTY_ENV: StudioEnv = {
   hasFalKey: false,
@@ -481,11 +483,17 @@ export default function SettingsPage() {
           </p>
           <ComfyWorkflowCards
             selected={settings.comfyuiWorkflow}
+            custom={settings.customWorkflows ?? []}
             onSelect={(id) => {
               setReadiness(null);
               void save({ comfyuiWorkflow: id });
             }}
           />
+          {graphBlurb(settings.comfyuiWorkflow, settings.customWorkflows ?? []).missing && (
+            <p className="mt-3 text-xs leading-relaxed text-rose-100">
+              {graphBlurb(settings.comfyuiWorkflow, settings.customWorkflows ?? []).goodAt}
+            </p>
+          )}
           <label className="mt-3 flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
             <input
               type="checkbox"
@@ -494,8 +502,9 @@ export default function SettingsPage() {
               onChange={(e) => save({ comfyLowMemory: e.target.checked })}
             />
             <span>
-              Low-memory preset for shots that do not override it: start at about 480p, short clip.
-              Each card above says what that means for that graph.
+              Low-memory preset for shots that do not override it. Each card above says what that
+              means. For a custom graph it caps frames or size only when the mapping says so.
+              Otherwise it does nothing.
             </span>
           </label>
         </div>
@@ -528,7 +537,7 @@ export default function SettingsPage() {
             {settings.env.comfyuiAuthConfigured
               ? "COMFYUI_AUTH_HEADER is present and is sent as Authorization. The value is not shown."
               : "Set COMFYUI_AUTH_HEADER if the server expects an Authorization value. It is not stored."}{" "}
-            Star Dust posts <code>{COMFY_WORKFLOWS[settings.comfyuiWorkflow].file}</code>, polls{" "}
+            Star Dust posts <code>{graphBlurb(settings.comfyuiWorkflow, settings.customWorkflows ?? []).file}</code>, polls{" "}
             <code>/history</code>, and downloads the video. A down server, a missing model or node, or an
             out-of-memory error fails the job instead of leaving it running.
           </p>

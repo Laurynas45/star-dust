@@ -1,4 +1,5 @@
-import { AppSettings, ComfyWorkflowId, ProviderId } from "./types";
+import { formatCustomProviderNote, type CustomGraphNote } from "./custom-workflow";
+import { AppSettings, ComfyGraphId, ComfyWorkflowId, isComfyWorkflowId, isCustomGraphId, ProviderId } from "./types";
 
 export const LOW_MEMORY_MARK = " · low-memory preset";
 
@@ -132,9 +133,10 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
   },
 };
 
-export function comfyModelName(workflow: ComfyWorkflowId, lowMemory: boolean): string {
-  const base =
-    workflow === "minimax-h3"
+export function comfyModelName(workflow: ComfyGraphId, lowMemory: boolean): string {
+  const base = isCustomGraphId(workflow)
+    ? `ComfyUI ${workflow}`
+    : workflow === "minimax-h3"
       ? H3_MODEL_NAME
       : workflow === "ltx"
         ? LTX_MODEL_NAME
@@ -158,8 +160,18 @@ export function comfyWorkflowIdByTitle(title: string): ComfyWorkflowId | null {
 
 export const COMFY_WORKFLOW_TITLES = COMFY_WORKFLOW_ORDER.map((id) => COMFY_WORKFLOWS[id].title);
 
-export function comfyWorkflowFromModelName(modelName?: string): ComfyWorkflowId | null {
+export function compareGraphIds(a: ComfyGraphId, b: ComfyGraphId): number {
+  const rank = (id: ComfyGraphId) =>
+    isComfyWorkflowId(id) ? COMFY_WORKFLOW_ORDER.indexOf(id) : COMFY_WORKFLOW_ORDER.length;
+  const diff = rank(a) - rank(b);
+  if (diff !== 0) return diff;
+  return a.localeCompare(b);
+}
+
+export function comfyWorkflowFromModelName(modelName?: string): ComfyGraphId | null {
   if (!modelName) return null;
+  const custom = /^ComfyUI (custom:[a-z][a-z0-9-]{0,47})(?: · low-memory preset)?$/.exec(modelName);
+  if (custom && isCustomGraphId(custom[1])) return custom[1];
   if (modelName.includes("MiniMax H3")) return "minimax-h3";
   if (modelName.includes("FLF2V")) return "wan-flf";
   if (modelName.includes("LTX-2.3")) return "ltx";
@@ -194,7 +206,7 @@ export const CAPABILITY: Record<
   comfyui: {
     title: "ComfyUI",
     label:
-      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3 distilled FP8, and MiniMax H3 graphs. Not a node editor.",
+      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3 distilled FP8, and MiniMax H3 graphs. A graph you export can be added as a pair of files. Not a node editor.",
   },
 };
 
@@ -205,7 +217,7 @@ export function isPaidProvider(provider: ProviderId): boolean {
 export function modelNameFor(
   provider: ProviderId,
   settings: AppSettings,
-  comfy?: { workflow: ComfyWorkflowId; lowMemory: boolean }
+  comfy?: { workflow: ComfyGraphId; lowMemory: boolean }
 ): string {
   switch (provider) {
     case "mock":
@@ -245,7 +257,7 @@ export function describeProviderUse(opts: {
   settings: AppSettings;
   hasCharacterSheet: boolean;
   hasEndImage: boolean;
-  comfy?: { workflow: ComfyWorkflowId; lowMemory: boolean };
+  comfy?: { workflow: ComfyGraphId; lowMemory: boolean; custom?: CustomGraphNote };
 }): { modelName: string; characterNote?: string; providerNote: string } {
   const comfy = opts.comfy ?? {
     workflow: opts.settings.comfyuiWorkflow,
@@ -332,6 +344,35 @@ export function describeProviderUse(opts: {
       characterNote =
         "Character sheet was not sent. This MiniMax H3 workflow has no reference-image input, so the face will not match the sheet.";
     }
+  } else if (opts.provider === "comfyui" && isCustomGraphId(comfy.workflow)) {
+    const note =
+      comfy.custom ??
+      ({
+        id: comfy.workflow,
+        ok: false,
+        title: comfy.workflow,
+        file: `data/workflows/${comfy.workflow.slice("custom:".length)}.api.json`,
+        errors: [`Custom graph ${comfy.workflow} was not loaded.`],
+        readsPrompt: false,
+        needsEndImage: false,
+        sendsSeed: false,
+        sendsFrames: false,
+        sendsSize: false,
+        frameSummary: "",
+        sizeSummary: "",
+        lowMemory: "The low-memory preset does nothing until the mapping is loaded.",
+        lowMemoryChanges: false,
+        outputNode: "",
+      } satisfies CustomGraphNote);
+    const written = formatCustomProviderNote(note, {
+      modelName,
+      lowMemory: comfy.lowMemory,
+      hasEndImage: opts.hasEndImage,
+      hasCharacterSheet: opts.hasCharacterSheet,
+      serverNote: COMFY_SERVER_NOTE,
+    });
+    parts.push(written.providerNote);
+    characterNote = written.characterNote;
   } else if (opts.provider === "comfyui") {
     parts.push(
       `${modelName} queues the shipped workflow, polls history, and downloads the video. The graph does not read the text prompt. Duration is mapped to an SVD frame count, not sent as its own field. ${COMFY_SERVER_NOTE}`

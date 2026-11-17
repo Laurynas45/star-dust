@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { studioEnv } from "@/lib/studio-env";
 import { getSettings, saveSettings } from "@/lib/storage";
-import { AppSettings, BillingUnit, ProviderId, RateTable, StoredRate, isBillingUnit, isComfyWorkflowId } from "@/lib/types";
+import { listCustomGraphCards } from "@/lib/custom-workflow-files";
+import { AppSettings, BillingUnit, ProviderId, RateTable, StoredRate, isBillingUnit, isComfyGraphId } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function withEnv(settings: AppSettings) {
-  return { ...settings, env: studioEnv() };
+  return { ...settings, env: studioEnv(), customWorkflows: listCustomGraphCards() };
 }
 
 export async function GET() {
@@ -25,7 +26,7 @@ export async function PUT(req: NextRequest) {
   if (typeof body.comfyuiBaseUrl === "string") patch.comfyuiBaseUrl = body.comfyuiBaseUrl.trim();
   if (typeof body.falModel === "string") patch.falModel = body.falModel.trim();
   if (typeof body.replicateModel === "string") patch.replicateModel = body.replicateModel.trim();
-  if (isComfyWorkflowId(body.comfyuiWorkflow)) {
+  if (isComfyGraphId(body.comfyuiWorkflow)) {
     patch.comfyuiWorkflow = body.comfyuiWorkflow;
   }
   if (typeof body.comfyLowMemory === "boolean") patch.comfyLowMemory = body.comfyLowMemory;

@@ -1,7 +1,7 @@
 "use client";
 
 import type { ComfyServerCheck } from "@/lib/comfy-readiness";
-import type { ComfyWorkflowId } from "@/lib/types";
+import type { ComfyGraphId } from "@/lib/types";
 
 type Shown = ComfyServerCheck & { workflows: ComfyServerCheck["workflows"] };
 
@@ -83,7 +83,7 @@ export function ComfyReadinessPanel(props: {
   );
 }
 
-export function ShotComfyNote(props: { report: Shown | null; workflow: ComfyWorkflowId }) {
+export function ShotComfyNote(props: { report: Shown | null; workflow: ComfyGraphId }) {
   const row = props.report?.workflows.find((item) => item.id === props.workflow);
   if (!row) return null;
   if (!row.ok) {

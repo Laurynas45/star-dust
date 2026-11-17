@@ -10,16 +10,16 @@
 import { COMFY_CHECK_WORKFLOW_FLAGS, formatComfyCheckTable, workflowIdFromFlag } from "../src/lib/comfy-readiness";
 import { COMFY_WORKFLOW_ORDER } from "../src/lib/provider-info";
 import { checkComfyServer } from "../src/lib/providers/comfyui";
-import { ComfyWorkflowId } from "../src/lib/types";
+import { ComfyGraphId } from "../src/lib/types";
 
 function fail(message: string): never {
   console.error(message);
   process.exit(1);
 }
 
-function parseArgs(argv: string[]): { url: string; workflows: ComfyWorkflowId[] } {
+function parseArgs(argv: string[]): { url: string; workflows: ComfyGraphId[] } {
   let url = "";
-  let workflow: ComfyWorkflowId | null = null;
+  let workflow: ComfyGraphId | null = null;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--url") {
@@ -32,10 +32,10 @@ function parseArgs(argv: string[]): { url: string; workflows: ComfyWorkflowId[] 
     if (arg === "--workflow") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) {
-        fail(`--workflow needs one of: ${COMFY_CHECK_WORKFLOW_FLAGS.join(", ")}`);
+        fail(`--workflow needs one of: ${COMFY_CHECK_WORKFLOW_FLAGS.join(", ")}, or custom:<slug>`);
       }
       const id = workflowIdFromFlag(value);
-      if (!id) fail(`Unknown workflow ${value}. Use one of: ${COMFY_CHECK_WORKFLOW_FLAGS.join(", ")}`);
+      if (!id) fail(`Unknown workflow ${value}. Use one of: ${COMFY_CHECK_WORKFLOW_FLAGS.join(", ")}, or custom:<slug>`);
       workflow = id;
       index += 1;
       continue;

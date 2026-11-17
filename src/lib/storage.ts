@@ -5,8 +5,8 @@ import Database from "better-sqlite3";
 import { v4 as uuidv4 } from "uuid";
 import {
   AppSettings,
-  ComfyWorkflowId,
-  isComfyWorkflowId,
+  ComfyGraphId,
+  isComfyGraphId,
   isProviderId,
   DEFAULT_SEAM_FADE_FRAMES,
   DEFAULT_SEAM_FADE_SEC,
@@ -954,7 +954,7 @@ export function createShot(input: {
   durationSec: number;
   startImagePath?: string;
   endImagePath?: string;
-  comfyuiWorkflow?: ComfyWorkflowId | null;
+  comfyuiWorkflow?: ComfyGraphId | null;
   comfyLowMemory?: boolean | null;
   chainFromPrevious?: boolean;
   chainFrameBack?: number;
@@ -1382,13 +1382,13 @@ function parseRates(raw: unknown): RateTable {
   }
 }
 
-function parseWorkflow(value: unknown): ComfyWorkflowId {
-  if (isComfyWorkflowId(value)) return value;
+function parseWorkflow(value: unknown): ComfyGraphId {
+  if (isComfyGraphId(value)) return value;
   return "svd";
 }
 
-function parseOptionalWorkflow(value: unknown): ComfyWorkflowId | null {
-  if (isComfyWorkflowId(value)) return value;
+function parseOptionalWorkflow(value: unknown): ComfyGraphId | null {
+  if (isComfyGraphId(value)) return value;
   return null;
 }
 

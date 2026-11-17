@@ -23,7 +23,7 @@ import {
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import {
   CaptionMode,
-  ComfyWorkflowId,
+  ComfyGraphId,
   SeamMode,
   clampChainTrimStartFrames,
   clampMusicFadeSec,
@@ -31,13 +31,13 @@ import {
   clampSeamFade,
   clampSeamFadeFrames,
   effectivePrompt,
-  isComfyWorkflowId,
+  isComfyGraphId,
   isSeamFadeUnit,
 } from "@/lib/types";
 
-function workflowField(value: unknown): ComfyWorkflowId | null | undefined {
+function workflowField(value: unknown): ComfyGraphId | null | undefined {
   if (value === null) return null;
-  if (isComfyWorkflowId(value)) return value;
+  if (isComfyGraphId(value)) return value;
   return undefined;
 }
 

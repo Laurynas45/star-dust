@@ -14,8 +14,36 @@ export const COMFY_WORKFLOW_IDS = ["svd", "wan", "wan-flf", "ltx", "minimax-h3"]
 
 export type ComfyWorkflowId = (typeof COMFY_WORKFLOW_IDS)[number];
 
+/** Prefix for a graph the builder added under data/workflows. Shipped ids do not use it. */
+export const CUSTOM_GRAPH_PREFIX = "custom:";
+
+/**
+ * Lowercase slug for a custom graph file pair.
+ * One letter, then letters, digits, or hyphens. No dot, slash, or trailing hyphen.
+ */
+const CUSTOM_GRAPH_SLUG = /^[a-z][a-z0-9-]{0,47}$/;
+
+/** A shipped graph, or custom:<slug>. Stored on settings, a project, and a shot. */
+export type ComfyGraphId = ComfyWorkflowId | `custom:${string}`;
+
 export function isComfyWorkflowId(value: unknown): value is ComfyWorkflowId {
   return value === "svd" || value === "wan" || value === "wan-flf" || value === "ltx" || value === "minimax-h3";
+}
+
+/** Slug after custom:, or null when the id is not a usable custom graph id. */
+export function customGraphSlug(value: string): string | null {
+  if (!value.startsWith(CUSTOM_GRAPH_PREFIX)) return null;
+  const slug = value.slice(CUSTOM_GRAPH_PREFIX.length);
+  if (!CUSTOM_GRAPH_SLUG.test(slug) || slug.endsWith("-")) return null;
+  return slug;
+}
+
+export function isCustomGraphId(value: unknown): value is `custom:${string}` {
+  return typeof value === "string" && customGraphSlug(value) !== null;
+}
+
+export function isComfyGraphId(value: unknown): value is ComfyGraphId {
+  return isComfyWorkflowId(value) || isCustomGraphId(value);
 }
 
 export function isProviderId(value: unknown): value is ProviderId {
@@ -40,8 +68,8 @@ export interface Project {
   completedCount?: number;
   isSample?: boolean;
   coverPath?: string;
-  /** Null inherits the app default in Providers. */
-  comfyuiWorkflow?: ComfyWorkflowId | null;
+  /** Null inherits the app default in Providers. A custom graph is custom:<slug>. */
+  comfyuiWorkflow?: ComfyGraphId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
   /** How clips join in the stitch. Cut is the historical hard cut. */
@@ -153,8 +181,8 @@ export interface Shot {
    * Left out of the cost estimate. Unset means the shot is not locked.
    */
   lockedJobId?: string;
-  /** Null inherits the project, then the app default. */
-  comfyuiWorkflow?: ComfyWorkflowId | null;
+  /** Null inherits the project, then the app default. A custom graph is custom:<slug>. */
+  comfyuiWorkflow?: ComfyGraphId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
   /** When true, the next take starts from a frame near the end of the previous shot. */
@@ -439,7 +467,7 @@ export interface AppSettings {
   comfyuiBaseUrl: string;
   falModel: string;
   replicateModel: string;
-  comfyuiWorkflow: ComfyWorkflowId;
+  comfyuiWorkflow: ComfyGraphId;
   /** App default for shots and projects that do not override it. */
   comfyLowMemory: boolean;
   rates: RateTable;

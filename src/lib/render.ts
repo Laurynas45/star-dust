@@ -15,6 +15,8 @@ import {
   missingKeyMessage,
   modelNameFor,
 } from "./provider-info";
+import { customEndMissingMessage } from "./custom-workflow";
+import { describeCustomGraph } from "./custom-workflow-files";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "./safety";
 import {
   clearApproval,
@@ -35,7 +37,8 @@ import {
   AppSettings,
   CostEstimate,
   CreditEstimate,
-  ComfyWorkflowId,
+  ComfyGraphId,
+  isCustomGraphId,
   Job,
   HuntSeedCount,
   JobKind,
@@ -97,9 +100,21 @@ function ackFailure(provider: ProviderId, acknowledgeModel?: string): RenderFail
 
 function flfEndFailure(shot: Shot, provider: ProviderId, settings: AppSettings): RenderFailure | null {
   if (provider !== "comfyui") return null;
-  if (comfyForShot(shot, settings).workflow !== "wan-flf") return null;
-  if (shot.endImagePath) return null;
-  return { ok: false, status: 400, error: `Shot ${shot.position}: ${WAN_FLF_MISSING_END}` };
+  const choice = comfyForShot(shot, settings);
+  if (choice.workflow === "wan-flf" && !shot.endImagePath) {
+    return { ok: false, status: 400, error: `Shot ${shot.position}: ${WAN_FLF_MISSING_END}` };
+  }
+  if (isCustomGraphId(choice.workflow) && !shot.endImagePath) {
+    const described = describeCustomGraph(choice.workflow);
+    if (described.ok && described.needsEndImage) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Shot ${shot.position}: ${customEndMissingMessage(described.title, described.id)}`,
+      };
+    }
+  }
+  return null;
 }
 
 function keyFailure(provider: ProviderId): RenderFailure | null {
@@ -199,9 +214,14 @@ function comfyForShot(shot: Shot, settings: AppSettings) {
   });
 }
 
-function workflowsOf(shots: Shot[]): ComfyWorkflowId[] {
+function notedComfy<T extends { workflow: ComfyGraphId; lowMemory: boolean }>(choice: T) {
+  if (!isCustomGraphId(choice.workflow)) return choice;
+  return { ...choice, custom: describeCustomGraph(choice.workflow) };
+}
+
+function workflowsOf(shots: Shot[]): ComfyGraphId[] {
   const settings = getSettings();
-  const ids: ComfyWorkflowId[] = [];
+  const ids: ComfyGraphId[] = [];
   for (const shot of shots) {
     const id = resolveComfyChoice({
       settings,
@@ -214,7 +234,7 @@ function workflowsOf(shots: Shot[]): ComfyWorkflowId[] {
 }
 
 /** Workflows a ComfyUI Render all would queue. Mock and a fully reused list return none. */
-export function comfyWorkflowsBeforeRenderAll(projectId: string): ComfyWorkflowId[] {
+export function comfyWorkflowsBeforeRenderAll(projectId: string): ComfyGraphId[] {
   const settings = getSettings();
   if (settings.provider !== "comfyui") return [];
   const project = getProject(projectId);
@@ -232,7 +252,7 @@ export function comfyWorkflowsBeforeRenderAll(projectId: string): ComfyWorkflowI
 export function comfyWorkflowsBeforeRenderShot(
   shotId: string,
   opts?: { force?: boolean; confirmApproved?: boolean }
-): ComfyWorkflowId[] {
+): ComfyGraphId[] {
   const settings = getSettings();
   if (settings.provider !== "comfyui") return [];
   const shot = getShot(shotId);
@@ -249,7 +269,7 @@ export function comfyWorkflowsBeforeRenderShot(
   return workflowsOf([shot]);
 }
 
-export function comfyWorkflowsBeforeRetake(shotId: string, confirmApproved: boolean): ComfyWorkflowId[] {
+export function comfyWorkflowsBeforeRetake(shotId: string, confirmApproved: boolean): ComfyGraphId[] {
   const settings = getSettings();
   if (settings.provider !== "comfyui") return [];
   const shot = getShot(shotId);
@@ -258,7 +278,7 @@ export function comfyWorkflowsBeforeRetake(shotId: string, confirmApproved: bool
   return workflowsOf(retakeChain(shotId) ?? []);
 }
 
-export function comfyWorkflowsBeforeRetakeAll(projectId: string): ComfyWorkflowId[] {
+export function comfyWorkflowsBeforeRetakeAll(projectId: string): ComfyGraphId[] {
   const settings = getSettings();
   if (settings.provider !== "comfyui") return [];
   const jobs = listJobs(projectId);
@@ -271,7 +291,7 @@ export function comfyWorkflowsBeforeRetakeAll(projectId: string): ComfyWorkflowI
   return workflowsOf(shots);
 }
 
-export function comfyWorkflowsBeforeHunt(shotId: string, confirmApproved: boolean): ComfyWorkflowId[] {
+export function comfyWorkflowsBeforeHunt(shotId: string, confirmApproved: boolean): ComfyGraphId[] {
   const settings = getSettings();
   if (settings.provider !== "comfyui") return [];
   const shot = getShot(shotId);
@@ -280,7 +300,7 @@ export function comfyWorkflowsBeforeHunt(shotId: string, confirmApproved: boolea
   return workflowsOf([shot]);
 }
 
-export function comfyWorkflowsBeforeRetry(job: Job): ComfyWorkflowId[] {
+export function comfyWorkflowsBeforeRetry(job: Job): ComfyGraphId[] {
   if (job.provider !== "comfyui") return [];
   if (job.status === "queued" || job.status === "running") return [];
   const named = comfyWorkflowFromModelName(job.modelName);
@@ -314,7 +334,7 @@ function queueJob(
     settings,
     hasCharacterSheet: Boolean(project?.characterSheetPath),
     hasEndImage: Boolean(shot.endImagePath),
-    comfy: provider === "comfyui" ? comfyForShot(shot, settings) : undefined,
+    comfy: provider === "comfyui" ? notedComfy(comfyForShot(shot, settings)) : undefined,
   });
   const providerNote = chain
     ? `${described.providerNote} ${chainProviderNote(chain.awaitPreviousFrame, shot.chainFrameBack)}`
@@ -844,7 +864,7 @@ export function retryFromJob(
   const provider = source.provider;
   const shot = shotForChain;
   const namedWorkflow = comfyWorkflowFromModelName(source.modelName);
-  const fallbackWorkflow: ComfyWorkflowId = namedWorkflow ?? settings.comfyuiWorkflow;
+  const fallbackWorkflow: ComfyGraphId = namedWorkflow ?? settings.comfyuiWorkflow;
   const comfy = shot
     ? resolveComfyChoice({ settings, project: getProject(source.projectId), shot })
     : {
@@ -856,6 +876,13 @@ export function retryFromJob(
   if (provider === "comfyui" && comfy.workflow === "wan-flf" && !source.endImagePath) {
     const where = shot ? `Shot ${shot.position}: ` : "";
     return { ok: false, status: 400, error: `${where}${WAN_FLF_MISSING_END}` };
+  }
+  if (provider === "comfyui" && isCustomGraphId(comfy.workflow) && !source.endImagePath) {
+    const described = describeCustomGraph(comfy.workflow);
+    if (described.ok && described.needsEndImage) {
+      const where = shot ? `Shot ${shot.position}: ` : "";
+      return { ok: false, status: 400, error: `${where}${customEndMissingMessage(described.title, described.id)}` };
+    }
   }
   const seconds = source.kind === "preview" ? 0 : Number(source.durationSec) || 0;
   const short = insufficientFailure(provider, seconds);
@@ -870,7 +897,7 @@ export function retryFromJob(
     hasCharacterSheet:
       Boolean(source.characterSheetPath) || Boolean(getProject(source.projectId)?.characterSheetPath),
     hasEndImage: Boolean(source.endImagePath),
-    comfy: provider === "comfyui" ? comfy : undefined,
+    comfy: provider === "comfyui" ? notedComfy(comfy) : undefined,
   });
   const job = createJob({
     projectId: source.projectId,
