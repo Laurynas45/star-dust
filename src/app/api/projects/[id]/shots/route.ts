@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { createShot, getProject, listShots } from "@/lib/storage";
-import { ComfyWorkflowId, clampChainFrameBack, clampDuration, effectivePrompt, isComfyWorkflowId, presetById } from "@/lib/types";
+import { ComfyGraphId, clampChainFrameBack, clampDuration, effectivePrompt, isComfyGraphId, presetById } from "@/lib/types";
 
-function formWorkflow(value: FormDataEntryValue | null): ComfyWorkflowId | null {
-  if (isComfyWorkflowId(value)) return value;
+function formWorkflow(value: FormDataEntryValue | null): ComfyGraphId | null {
+  if (isComfyGraphId(value)) return value;
   return null;
 }
 

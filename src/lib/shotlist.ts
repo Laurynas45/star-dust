@@ -14,6 +14,7 @@ import JSZip from "jszip";
 import { OUTPUT_DIM_MAX, OUTPUT_DIM_MIN, OUTPUT_FPS_MAX, OUTPUT_FPS_MIN } from "./conform";
 import { assertExportHasNoSecrets } from "./edit-export";
 import { effectiveSeed } from "./input-key";
+import { loadCustomGraphById } from "./custom-workflow-files";
 import {
   COMFY_WORKFLOW_TITLES,
   comfyWorkflowIdByTitle,
@@ -35,7 +36,8 @@ import {
 } from "./storage";
 import { sniffImage } from "./uploads";
 import {
-  ComfyWorkflowId,
+  ComfyGraphId,
+  isCustomGraphId,
   MAX_CHAIN_FRAME_BACK,
   MAX_CHAIN_TRIM_START_FRAMES,
   MAX_SEAM_FADE_FRAMES,
@@ -245,8 +247,9 @@ function pathProblem(file: string): string | null {
   return null;
 }
 
-function workflowTitle(id: ComfyWorkflowId | null | undefined): string | null {
+function workflowTitle(id: ComfyGraphId | null | undefined): string | null {
   if (!id) return null;
+  if (isCustomGraphId(id)) return id;
   return comfyWorkflowTitle(id);
 }
 
@@ -320,13 +323,26 @@ function readWorkflow(value: unknown, where: string, errors: string[]): string |
     return undefined;
   }
   const title = value.trim();
-  if (!comfyWorkflowIdByTitle(title)) {
+  if (comfyWorkflowIdByTitle(title)) return title;
+  if (isCustomGraphId(title)) {
+    const loaded = loadCustomGraphById(title);
+    if (!loaded.ok) {
+      for (const error of loaded.errors) errors.push(`${where}: ${error}`);
+      errors.push(`${where} "${title}" was not imported as another graph. Star Dust does not fall back to a shipped graph.`);
+      return undefined;
+    }
+    return title;
+  }
+  if (title.startsWith("custom:")) {
     errors.push(
-      `${where} "${title}" is not a known ComfyUI workflow. Use one of: ${COMFY_WORKFLOW_TITLES.join(", ")}. Or null to inherit.`
+      `${where} "${title}" is not a usable custom graph id. Use custom:<slug> with a lowercase slug, such as custom:wan22-ti2v-5b.`
     );
     return undefined;
   }
-  return title;
+  errors.push(
+    `${where} "${title}" is not a known ComfyUI workflow. Use one of: ${COMFY_WORKFLOW_TITLES.join(", ")}, or custom:<slug>. Or null to inherit.`
+  );
+  return undefined;
 }
 
 function readFlag(value: unknown, where: string, errors: string[]): boolean | null | undefined {
@@ -928,9 +944,12 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
   };
 }
 
-function workflowId(title: string | null): ComfyWorkflowId | null {
+function workflowId(title: string | null): ComfyGraphId | null {
   if (!title) return null;
-  return comfyWorkflowIdByTitle(title);
+  const shipped = comfyWorkflowIdByTitle(title);
+  if (shipped) return shipped;
+  if (isCustomGraphId(title)) return title;
+  return null;
 }
 
 export function importShotList(bundle: ShotListBundle): ShotListImport {

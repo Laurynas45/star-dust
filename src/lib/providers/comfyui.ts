@@ -36,12 +36,20 @@ import {
 import {
   fillMissingRequiredInputs,
   formatQueueRefusal,
+  literalModelSlots,
   modelSlotsFor,
   toPublicCheck,
   type ComfyCheckSource,
 } from "../comfy-readiness";
-import { assessShippedWorkflows, serverCheck } from "../comfy-readiness-run";
-import { ComfyWorkflowId } from "../types";
+import { assessWorkflows, prepareGraphChecks, serverCheck } from "../comfy-readiness-run";
+import {
+  customEndMissingMessage,
+  formatCustomGraphFailure,
+  injectCustomWorkflow,
+  type CustomGraph,
+} from "../custom-workflow";
+import { loadCustomGraphById } from "../custom-workflow-files";
+import { ComfyGraphId, isComfyWorkflowId, isCustomGraphId } from "../types";
 import {
   WAN_FPS,
   WAN_LOW_MAX_FRAMES,
@@ -158,10 +166,10 @@ export function explainComfyProblem(raw: string, url: string): string | null {
       lower
     )
   ) {
-    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, and MiniMax H3. Star Dust does not download weights. The job was not left running. Server said: ${text}`;
+    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, and MiniMax H3. A custom graph uses the filenames already in that file. Star Dust does not download weights. The licence for those weights is yours. The job was not left running. Server said: ${text}`;
   }
   if (/does not exist|missing node|unknown node|node type|class_type|custom node/.test(lower)) {
-    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, the shipped LTX-2.3 graph, and MiniMax H3 use core nodes from a current ComfyUI. MiniMax H3 needs ComfyUI 0.31.0 or later. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. The job was not left running. Server said: ${text}`;
+    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, the shipped LTX-2.3 graph, and MiniMax H3 use core nodes from a current ComfyUI. MiniMax H3 needs ComfyUI 0.31.0 or later. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. A custom graph uses the nodes in the file you exported. Star Dust does not install custom nodes. The job was not left running. Server said: ${text}`;
   }
   return null;
 }
@@ -204,8 +212,8 @@ export function loadMinimaxH3Workflow(): Workflow {
 
 export function comfyPlanForJob(
   job: { modelName?: string },
-  settings: { comfyuiWorkflow: ComfyWorkflowId; comfyLowMemory?: boolean }
-): { workflow: ComfyWorkflowId; lowMemory: boolean } {
+  settings: { comfyuiWorkflow: ComfyGraphId; comfyLowMemory?: boolean }
+): { workflow: ComfyGraphId; lowMemory: boolean } {
   const named = comfyWorkflowFromModelName(job.modelName);
   const workflow = named ?? settings.comfyuiWorkflow;
   const lowMemory = job.modelName
@@ -216,8 +224,8 @@ export function comfyPlanForJob(
 
 export function comfyWorkflowForJob(
   job: { modelName?: string },
-  settings: { comfyuiWorkflow: ComfyWorkflowId; comfyLowMemory?: boolean }
-): ComfyWorkflowId {
+  settings: { comfyuiWorkflow: ComfyGraphId; comfyLowMemory?: boolean }
+): ComfyGraphId {
   return comfyPlanForJob(job, settings).workflow;
 }
 
@@ -490,15 +498,28 @@ function historyError(entry: { status?: { status_str?: string; messages?: unknow
 }
 
 /**
- * Queues the selected shipped workflow (SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, or MiniMax H3), polls /history, downloads the file.
+ * Queues the selected graph, polls /history, and downloads the file.
+ * Shipped graphs are SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, and MiniMax H3.
+ * A custom graph is the API export named by the mapping in data/workflows.
  * Not a node editor. If the server is down, or it reports OOM or a missing node or model, the job fails.
  * FLF2V requires an end image and does not fall back to TI2V-5B.
+ * A missing custom graph fails with its slug and does not fall back either.
  */
 export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const initial = getJob(jobId);
   if (!initial || (initial.status !== "queued" && initial.status !== "running")) return;
 
   const settings = getSettings();
+  const planned = comfyPlanForJob(initial, settings);
+  let customGraph: CustomGraph | null = null;
+  if (isCustomGraphId(planned.workflow)) {
+    const loaded = loadCustomGraphById(planned.workflow);
+    if (!loaded.ok) fail(jobId, formatCustomGraphFailure(planned.workflow, loaded.errors));
+    customGraph = loaded.graph;
+    if (customGraph.map.endImage && !initial.endImagePath) {
+      fail(jobId, customEndMissingMessage(customGraph.map.name, customGraph.id));
+    }
+  }
   const { base, source } = resolveComfyBase(settings);
   const healthUrl = `${base}/system_stats`;
 
@@ -526,7 +547,11 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const inputAbs = resolveDataPath(job.imagePath);
   if (!fs.existsSync(inputAbs)) fail(jobId, `Image not found: ${job.imagePath}`);
   const endAbs = job.endImagePath ? resolveDataPath(job.endImagePath) : null;
-  if (plan.workflow === "wan-flf" || (plan.workflow === "minimax-h3" && job.endImagePath)) {
+  if (
+    plan.workflow === "wan-flf" ||
+    (plan.workflow === "minimax-h3" && job.endImagePath) ||
+    (customGraph?.map.endImage && job.endImagePath)
+  ) {
     if (!endAbs || !fs.existsSync(endAbs)) {
       fail(jobId, `End image not found: ${job.endImagePath}`);
     }
@@ -547,7 +572,9 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
 
   const bytes = fs.readFileSync(inputAbs);
   const imageName = await uploadComfyImage(base, jobId, inputAbs, "start image");
-  const sendEnd = (plan.workflow === "wan-flf" || plan.workflow === "minimax-h3") && Boolean(endAbs);
+  const sendEnd =
+    (plan.workflow === "wan-flf" || plan.workflow === "minimax-h3" || Boolean(customGraph?.map.endImage)) &&
+    Boolean(endAbs);
   const endImageName = sendEnd && endAbs ? await uploadComfyImage(base, jobId, endAbs, "end image") : null;
 
   const seed = providerSeed(job.seed);
@@ -607,6 +634,21 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       height: size.height,
       fps: H3_FPS,
     });
+  } else if (customGraph && isCustomGraphId(plan.workflow)) {
+    const pixels = imagePixelSize(bytes);
+    if (customGraph.map.endImage && !endImageName) {
+      fail(jobId, customEndMissingMessage(customGraph.map.name, customGraph.id));
+    }
+    workflow = injectCustomWorkflow(customGraph.nodes, customGraph.map, {
+      imageName,
+      endImageName,
+      prompt: job.prompt,
+      seed,
+      durationSec: duration,
+      width: pixels?.width ?? 0,
+      height: pixels?.height ?? 0,
+      lowMemory: plan.lowMemory,
+    });
   } else {
     const fps = 6;
     const frames = plan.lowMemory ? 14 : Math.max(14, Math.min(25, Math.round(duration * fps)));
@@ -623,7 +665,8 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   // Stand-in servers used in tests do not expose /object_info. Leave the graph alone then.
   // A real ComfyUI lists required inputs. Omitted ones fail validation, and the server does not fill defaults.
   if (readiness.reachable && readiness.objectInfo !== undefined) {
-    const filled = fillMissingRequiredInputs(workflow, readiness.objectInfo, modelSlotsFor(plan.workflow));
+    const slots = isComfyWorkflowId(plan.workflow) ? modelSlotsFor(plan.workflow) : literalModelSlots(workflow);
+    const filled = fillMissingRequiredInputs(workflow, readiness.objectInfo, slots);
     if (filled.blocked.length > 0) {
       fail(
         jobId,
@@ -725,11 +768,26 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   }
 
   const files: ComfyFile[] = [];
-  collectFiles(entry.outputs, files);
+  if (customGraph) {
+    const outputs = entry.outputs;
+    const nodeOut =
+      outputs && typeof outputs === "object" && !Array.isArray(outputs)
+        ? (outputs as Record<string, unknown>)[customGraph.map.output.node]
+        : undefined;
+    collectFiles(nodeOut, files);
+  } else {
+    collectFiles(entry.outputs, files);
+  }
   const file =
     files.find((item) => item.filename && /\.(mp4|webm|webp|gif|mkv)$/i.test(item.filename)) ||
     files.find((item) => item.filename);
   if (!file?.filename) {
+    if (customGraph) {
+      fail(
+        jobId,
+        `Custom graph ${customGraph.id} finished, but output node ${customGraph.map.output.node} did not return a file. Star Dust does not take a file from another node.`
+      );
+    }
     fail(jobId, `ComfyUI at ${publicComfyUrl(historyUrl)} finished without an output file.`);
   }
 
@@ -852,12 +910,24 @@ export async function fetchComfyObjectInfo(base: string): Promise<ComfyObjectInf
 }
 
 export async function checkComfyServer(
-  ids: readonly ComfyWorkflowId[],
+  ids: readonly ComfyGraphId[],
   override?: { base: string; source: ComfyCheckSource }
 ): Promise<ReturnType<typeof serverCheck>> {
   const resolved = override
     ? { base: override.base.replace(/\/$/, ""), source: override.source }
     : resolveComfyBase(getSettings());
+  const prepared = prepareGraphChecks(ids);
+  if (ids.length > 0 && prepared.runnable.length === 0) {
+    return serverCheck({
+      reachable: true,
+      url: publicComfyUrl(resolved.base),
+      source: resolved.source,
+      timedOut: false,
+      httpStatus: null,
+      detail: "",
+      workflows: prepared.failed,
+    });
+  }
   const fetched = await fetchComfyObjectInfo(resolved.base);
   if (!fetched.ok) {
     return serverCheck({
@@ -867,7 +937,7 @@ export async function checkComfyServer(
       timedOut: fetched.timedOut,
       httpStatus: fetched.status,
       detail: fetched.detail,
-      workflows: [],
+      workflows: prepared.failed,
     });
   }
   const check = serverCheck({
@@ -877,7 +947,7 @@ export async function checkComfyServer(
     timedOut: false,
     httpStatus: null,
     detail: "",
-    workflows: assessShippedWorkflows(ids, fetched.objectInfo),
+    workflows: assessWorkflows(ids, fetched.objectInfo),
   });
   check.objectInfo = fetched.objectInfo;
   return check;
@@ -885,7 +955,7 @@ export async function checkComfyServer(
 
 /** Refuses a ComfyUI render before any job row is created. Empty means nothing to queue. */
 export async function guardComfyWorkflows(
-  ids: readonly ComfyWorkflowId[]
+  ids: readonly ComfyGraphId[]
 ): Promise<{ status: number; error: string } | null> {
   if (ids.length === 0) return null;
   const report = toPublicCheck(await checkComfyServer(ids));

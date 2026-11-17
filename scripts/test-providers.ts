@@ -2009,9 +2009,611 @@ async function checkComfyProgress() {
   }
 }
 
+async function checkCustomGraphs() {
+  const custom = await import("../src/lib/custom-workflow");
+  const files = await import("../src/lib/custom-workflow-files");
+  const readiness = await import("../src/lib/comfy-readiness");
+  const info = await import("../src/lib/provider-info");
+  const types = await import("../src/lib/types");
+  const wan = await import("../src/lib/wan");
+  const storage = await import("../src/lib/storage");
+  const comfy = await import("../src/lib/providers/comfyui");
+  const shotlist = await import("../src/lib/shotlist");
+  const before = storage.getSettings();
+  const exampleDir = path.join(process.cwd(), "examples", "workflows");
+  const exampleGraph = JSON.parse(fs.readFileSync(path.join(exampleDir, "wan22-ti2v-5b.api.json"), "utf8")) as Record<
+    string,
+    { class_type?: string; inputs?: Record<string, unknown> }
+  >;
+  const exampleMap = JSON.parse(fs.readFileSync(path.join(exampleDir, "wan22-ti2v-5b.map.json"), "utf8")) as Record<
+    string,
+    unknown
+  >;
+  try {
+    assert(types.isComfyGraphId("custom:wan22-ti2v-5b"), "custom id is a graph id");
+    assert(!types.isComfyWorkflowId("custom:wan22-ti2v-5b"), "custom id is not a shipped id");
+    assert(types.isComfyWorkflowId("wan"), "shipped wan id stays shipped");
+    assert(!types.isComfyGraphId("custom:../x"), "custom id rejects a path");
+    assert(!types.isComfyGraphId("custom:"), "custom id rejects an empty slug");
+    assert(!types.isComfyGraphId("custom:Wan"), "custom id rejects uppercase");
+    assert(!types.isComfyGraphId("custom:foo-"), "custom id rejects a trailing hyphen");
+    assert(readiness.workflowIdFromFlag("wan22-ti2v-5b") === "wan", "shipped cli flag stays on the shipped graph");
+    assert(
+      readiness.workflowIdFromFlag("custom:wan22-ti2v-5b") === "custom:wan22-ti2v-5b",
+      "cli accepts custom:<slug>"
+    );
+    assert(readiness.workflowIdFromFlag("custom:Nope") === null, "cli rejects a bad custom slug");
+    assert(
+      info.comfyModelName("custom:wan22-ti2v-5b", false) === "ComfyUI custom:wan22-ti2v-5b",
+      "custom model name is the id"
+    );
+    assert(
+      info.comfyModelName("custom:wan22-ti2v-5b", true) === "ComfyUI custom:wan22-ti2v-5b · low-memory preset",
+      "custom low-memory mark stays on the id"
+    );
+    assert(
+      info.comfyWorkflowFromModelName("ComfyUI custom:wan22-ti2v-5b · low-memory preset") === "custom:wan22-ti2v-5b",
+      "a custom model name routes back to that id"
+    );
+    assert(info.comfyWorkflowFromModelName(info.WAN_MODEL_NAME) === "wan", "shipped wan model name is unchanged");
+
+    const valid = custom.validateCustomGraph(exampleGraph, exampleMap);
+    assert(valid.ok, `example mapping should validate: ${valid.ok ? "" : valid.errors.join(" | ")}`);
+    if (!valid.ok) throw new Error("unreachable");
+    for (const seconds of [1, 2, 4, 5, 10]) {
+      assert(
+        custom.snapFrameCount(seconds, valid.map.frames!, valid.map.frames!.max) === wan.wanFrameCount(seconds),
+        `custom 4n+1 count for ${seconds}s matches Wan`
+      );
+      assert(
+        custom.snapFrameCount(seconds, valid.map.frames!, 17) === wan.wanFrameCount(seconds, wan.WAN_LOW_MAX_FRAMES),
+        `custom low-memory count for ${seconds}s matches Wan`
+      );
+    }
+    for (const [width, height] of [
+      [320, 180],
+      [1920, 1080],
+      [100, 100],
+      [832, 480],
+    ] as const) {
+      const fitted = custom.fitInsideBox(width, height, { maxWidth: 832, maxHeight: 480, snap: 32 });
+      const expected = wan.wanFrameSize(width, height);
+      assert(
+        fitted.width === expected.width && fitted.height === expected.height,
+        `custom fit ${width}x${height} -> ${fitted.width}x${fitted.height}, wan ${expected.width}x${expected.height}`
+      );
+    }
+    const emptyFit = custom.fitInsideBox(0, 0, { maxWidth: 832, maxHeight: 480, snap: 32 });
+    assert(emptyFit.width === 832 && emptyFit.height === 480, "an unknown still uses the max box");
+    const eight = custom.parseFrameRule("8n+1");
+    assert(eight && eight.step === 8 && eight.offset === 1, "8n+1 parses");
+    assert(
+      custom.snapFrameCount(1, { node: "1", input: "length", fps: 24, rule: eight, min: 9, max: 121 }, 121) === 25,
+      "8n+1 snaps one second at 24 fps to 25"
+    );
+    assert(custom.parseFrameRule("4n+4") === null, "4n+4 is not a rule, B must be smaller than A");
+    assert(custom.parseFrameRule("nope") === null, "a word is not a length rule");
+    const low = custom.lowMemorySummary({ ...valid.map, lowMemory: null });
+    assert(!low.changes && /does nothing/.test(low.text), "low memory does nothing when the mapping sets no caps");
+    const capped = custom.lowMemorySummary(valid.map);
+    assert(capped.changes && /17/.test(capped.text), "the example low-memory cap is 17 frames");
+
+    const negativeBefore = exampleGraph["6"]?.inputs?.text;
+    const injected = custom.injectCustomWorkflow(valid.nodes, valid.map, {
+      imageName: "start.png",
+      prompt: "a lantern over the water",
+      seed: 4242,
+      durationSec: 4,
+      width: 320,
+      height: 180,
+      lowMemory: false,
+    });
+    assert(injected["7"]?.inputs?.image === "start.png", "custom injection writes the start image");
+    assert(injected["5"]?.inputs?.text === "a lantern over the water", "custom injection writes the prompt");
+    assert(injected["9"]?.inputs?.seed === 4242, "custom injection writes the seed");
+    assert(injected["6"]?.inputs?.text === negativeBefore, "a mapped negative prompt is left as exported");
+    const fitted = wan.wanFrameSize(320, 180);
+    assert(injected["8"]?.inputs?.width === fitted.width, "custom width matches the Wan fit");
+    assert(injected["8"]?.inputs?.height === fitted.height, "custom height matches the Wan fit");
+    assert(
+      injected["8"]?.inputs?.length === wan.wanFrameCount(4),
+      `custom length ${String(injected["8"]?.inputs?.length)} matches Wan`
+    );
+    assert(
+      injected["1"]?.inputs?.unet_name === exampleGraph["1"]?.inputs?.unet_name,
+      "custom injection does not rewrite model filenames"
+    );
+    const lowInjected = custom.injectCustomWorkflow(valid.nodes, valid.map, {
+      imageName: "start.png",
+      prompt: "a lantern",
+      seed: 1,
+      durationSec: 10,
+      width: 1920,
+      height: 1080,
+      lowMemory: true,
+    });
+    assert(lowInjected["8"]?.inputs?.length === wan.WAN_LOW_MAX_FRAMES, "low memory caps the example at 17 frames");
+    assert(
+      lowInjected["8"]?.inputs?.width === wan.wanFrameSize(1920, 1080).width,
+      "the example low-memory mapping does not shrink the box"
+    );
+    const uncapped = custom.injectCustomWorkflow(
+      valid.nodes,
+      { ...valid.map, lowMemory: null },
+      {
+        imageName: "start.png",
+        prompt: "a lantern",
+        seed: 1,
+        durationSec: 10,
+        width: 320,
+        height: 180,
+        lowMemory: true,
+      }
+    );
+    const uncappedOff = custom.injectCustomWorkflow(
+      valid.nodes,
+      { ...valid.map, lowMemory: null },
+      {
+        imageName: "start.png",
+        prompt: "a lantern",
+        seed: 1,
+        durationSec: 10,
+        width: 320,
+        height: 180,
+        lowMemory: false,
+      }
+    );
+    assert(
+      uncapped["8"]?.inputs?.length === uncappedOff["8"]?.inputs?.length,
+      "low memory does not change the frame count when the mapping sets no cap"
+    );
+
+    const brokenGraph = structuredClone(exampleGraph);
+    const promptNode = brokenGraph["5"];
+    if (!promptNode?.inputs) throw new Error("example prompt node missing");
+    brokenGraph["5"] = { ...promptNode, inputs: { ...promptNode.inputs, text: ["2", 0] } };
+    const frameMap = exampleMap.frames;
+    if (!frameMap || typeof frameMap !== "object") throw new Error("example frames missing");
+    const brokenMap = {
+      ...exampleMap,
+      colour: true,
+      prompt: { node: "999", input: "text" },
+      frames: { ...frameMap, rule: "nope", node: "8", input: "missing" },
+      output: { node: "nope" },
+    };
+    const broken = custom.validateCustomGraph(brokenGraph, brokenMap);
+    assert(!broken.ok, "a broken mapping is not ok");
+    if (broken.ok) throw new Error("unreachable");
+    const brokenText = broken.errors.join("\n");
+    for (const piece of [
+      'Unknown mapping field "colour"',
+      'frames rule "nope"',
+      'prompt node "999" is not in the graph',
+      'frames node "8" has no input "missing"',
+      'output node "nope" is not in the graph',
+    ]) {
+      assert(brokenText.includes(piece), `broken mapping did not list: ${piece}\n${brokenText}`);
+    }
+    const wired = custom.validateCustomGraph(brokenGraph, exampleMap);
+    assert(!wired.ok, "a wired prompt input is refused");
+    if (wired.ok) throw new Error("unreachable");
+    assert(
+      wired.errors.some((error) => error.includes("wired to another node")),
+      `wired input was not reported\n${wired.errors.join("\n")}`
+    );
+
+    const renamed = structuredClone(valid.nodes);
+    const unet = renamed["1"];
+    if (!unet?.inputs) throw new Error("example unet missing");
+    renamed["1"] = { ...unet, inputs: { ...unet.inputs, unet_name: "other.safetensors" } };
+    const kept = custom.injectCustomWorkflow(renamed, valid.map, {
+      imageName: "start.png",
+      prompt: "keep",
+      seed: 3,
+      durationSec: 4,
+      width: 320,
+      height: 180,
+      lowMemory: false,
+    });
+    assert(kept["1"]?.inputs?.unet_name === "other.safetensors", "a filename already in the graph stays");
+
+    const classes = [
+      "UNETLoader",
+      "CLIPLoader",
+      "VAELoader",
+      "ModelSamplingSD3",
+      "CLIPTextEncode",
+      "LoadImage",
+      "Wan22ImageToVideoLatent",
+      "KSampler",
+      "VAEDecode",
+      "SaveAnimatedWEBP",
+    ];
+    const objectInfo: Record<string, unknown> = {};
+    for (const name of classes) objectInfo[name] = { input: { required: {}, optional: {} } };
+    objectInfo.UNETLoader = {
+      input: {
+        required: {
+          unet_name: [["wan2.2_ti2v_5B_fp16.safetensors"], {}],
+          weight_dtype: [["default"], {}],
+        },
+      },
+    };
+    objectInfo.CLIPLoader = {
+      input: {
+        required: {
+          clip_name: [["umt5_xxl_fp8_e4m3fn_scaled.safetensors"], {}],
+          type: [["wan"], {}],
+          device: [["default"], {}],
+        },
+      },
+    };
+    objectInfo.VAELoader = {
+      input: { required: { vae_name: [["wan2.2_vae.safetensors", "wan_2.1_vae.safetensors"], {}] } },
+    };
+    objectInfo.KSampler = {
+      input: { required: { sampler_name: [["uni_pc"], {}], scheduler: [["simple"], {}] } },
+    };
+    objectInfo.SaveAnimatedWEBP = {
+      input: {
+        required: {
+          method: [["default"], {}],
+          custom_flag: ["BOOLEAN", { default: true }],
+        },
+      },
+    };
+    const slots = readiness.literalModelSlots(valid.nodes);
+    assert(
+      slots.some((slot) => slot.filename === "wan2.2_ti2v_5B_fp16.safetensors"),
+      "literal slots read the diffusion file"
+    );
+    const ready = readiness.checkComfyReadiness(valid.nodes, objectInfo, slots, { source: "custom" });
+    assert(
+      ready.ok,
+      `example graph should pass the fixture: ${ready.missingNodes[0]?.nextStep ?? ""} ${ready.missingModels[0]?.nextStep ?? ""} ${ready.inputBlocks[0]?.nextStep ?? ""}`
+    );
+    assert(ready.inputNotes.some((note) => note.input === "custom_flag"), "an omitted required input is a note");
+    const filled = readiness.fillMissingRequiredInputs(valid.nodes, objectInfo, slots);
+    assert(filled.blocked.length === 0, "the fill is not blocked");
+    assert(filled.workflow["11"]?.inputs?.custom_flag === true, "the fill writes the default");
+    assert(
+      filled.workflow["7"]?.inputs?.image === exampleGraph["7"]?.inputs?.image,
+      "the fill does not replace the image"
+    );
+    const missingNodeInfo = { ...objectInfo };
+    delete missingNodeInfo.UNETLoader;
+    const missingNode = readiness.checkComfyReadiness(valid.nodes, missingNodeInfo, [], { source: "custom" });
+    assert(!missingNode.ok && /UNETLoader/.test(missingNode.missingNodes[0]?.nextStep ?? ""), "a missing class blocks");
+    assert(
+      /does not install nodes/.test(missingNode.missingNodes[0]?.nextStep ?? ""),
+      "a custom missing node does not offer to install it"
+    );
+    assert(/custom graph/.test(missingNode.missingNodes[0]?.nextStep ?? ""), "the missing-node line names a custom graph");
+    const missingFileInfo = structuredClone(objectInfo) as {
+      UNETLoader: { input: { required: { unet_name: [string[], Record<string, unknown>] } } };
+    };
+    missingFileInfo.UNETLoader.input.required.unet_name = [[], {}];
+    const missingFile = readiness.checkComfyReadiness(valid.nodes, missingFileInfo, slots, { source: "custom" });
+    assert(!missingFile.ok, "a filename missing from the loader list blocks");
+    assert(
+      /wan2\.2_ti2v_5B_fp16\.safetensors/.test(missingFile.missingModels[0]?.nextStep ?? "") &&
+        /does not download weights/.test(missingFile.missingModels[0]?.nextStep ?? ""),
+      "the missing file names the filename and does not offer a download"
+    );
+    const badComboInfo = structuredClone(objectInfo) as {
+      KSampler: { input: { required: { sampler_name: [string[], Record<string, unknown>] } } };
+    };
+    badComboInfo.KSampler.input.required.sampler_name = [["euler"], {}];
+    const badCombo = readiness.checkComfyReadiness(valid.nodes, badComboInfo, slots, { source: "custom" });
+    assert(
+      !badCombo.ok && /uni_pc/.test(badCombo.inputBlocks.map((issue) => issue.nextStep).join(" ")),
+      "a combo value outside the list blocks"
+    );
+    const mismatch = structuredClone(valid.nodes);
+    const vae = mismatch["3"];
+    if (!vae?.inputs) throw new Error("example vae missing");
+    mismatch["3"] = { ...vae, inputs: { ...vae.inputs, vae_name: "wan_2.1_vae.safetensors" } };
+    const mismatchSlots = readiness.literalModelSlots(mismatch);
+    const mismatchCheck = readiness.checkComfyReadiness(mismatch, objectInfo, mismatchSlots, { source: "custom" });
+    assert(mismatchCheck.ok && mismatchCheck.vaeWarnings.length > 0, "a Wan VAE mismatch is a note and does not block");
+
+    const workflowDir = path.join(dataDir, "workflows");
+    fs.mkdirSync(workflowDir, { recursive: true });
+    fs.copyFileSync(path.join(exampleDir, "wan22-ti2v-5b.api.json"), path.join(workflowDir, "wan22-ti2v-5b.api.json"));
+    fs.copyFileSync(path.join(exampleDir, "wan22-ti2v-5b.map.json"), path.join(workflowDir, "wan22-ti2v-5b.map.json"));
+    const loaded = files.loadCustomGraph("wan22-ti2v-5b");
+    assert(loaded.ok, `example files should load: ${loaded.ok ? "" : loaded.errors.join(" | ")}`);
+    const gone = files.loadCustomGraph("gone");
+    assert(!gone.ok, "a missing pair does not load");
+    if (gone.ok) throw new Error("unreachable");
+    assert(
+      gone.errors.some((error) => error.includes("gone.api.json")),
+      `a missing pair names the file\n${gone.errors.join("\n")}`
+    );
+
+    storage.saveSettings({ comfyuiWorkflow: "custom:gone" });
+    assert(storage.getSettings().comfyuiWorkflow === "custom:gone", "settings keep a missing custom id");
+    const keptProject = storage.createProject("Custom hold", "");
+    storage.updateProject(keptProject.id, { comfyuiWorkflow: "custom:gone" });
+    assert(
+      storage.getProject(keptProject.id)?.comfyuiWorkflow === "custom:gone",
+      "a project keeps a removed custom graph"
+    );
+
+    const still = solidPng(dataDir, "custom-still.png", "navy");
+    const shotDoc = {
+      schema: "stardust.shotlist/1",
+      name: "Custom list",
+      description: "",
+      styleBase: "",
+      provider: "comfyui",
+      comfyuiWorkflow: "custom:gone",
+      comfyLowMemory: false,
+      output: { fps: null, width: null, height: null },
+      transition: { mode: "cut", fadeSec: 0.5, fadeUnit: "seconds", fadeFrames: 4 },
+      chainTrimStartFrames: 1,
+      evenColour: false,
+      smoothFps: false,
+      shots: [
+        {
+          prompt: "A lantern",
+          durationSec: 4,
+          preset: "slow-zoom-in",
+          enabled: true,
+          seed: 7,
+          seedPinned: false,
+          images: [{ file: "stills/custom.png", role: "start" }],
+          chainFromPrevious: false,
+          chainFrameBack: 0,
+          chainTrimStartFrames: null,
+          transition: null,
+          evenColour: null,
+          comfyuiWorkflow: null,
+          comfyLowMemory: null,
+        },
+      ],
+    };
+    const idsBefore = storage.listProjects().map((project) => project.id).sort();
+    const missingImport = shotlist.importShotList({
+      json: JSON.stringify(shotDoc),
+      files: new Map([["stills/custom.png", still]]),
+      source: "json",
+    });
+    assert(!missingImport.ok, "a shot list does not import a missing custom graph");
+    if (missingImport.ok) throw new Error("unreachable");
+    assert(missingImport.errors.join("\n").includes("gone"), "the import error names the slug");
+    assert(
+      JSON.stringify(storage.listProjects().map((project) => project.id).sort()) === JSON.stringify(idsBefore),
+      "a missing custom graph creates no project"
+    );
+    const goodDoc = { ...shotDoc, comfyuiWorkflow: "custom:wan22-ti2v-5b" };
+    const goodImport = shotlist.importShotList({
+      json: JSON.stringify(goodDoc),
+      files: new Map([["stills/custom.png", still]]),
+      source: "json",
+    });
+    assert(goodImport.ok, `custom shot list import failed: ${goodImport.ok ? "" : goodImport.errors.join(" | ")}`);
+    if (!goodImport.ok) throw new Error("unreachable");
+    assert(goodImport.project.comfyuiWorkflow === "custom:wan22-ti2v-5b", "import stores the custom id");
+    const exported = shotlist.renderSettingsOf(goodImport.project.id);
+    assert(exported.comfyuiWorkflow === "custom:wan22-ti2v-5b", "export writes custom:<slug>, not the display name");
+
+    const described = info.describeProviderUse({
+      provider: "comfyui",
+      settings: storage.getSettings(),
+      hasCharacterSheet: false,
+      hasEndImage: false,
+      comfy: {
+        workflow: "custom:wan22-ti2v-5b",
+        lowMemory: true,
+        custom: files.describeCustomGraph("custom:wan22-ti2v-5b"),
+      },
+    });
+    assert(/does not install custom nodes/.test(described.providerNote), "the custom note does not offer to install nodes");
+    assert(/does not download weights/.test(described.providerNote), "the custom note does not offer to download weights");
+    assert(/licence/.test(described.providerNote), "the custom note says the licence is the user's");
+    assert(/4n\+1/.test(described.providerNote), "the custom note names the length rule");
+    assert(!/does not read the text prompt/.test(described.providerNote), "the example is not described as SVD");
+    const bareNote = info.describeProviderUse({
+      provider: "comfyui",
+      settings: { ...storage.getSettings(), comfyuiWorkflow: "custom:gone" },
+      hasCharacterSheet: false,
+      hasEndImage: false,
+    });
+    assert(/custom:gone/.test(bareNote.providerNote), "an unloaded custom graph is named");
+    assert(!/SVD/.test(bareNote.providerNote), "an unloaded custom graph is not described as SVD");
+
+    const removedProject = storage.createProject("Removed graph", "");
+    const removedStill = storage.saveUpload(removedProject.id, "still.png", still);
+    storage.saveSettings({ provider: "comfyui", comfyuiWorkflow: "svd", comfyuiBaseUrl: "http://127.0.0.1:9" });
+    const removedJob = storage.createJob({
+      projectId: removedProject.id,
+      prompt: "A lantern",
+      presetId: "slow-zoom-in",
+      provider: "comfyui",
+      imagePath: removedStill,
+      durationSec: 4,
+      modelName: "ComfyUI custom:gone",
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(removedJob.id).catch(() => undefined);
+    const removed = storage.getJob(removedJob.id);
+    assert(removed?.status === "failed", "a removed custom graph fails the job");
+    assert(/custom:gone/.test(removed?.error ?? ""), "the failure names the slug");
+    assert(/does not fall back/.test(removed?.error ?? ""), "the failure says there is no fallback");
+    assert(!/svd_xt|Stable Video Diffusion/.test(removed?.error ?? ""), "the failure does not switch to SVD");
+
+    let sawAuth = false;
+    let posted = "";
+    const secret = "secret-custom-header";
+    process.env.COMFYUI_AUTH_HEADER = secret;
+    const mp4 = fs.readFileSync(tinyMp4());
+    const standin = await listen((req, res) => {
+      if (req.headers.authorization === secret) sawAuth = true;
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/upload/image") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ name: "custom-start.png", subfolder: "", type: "input" }));
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        let body = "";
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          posted = body;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ prompt_id: "custom-prompt", node_errors: {} }));
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/history/")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            "custom-prompt": {
+              status: { status_str: "success", completed: true },
+              outputs: {
+                "11": { images: [{ filename: "custom.mp4", subfolder: "", type: "output" }] },
+              },
+            },
+          })
+        );
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/view") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(mp4);
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    storage.saveSettings({
+      provider: "comfyui",
+      comfyuiBaseUrl: standin.url,
+      comfyuiWorkflow: "custom:wan22-ti2v-5b",
+    });
+    const runJob = storage.createJob({
+      projectId: removedProject.id,
+      prompt: "A lantern over the water",
+      presetId: "slow-zoom-in",
+      provider: "comfyui",
+      imagePath: removedStill,
+      durationSec: 4,
+      seed: 11,
+      modelName: info.comfyModelName("custom:wan22-ti2v-5b", false),
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(runJob.id);
+    assert(
+      storage.getJob(runJob.id)?.status === "completed",
+      `custom render failed: ${storage.getJob(runJob.id)?.error}`
+    );
+    assert(sawAuth, "the custom render sends COMFYUI_AUTH_HEADER");
+    assert(!posted.includes(secret), "the queued prompt does not contain the auth header");
+    const postedPrompt = JSON.parse(posted) as {
+      prompt?: Record<string, { inputs?: Record<string, unknown> }>;
+    };
+    assert(postedPrompt.prompt?.["7"]?.inputs?.image === "custom-start.png", "the stand-in received the uploaded image");
+    assert(postedPrompt.prompt?.["5"]?.inputs?.text === "A lantern over the water", "the stand-in received the prompt");
+    assert(postedPrompt.prompt?.["9"]?.inputs?.seed === 11, "the stand-in received the seed");
+    await standin.close();
+
+    let wrongPosted = false;
+    const wrong = await listen((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/upload/image") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ name: "custom-start.png" }));
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        wrongPosted = true;
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ prompt_id: "wrong-node", node_errors: {} }));
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/history/")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            "wrong-node": {
+              status: { status_str: "success", completed: true },
+              outputs: { "99": { images: [{ filename: "other.mp4", subfolder: "", type: "output" }] } },
+            },
+          })
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    storage.saveSettings({ comfyuiBaseUrl: wrong.url });
+    const wrongJob = storage.createJob({
+      projectId: removedProject.id,
+      prompt: "A lantern",
+      presetId: "slow-zoom-in",
+      provider: "comfyui",
+      imagePath: removedStill,
+      durationSec: 4,
+      modelName: info.comfyModelName("custom:wan22-ti2v-5b", false),
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(wrongJob.id).catch(() => undefined);
+    const wrongDone = storage.getJob(wrongJob.id);
+    assert(wrongPosted, "the graph was posted");
+    assert(wrongDone?.status === "failed", "a file on another node is not the output");
+    assert(/output node 11/.test(wrongDone?.error ?? ""), "the failure names the mapped output node");
+    await wrong.close();
+
+    delete process.env.COMFYUI_AUTH_HEADER;
+    const cli = spawnSync(
+      "npm",
+      ["run", "comfy:check", "--", "--url", "http://127.0.0.1:9", "--workflow", "custom:gone"],
+      { encoding: "utf8", cwd: process.cwd(), env: { ...process.env, STAR_DUST_DATA: dataDir } }
+    );
+    assert(cli.status !== 0, "comfy:check fails for a missing custom graph");
+    const cliText = `${cli.stdout}\n${cli.stderr}`;
+    assert(cliText.includes("custom:gone"), `comfy:check names the slug\n${cliText}`);
+    assert(/does not fall back/.test(cliText), "comfy:check says there is no fallback");
+    assert(!cliText.includes(secret), "comfy:check does not print the auth header");
+  } finally {
+    delete process.env.COMFYUI_AUTH_HEADER;
+    storage.saveSettings({
+      provider: before.provider,
+      comfyuiBaseUrl: before.comfyuiBaseUrl,
+      comfyuiWorkflow: before.comfyuiWorkflow,
+      comfyLowMemory: before.comfyLowMemory,
+    });
+  }
+}
+
+
 async function main() {
   await checkPreflight();
   await checkComfyObjectInfo();
+  await checkCustomGraphs();
   await checkBrokenClips();
   const safety = await import("../src/lib/safety");
   const storage = await import("../src/lib/storage");

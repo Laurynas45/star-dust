@@ -20,7 +20,8 @@ import {
 } from "./provider-info";
 import {
   AppSettings,
-  ComfyWorkflowId,
+  ComfyGraphId,
+  isCustomGraphId,
   Project,
   ProviderId,
   effectivePrompt,
@@ -76,7 +77,9 @@ export type PreflightShotInput = {
   prompt: string;
   presetId: string;
   chainFromPrevious: boolean;
-  comfyuiWorkflow?: ComfyWorkflowId | null;
+  comfyuiWorkflow?: ComfyGraphId | null;
+  /** Set for a custom graph that maps a size. Shipped graphs ignore this. */
+  customBox?: { width: number; height: number; writes: string; name: string } | null;
   comfyLowMemory?: boolean | null;
   /** Pixel size of the still that will be sent. Null when it is not known yet. */
   width: number | null;
@@ -119,7 +122,7 @@ type WorkingFrame = {
   writes: string;
   /** "Mock's frame" */
   name: string;
-  workflow: ComfyWorkflowId | null;
+  workflow: ComfyGraphId | null;
   lowMemory: boolean;
 };
 
@@ -193,7 +196,7 @@ const NAMED_ASPECTS: { ratio: number; label: string }[] = [
   { ratio: 2 / 3, label: "2:3" },
 ];
 
-export function isWanLike(provider: ProviderId, workflow: ComfyWorkflowId | null): boolean {
+export function isWanLike(provider: ProviderId, workflow: ComfyGraphId | null): boolean {
   return provider === "comfyui" && (workflow === "wan" || workflow === "wan-flf");
 }
 
@@ -340,18 +343,32 @@ function workingFrame(input: PreflightInput, shot: PreflightShotInput): WorkingF
       lowMemory: choice.lowMemory,
     };
   }
-  const width = choice.lowMemory ? LTX_LOW_WIDTH : LTX_MAX_WIDTH;
-  const height = choice.lowMemory ? LTX_LOW_HEIGHT : LTX_MAX_HEIGHT;
-  const name = choice.lowMemory ? "the LTX-2.3 low-memory box" : "the LTX-2.3 box";
-  return {
-    width,
-    height,
-    mode: "fit",
-    writes: `The LTX-2.3 graph fits the still inside ${width}×${height}`,
-    name,
-    workflow: "ltx",
-    lowMemory: choice.lowMemory,
-  };
+  if (choice.workflow === "ltx") {
+    const width = choice.lowMemory ? LTX_LOW_WIDTH : LTX_MAX_WIDTH;
+    const height = choice.lowMemory ? LTX_LOW_HEIGHT : LTX_MAX_HEIGHT;
+    const name = choice.lowMemory ? "the LTX-2.3 low-memory box" : "the LTX-2.3 box";
+    return {
+      width,
+      height,
+      mode: "fit",
+      writes: `The LTX-2.3 graph fits the still inside ${width}×${height}`,
+      name,
+      workflow: "ltx",
+      lowMemory: choice.lowMemory,
+    };
+  }
+  if (isCustomGraphId(choice.workflow) && shot.customBox) {
+    return {
+      width: shot.customBox.width,
+      height: shot.customBox.height,
+      mode: "fit",
+      writes: shot.customBox.writes,
+      name: shot.customBox.name,
+      workflow: choice.workflow,
+      lowMemory: choice.lowMemory,
+    };
+  }
+  return null;
 }
 
 function sizeNotes(

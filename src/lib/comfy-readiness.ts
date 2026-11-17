@@ -30,7 +30,7 @@ import {
   WAN_TEXT_ENCODER,
   WAN_VAE,
 } from "./provider-info";
-import { ComfyWorkflowId } from "./types";
+import { ComfyGraphId, ComfyWorkflowId, isComfyWorkflowId, isCustomGraphId } from "./types";
 
 export const COMFY_CHECK_HONESTY =
   "This check looks at node names and the model filenames Star Dust will send. It does not measure memory. It does not promise quality, a character lock, or lip-sync.";
@@ -98,7 +98,7 @@ export type ComfyReadiness = {
 };
 
 export type ComfyWorkflowCheck = {
-  id: ComfyWorkflowId;
+  id: ComfyGraphId;
   title: string;
   file: string;
   ok: boolean;
@@ -228,7 +228,8 @@ export function modelChoicesFromInput(spec: unknown): string[] | null {
 export function checkComfyReadiness(
   workflow: unknown,
   objectInfo: unknown,
-  slots: readonly ModelSlot[]
+  slots: readonly ModelSlot[],
+  opts?: { source?: "shipped" | "custom" }
 ): ComfyReadiness {
   if (!isRecord(objectInfo)) {
     const issue: ReadinessIssue = {
@@ -266,7 +267,7 @@ export function checkComfyReadiness(
       classType,
       nodeId: id,
       title: node._meta?.title,
-      nextStep: missingNodeStep(classType),
+      nextStep: missingNodeStep(classType, opts?.source === "custom"),
     });
   }
 
@@ -757,9 +758,11 @@ export function formatComfyCheckTable(check: ComfyServerCheck): string {
   return lines.join("\n");
 }
 
-/** CLI names for --workflow. The internal id is accepted too. */
-export function workflowIdFromFlag(flag: string): ComfyWorkflowId | null {
-  const key = flag.trim().toLowerCase().replace(/\.api\.json$/, "").replace(/^workflows\//, "");
+/** CLI names for --workflow. The internal id is accepted too. custom:<slug> is a builder graph. */
+export function workflowIdFromFlag(flag: string): ComfyGraphId | null {
+  const trimmed = flag.trim();
+  if (isCustomGraphId(trimmed)) return trimmed;
+  const key = trimmed.toLowerCase().replace(/\.api\.json$/, "").replace(/^workflows\//, "");
   const table: Record<string, ComfyWorkflowId> = {
     svd: "svd",
     "svd-i2v": "svd",
@@ -794,8 +797,44 @@ export const COMFY_CHECK_WORKFLOW_FLAGS = [
   "minimax-h3-i2v",
 ] as const;
 
-function missingNodeStep(classType: string): string {
-  return `Missing node ${classType}. Update ComfyUI. The shipped graph uses this node, and this server's /object_info list does not include it. A node ComfyUI removed or renamed, such as an older Wan Block Swap node, shows up this way. Star Dust does not install nodes.`;
+function missingNodeStep(classType: string, custom: boolean): string {
+  const which = custom ? "This custom graph uses this node" : "The shipped graph uses this node";
+  return `Missing node ${classType}. Update ComfyUI. ${which}, and this server's /object_info list does not include it. A node ComfyUI removed or renamed, such as an older Wan Block Swap node, shows up this way. Star Dust does not install nodes.`;
+}
+
+const MODEL_FILE = /\.(safetensors|ckpt|pt|pth|bin|gguf|sft)$/i;
+
+const MODEL_FOLDERS: Record<string, string> = {
+  ckpt_name: CHECKPOINTS,
+  unet_name: DIFFUSION,
+  clip_name: TEXT_ENCODERS,
+  text_encoder: TEXT_ENCODERS,
+  vae_name: VAE_FOLDER,
+};
+
+/**
+ * Model filenames already written in a custom graph.
+ * Shipped graphs keep modelSlotsFor, which names the files Star Dust overwrites.
+ * A custom graph is not overwritten, so the check uses the names in the export.
+ */
+export function literalModelSlots(workflow: unknown): ModelSlot[] {
+  const slots: ModelSlot[] = [];
+  for (const { node } of collectNodes(workflow)) {
+    const classType = node.class_type;
+    if (!classType || !node.inputs) continue;
+    for (const [input, folder] of Object.entries(MODEL_FOLDERS)) {
+      const value = node.inputs[input];
+      if (typeof value !== "string" || !MODEL_FILE.test(value.trim())) continue;
+      slots.push({
+        classType,
+        title: node._meta?.title,
+        input,
+        filename: value.trim(),
+        folder,
+      });
+    }
+  }
+  return slots;
 }
 
 function missingFileStep(slot: ModelSlot): string {
@@ -861,13 +900,15 @@ function pad(value: string, width: number): string {
 }
 
 export function workflowCheckFromReadiness(
-  id: ComfyWorkflowId,
-  readiness: ComfyReadiness
+  id: ComfyGraphId,
+  readiness: ComfyReadiness,
+  presentation?: { title: string; file: string }
 ): ComfyWorkflowCheck {
+  const shipped = isComfyWorkflowId(id) ? COMFY_WORKFLOWS[id] : null;
   return {
     id,
-    title: COMFY_WORKFLOWS[id].title,
-    file: COMFY_WORKFLOWS[id].file,
+    title: presentation?.title ?? shipped?.title ?? id,
+    file: presentation?.file ?? shipped?.file ?? id,
     ok: readiness.ok,
     blocksQueue: readiness.blocksQueue,
     missingNodes: readiness.missingNodes,

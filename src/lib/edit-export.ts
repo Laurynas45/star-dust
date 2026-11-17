@@ -10,7 +10,9 @@ import { completedTakesFor, cutTake } from "./chain-stale";
 import { editRateNote, resolveConformTarget } from "./conform";
 import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
 import { joinOmissionWarning, type JoinOmission } from "./join";
+import { describeCustomGraph } from "./custom-workflow-files";
 import { COMFY_WORKFLOWS, comfyWorkflowFromModelName } from "./provider-info";
+import { isComfyWorkflowId, isCustomGraphId } from "./types";
 import { getProject, listJobs, listShots, resolveDataPath } from "./storage";
 import { planStitchSeams } from "./stitch";
 import {
@@ -229,6 +231,12 @@ function workflowName(job: Job): string | null {
   if (job.provider !== "comfyui") return null;
   const id = comfyWorkflowFromModelName(job.modelName);
   if (!id) return job.modelName?.replace(/\s*·\s*low-memory preset\s*$/i, "").trim() || null;
+  if (isCustomGraphId(id)) {
+    const described = describeCustomGraph(id);
+    if (!described.ok) return id;
+    return `${described.title} (${id}, ${described.file})`;
+  }
+  if (!isComfyWorkflowId(id)) return id;
   const info = COMFY_WORKFLOWS[id];
   return `${info.title} (${info.file})`;
 }

@@ -1,0 +1,24 @@
+{
+  "name": "Wan 2.2 TI2V-5B (example)",
+  "startImage": { "node": "7", "input": "image" },
+  "prompt": { "node": "5", "input": "text" },
+  "negativePrompt": { "node": "6", "input": "text" },
+  "seed": { "node": "9", "input": "seed" },
+  "frames": {
+    "node": "8",
+    "input": "length",
+    "fps": 16,
+    "rule": "4n+1",
+    "min": 5,
+    "max": 81
+  },
+  "size": {
+    "width": { "node": "8", "input": "width" },
+    "height": { "node": "8", "input": "height" },
+    "maxWidth": 832,
+    "maxHeight": 480,
+    "snap": 32
+  },
+  "output": { "node": "11" },
+  "lowMemory": { "maxFrames": 17 }
+}

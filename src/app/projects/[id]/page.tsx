@@ -13,12 +13,12 @@ import { chainStaleShotIds } from "@/lib/chain-stale";
 import { joinPlanSummary, projectFadeLabel, type JoinPlan } from "@/lib/join";
 import { reviewStitchPasses } from "@/lib/mixed-pass";
 import { resolveComfyChoice } from "@/lib/comfy-choice";
+import { graphBlurb, graphChoices } from "@/lib/comfy-graph-view";
+import type { CustomGraphCard } from "@/lib/custom-workflow";
 import {
   CAPABILITY,
   CHARACTER_SHEET_HONESTY,
   CLOUD_RISK_NOTE,
-  COMFY_WORKFLOW_ORDER,
-  COMFY_WORKFLOWS,
   H3_END_NOTE,
   WAN_FLF_MISSING_END,
   isPaidProvider,
@@ -40,7 +40,9 @@ import {
   CHAIN_STALE_NOTE,
   COLOUR_MATCH_HONESTY,
   CHAIN_TRIM_START_CHOICES,
-  ComfyWorkflowId,
+  ComfyGraphId,
+  isComfyGraphId,
+  isCustomGraphId,
   CostEstimate,
   ShotCostLine,
   FRAME_BACK_HONESTY,
@@ -80,6 +82,7 @@ import {
 
 type SettingsResponse = AppSettings & {
   env: { hasFalKey: boolean; hasReplicateToken: boolean };
+  customWorkflows?: CustomGraphCard[];
 };
 
 type StudioShot = Shot & {
@@ -872,7 +875,7 @@ export default function ProjectStudioPage() {
   }
 
   async function saveProjectPatch(patch: {
-    comfyuiWorkflow?: ComfyWorkflowId | null;
+    comfyuiWorkflow?: ComfyGraphId | null;
     comfyLowMemory?: boolean | null;
     seamMode?: SeamMode;
     seamFadeSec?: number;
@@ -907,7 +910,7 @@ export default function ProjectStudioPage() {
   async function saveShotPatch(
     shotId: string,
     patch: {
-      comfyuiWorkflow?: ComfyWorkflowId | null;
+      comfyuiWorkflow?: ComfyGraphId | null;
       comfyLowMemory?: boolean | null;
       chainFromPrevious?: boolean;
       chainFrameBack?: number;
@@ -1581,16 +1584,16 @@ export default function ProjectStudioPage() {
       {provider === "comfyui" && settings && projectChoice && appChoice && (
         <div className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm text-sky-50">
           <p>
-            This project runs <span className="font-semibold">{COMFY_WORKFLOWS[projectChoice.workflow].title}</span>
+            This project runs <span className="font-semibold">{graphBlurb(projectChoice.workflow, settings.customWorkflows ?? []).title}</span>
             {projectChoice.lowMemory ? " with the low-memory preset" : ""}.{" "}
-            {COMFY_WORKFLOWS[projectChoice.workflow].goodAt}
+            {graphBlurb(projectChoice.workflow, settings.customWorkflows ?? []).goodAt}
           </p>
           <p className="mt-2 text-xs leading-relaxed text-sky-50/80">
-            {COMFY_WORKFLOWS[projectChoice.workflow].memory}
+            {graphBlurb(projectChoice.workflow, settings.customWorkflows ?? []).memory}
           </p>
           <p className="mt-2 text-xs leading-relaxed text-sky-50/80">
-            Default: {COMFY_WORKFLOWS[projectChoice.workflow].defaults} Low-memory preset:{" "}
-            {COMFY_WORKFLOWS[projectChoice.workflow].lowMemory}
+            Default: {graphBlurb(projectChoice.workflow, settings.customWorkflows ?? []).defaults} Low-memory preset:{" "}
+            {graphBlurb(projectChoice.workflow, settings.customWorkflows ?? []).lowMemory}
           </p>
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <label className="text-xs text-sky-50/90">
@@ -1600,15 +1603,16 @@ export default function ProjectStudioPage() {
                 value={project.comfyuiWorkflow ?? ""}
                 onChange={(e) => {
                   const value = e.target.value;
+                  if (value !== "" && !isComfyGraphId(value)) return;
                   void saveProjectPatch({
-                    comfyuiWorkflow: value === "" ? null : (value as ComfyWorkflowId),
+                    comfyuiWorkflow: value === "" ? null : value,
                   });
                 }}
               >
-                <option value="">App default ({COMFY_WORKFLOWS[appChoice.workflow].title})</option>
-                {COMFY_WORKFLOW_ORDER.map((id) => (
-                  <option key={id} value={id}>
-                    {COMFY_WORKFLOWS[id].title}
+                <option value="">App default ({graphBlurb(appChoice.workflow, settings.customWorkflows ?? []).title})</option>
+                {graphChoices(settings.customWorkflows ?? [], project.comfyuiWorkflow).map((choice) => (
+                  <option key={choice.id} value={choice.id}>
+                    {choice.title}
                   </option>
                 ))}
               </select>
@@ -1626,7 +1630,9 @@ export default function ProjectStudioPage() {
                 }}
               >
                 <option value="">App default ({appChoice.lowMemory ? "on" : "off"})</option>
-                <option value="1">On — about 480p, short clip</option>
+                <option value="1">
+                  {isCustomGraphId(projectChoice.workflow) ? "On" : "On — about 480p, short clip"}
+                </option>
                 <option value="0">Off</option>
               </select>
             </label>
@@ -1847,10 +1853,10 @@ export default function ProjectStudioPage() {
                   value={shotWorkflow}
                   onChange={(e) => setShotWorkflow(e.target.value)}
                 >
-                  <option value="">Project default ({COMFY_WORKFLOWS[projectChoice.workflow].title})</option>
-                  {COMFY_WORKFLOW_ORDER.map((id) => (
-                    <option key={id} value={id}>
-                      {COMFY_WORKFLOWS[id].title}
+                  <option value="">Project default ({graphBlurb(projectChoice.workflow, settings?.customWorkflows ?? []).title})</option>
+                  {graphChoices(settings?.customWorkflows ?? [], isComfyGraphId(shotWorkflow) ? shotWorkflow : null).map((choice) => (
+                    <option key={choice.id} value={choice.id}>
+                      {choice.title}
                     </option>
                   ))}
                 </select>
@@ -1865,7 +1871,11 @@ export default function ProjectStudioPage() {
                   <option value="">
                     Project default ({projectChoice.lowMemory ? "on" : "off"})
                   </option>
-                  <option value="1">On — about 480p, short clip</option>
+                  <option value="1">
+                    {isCustomGraphId(shotWorkflow || projectChoice.workflow)
+                      ? "On"
+                      : "On — about 480p, short clip"}
+                  </option>
                   <option value="0">Off</option>
                 </select>
               </label>
@@ -1884,6 +1894,20 @@ export default function ProjectStudioPage() {
             projectChoice &&
             (shotWorkflow === "minimax-h3" || (!shotWorkflow && projectChoice.workflow === "minimax-h3")) && (
               <p className="text-xs leading-relaxed text-[var(--muted)]">{H3_END_NOTE}</p>
+            )}
+          {provider === "comfyui" &&
+            projectChoice &&
+            (settings?.customWorkflows ?? []).some(
+              (card) =>
+                card.ok &&
+                card.needsEndImage &&
+                card.id === (shotWorkflow || projectChoice.workflow)
+            ) && (
+              <p className="text-xs leading-relaxed text-amber-100/90">
+                {endImage
+                  ? "This custom graph sends the end still. It is not a character lock."
+                  : "This custom graph needs an end still. The job does not start without one, and Star Dust does not switch graphs."}
+              </p>
             )}
           {shots.length > 0 && (
             <label className="flex items-start gap-2 text-xs leading-relaxed text-[var(--muted)]">
@@ -2382,6 +2406,7 @@ export default function ProjectStudioPage() {
                     {provider === "comfyui" && settings && (
                       <ShotWorkflowFields
                         shot={shot}
+                        cards={settings.customWorkflows ?? []}
                         projectDefault={resolveComfyChoice({ settings, project, shot: null })}
                         resolved={resolveComfyChoice({ settings, project, shot })}
                         onChange={(patch) => void saveShotPatch(shot.id, patch)}
@@ -3048,16 +3073,17 @@ export default function ProjectStudioPage() {
 
 function ShotWorkflowFields(props: {
   shot: Shot;
-  projectDefault: { workflow: ComfyWorkflowId; lowMemory: boolean };
-  resolved: { workflow: ComfyWorkflowId; lowMemory: boolean };
-  onChange: (patch: { comfyuiWorkflow?: ComfyWorkflowId | null; comfyLowMemory?: boolean | null }) => void;
+  cards: readonly CustomGraphCard[];
+  projectDefault: { workflow: ComfyGraphId; lowMemory: boolean };
+  resolved: { workflow: ComfyGraphId; lowMemory: boolean };
+  onChange: (patch: { comfyuiWorkflow?: ComfyGraphId | null; comfyLowMemory?: boolean | null }) => void;
 }) {
-  const info = COMFY_WORKFLOWS[props.resolved.workflow];
+  const info = graphBlurb(props.resolved.workflow, props.cards);
   return (
     <div className="mt-3 space-y-2">
-      <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+      <p className={`text-[11px] leading-relaxed ${info.missing ? "text-rose-100" : "text-[var(--muted)]"}`}>
         {info.title}
-        {props.resolved.lowMemory ? " · low-memory preset" : ""}. {info.defaults}{" "}
+        {props.resolved.lowMemory ? " · low-memory preset" : ""}. {info.missing ? info.goodAt : info.defaults}{" "}
         {props.resolved.lowMemory ? info.lowMemory : ""}
       </p>
       {props.resolved.workflow === "wan-flf" && (
@@ -3074,6 +3100,17 @@ function ShotWorkflowFields(props: {
       {props.resolved.workflow === "minimax-h3" && (
         <p className="text-[11px] leading-relaxed text-[var(--muted)]">{H3_END_NOTE}</p>
       )}
+      {props.cards.some((card) => card.ok && card.needsEndImage && card.id === props.resolved.workflow) && (
+        <p
+          className={`text-[11px] leading-relaxed ${
+            props.shot.endImagePath ? "text-[var(--muted)]" : "text-amber-100"
+          }`}
+        >
+          {props.shot.endImagePath
+            ? "This custom graph sends the end still. It is not a character lock."
+            : "This custom graph needs an end still. The job does not start without one, and Star Dust does not switch graphs."}
+        </p>
+      )}
       <div className="grid gap-2 sm:grid-cols-2">
         <label className="text-[11px] text-[var(--muted)]">
           Shot workflow
@@ -3082,17 +3119,18 @@ function ShotWorkflowFields(props: {
             value={props.shot.comfyuiWorkflow ?? ""}
             onChange={(e) => {
               const value = e.target.value;
+              if (value !== "" && !isComfyGraphId(value)) return;
               props.onChange({
-                comfyuiWorkflow: value === "" ? null : (value as ComfyWorkflowId),
+                comfyuiWorkflow: value === "" ? null : value,
               });
             }}
           >
             <option value="">
-              Project default ({COMFY_WORKFLOWS[props.projectDefault.workflow].title})
+              Project default ({graphBlurb(props.projectDefault.workflow, props.cards).title})
             </option>
-            {COMFY_WORKFLOW_ORDER.map((id) => (
-              <option key={id} value={id}>
-                {COMFY_WORKFLOWS[id].title}
+            {graphChoices(props.cards, props.shot.comfyuiWorkflow).map((choice) => (
+              <option key={choice.id} value={choice.id}>
+                {choice.title}
               </option>
             ))}
           </select>
@@ -3108,7 +3146,9 @@ function ShotWorkflowFields(props: {
             }}
           >
             <option value="">Project default ({props.projectDefault.lowMemory ? "on" : "off"})</option>
-            <option value="1">On — about 480p, short clip</option>
+            <option value="1">
+              {isCustomGraphId(props.resolved.workflow) ? "On" : "On — about 480p, short clip"}
+            </option>
             <option value="0">Off</option>
           </select>
         </label>

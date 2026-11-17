@@ -1,6 +1,8 @@
+import { resolveComfyChoice } from "./comfy-choice";
 import { measureStill } from "./cost";
+import { customGraphPreflightBox } from "./custom-workflow-files";
 import { buildPreflight, PreflightReport } from "./preflight";
-import { AppSettings, Project, Shot } from "./types";
+import { AppSettings, Project, Shot, isCustomGraphId } from "./types";
 
 /**
  * Reads still sizes from disk and builds the advisory preflight report.
@@ -21,6 +23,7 @@ export function preflightStoredProject(
     project,
     shots: shots.map((shot) => {
       const size = sizeForPreflight(shot);
+      const choice = resolveComfyChoice({ settings, project, shot });
       return {
         id: shot.id,
         position: shot.position,
@@ -29,6 +32,9 @@ export function preflightStoredProject(
         chainFromPrevious: shot.chainFromPrevious,
         comfyuiWorkflow: shot.comfyuiWorkflow,
         comfyLowMemory: shot.comfyLowMemory,
+        customBox: isCustomGraphId(choice.workflow)
+          ? customGraphPreflightBox(choice.workflow, choice.lowMemory)
+          : null,
         width: size?.width ?? null,
         height: size?.height ?? null,
       };
