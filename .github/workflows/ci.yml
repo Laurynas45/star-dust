@@ -39,3 +39,4 @@ jobs:
       - run: npm ci
       - run: npm run demo
       - run: npm run test:providers
+      - run: npm run test:mcp
