@@ -33,3 +33,4 @@ steps:
       npm ci
       npm run demo
       npm run test:providers
+      npm run test:mcp
