@@ -262,9 +262,10 @@ async function checkPreflight() {
   assert(
     !isWanLike("comfyui", "svd") &&
       !isWanLike("comfyui", "ltx") &&
+      !isWanLike("comfyui", "ltx25") &&
       !isWanLike("comfyui", "minimax-h3") &&
       !isWanLike("mock", "wan"),
-    "SVD, LTX, MiniMax H3, and Mock are not Wan-like"
+    "SVD, LTX, LTX-2.5, MiniMax H3, and Mock are not Wan-like"
   );
 
   type ShotPartial = {
@@ -273,7 +274,7 @@ async function checkPreflight() {
     prompt?: string;
     presetId?: string;
     chainFromPrevious?: boolean;
-    comfyuiWorkflow?: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3" | null;
+    comfyuiWorkflow?: "svd" | "wan" | "wan-flf" | "ltx" | "ltx25" | "minimax-h3" | null;
     comfyLowMemory?: boolean | null;
     width?: number | null;
     height?: number | null;
@@ -296,8 +297,8 @@ async function checkPreflight() {
     provider?: "mock" | "fal" | "replicate" | "comfyui";
     outputWidth?: number | null;
     outputHeight?: number | null;
-    settings?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3"; comfyLowMemory: boolean };
-    project?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3" | null; comfyLowMemory: boolean | null };
+    settings?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | "ltx25" | "minimax-h3"; comfyLowMemory: boolean };
+    project?: { comfyuiWorkflow: "svd" | "wan" | "wan-flf" | "ltx" | "ltx25" | "minimax-h3" | null; comfyLowMemory: boolean | null };
     shots: ReturnType<typeof one>[];
   }) {
     return {
@@ -371,7 +372,7 @@ async function checkPreflight() {
 
   function at(
     provider: "mock" | "fal" | "replicate" | "comfyui",
-    workflow: "svd" | "wan" | "wan-flf" | "ltx" | "minimax-h3",
+    workflow: "svd" | "wan" | "wan-flf" | "ltx" | "ltx25" | "minimax-h3",
     width: number,
     height: number
   ) {
@@ -386,6 +387,12 @@ async function checkPreflight() {
   assert(!at("mock", "svd", 960, 540).notes.some((note) => note.code === "divisible-16"), "Mock does not warn about multiples of 16");
   assert(!at("comfyui", "svd", 960, 540).notes.some((note) => note.code === "divisible-16"), "SVD does not warn about multiples of 16");
   assert(!at("comfyui", "ltx", 960, 540).notes.some((note) => note.code === "divisible-16"), "LTX does not warn about multiples of 16");
+  assert(!at("comfyui", "ltx25", 960, 540).notes.some((note) => note.code === "divisible-16"), "LTX-2.5 does not warn about multiples of 16");
+  const ltx25Small = at("comfyui", "ltx25", 320, 180);
+  assert(
+    ltx25Small.notes.some((note) => note.code === "still-small" && /960×512/.test(note.note)),
+    "LTX-2.5 names its fit box"
+  );
   const h3Still = at("comfyui", "minimax-h3", 960, 540);
   assert(!h3Still.notes.some((note) => note.code === "divisible-16"), "MiniMax H3 does not warn about multiples of 16");
   assert(
@@ -543,6 +550,8 @@ async function checkComfyObjectInfo() {
   assert(JSON.stringify(readiness.modelChoicesFromInput([[], {}])) === "[]", "an empty combo is a real list");
   assert(readiness.workflowIdFromFlag("wan22-14b-flf2v") === "wan-flf", "cli workflow flag");
   assert(readiness.workflowIdFromFlag("minimax-h3-i2v") === "minimax-h3", "minimax cli workflow flag");
+  assert(readiness.workflowIdFromFlag("ltx25-i2v") === "ltx25", "ltx25 cli workflow flag");
+  assert(readiness.workflowIdFromFlag("ltx-2.5") === "ltx25", "ltx 2.5 alias");
   assert(/does not promise quality/i.test(readiness.COMFY_CHECK_HONESTY), "the check does not promise quality");
   assert(/character lock/i.test(readiness.COMFY_CHECK_HONESTY), "the check keeps character lock out");
   assert(/lip-sync/i.test(readiness.COMFY_CHECK_HONESTY), "the check keeps lip-sync out");
@@ -610,6 +619,20 @@ async function checkComfyObjectInfo() {
       slot
     );
   }
+  for (const slot of readiness.modelSlotsFor("ltx25")) {
+    written(
+      comfy.patchLtx25Workflow(comfy.loadLtx25Workflow(), {
+        imageName: "start.png",
+        prompt: "a harbor",
+        seed: 1,
+        frames: 25,
+        width: 960,
+        height: 512,
+        fps: 24,
+      }),
+      slot
+    );
+  }
   for (const slot of readiness.modelSlotsFor("ltx")) {
     written(
       comfy.patchLtxWorkflow(comfy.loadLtxWorkflow(), {
@@ -625,7 +648,114 @@ async function checkComfyObjectInfo() {
     );
   }
 
-  const shipped = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx", "minimax-h3"], fixture);
+  const ltx25Mod = await import("../src/lib/ltx25");
+  const ltx25Plain = comfy.patchLtx25Workflow(comfy.loadLtx25Workflow(), {
+    imageName: "start.png",
+    prompt: "a harbor at dusk",
+    seed: 17,
+    frames: ltx25Mod.ltx25FrameCount(4, false),
+    width: 960,
+    height: 512,
+    fps: ltx25Mod.LTX25_FPS,
+  });
+  const ltx25PlainNodes = Object.values(ltx25Plain);
+  const ltx25Stage = ltx25Mod.ltx25StageSize(960, 512);
+  const ltx25PlainLatent = ltx25PlainNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  assert(ltx25PlainLatent?.inputs?.width === ltx25Stage.width && ltx25PlainLatent?.inputs?.height === ltx25Stage.height, "ltx25 first stage is half the fitted size");
+  assert(ltx25PlainLatent?.inputs?.length === ltx25Mod.ltx25FrameCount(4, false), "ltx25 frame count");
+  assert(
+    ltx25PlainNodes.some((node) => node.class_type === "LoadImage" && node._meta?.title === "Start image" && node.inputs?.image === "start.png"),
+    "ltx25 injects the start image"
+  );
+  assert(
+    !ltx25PlainNodes.some((node) => node.class_type === "LTXVAddGuide" || node.class_type === "LoadImage" && node._meta?.title === "End image"),
+    "ltx25 without an end still is plain image-to-video"
+  );
+  assert(ltx25PlainNodes.some((node) => node.class_type === "LatentUpscaleModelLoader"), "ltx25 two-stage path keeps the upscaler");
+  assert(ltx25PlainNodes.filter((node) => node.class_type === "SamplerCustomAdvanced").length === 2, "ltx25 image-to-video samples twice");
+  assert(
+    ltx25PlainNodes.some((node) => node.class_type === "CLIPTextEncode" && node._meta?.title === "Positive prompt" && node.inputs?.text === "a harbor at dusk"),
+    "ltx25 injects the prompt"
+  );
+  assert(
+    ltx25PlainNodes.some((node) => node.class_type === "RandomNoise" && node._meta?.title === "First stage noise" && node.inputs?.noise_seed === 17),
+    "ltx25 injects the seed on the first stage"
+  );
+  assert(
+    ltx25PlainNodes.some((node) => node.class_type === "RandomNoise" && node._meta?.title === "Second stage noise" && node.inputs?.noise_seed === 42),
+    "ltx25 second stage keeps the template seed"
+  );
+  assert(
+    ltx25PlainNodes.some((node) => node.class_type === "LTXVEmptyLatentAudio" && node.inputs?.frames_number === ltx25Mod.ltx25FrameCount(4, false)),
+    "ltx25 audio latent matches the frame count"
+  );
+  const ltx25Video = ltx25PlainNodes.find((node) => node.class_type === "CreateVideo");
+  assert(ltx25Video?.inputs?.fps === ltx25Mod.LTX25_FPS, "ltx25 fps");
+  assert(!Object.prototype.hasOwnProperty.call(ltx25Video?.inputs || {}, "audio"), "ltx25 does not write audio into the file");
+  assert(!ltx25PlainNodes.some((node) => node.class_type === "LTXVAudioVAEDecode"), "ltx25 does not decode the audio latent");
+  assert(!ltx25PlainNodes.some((node) => node.class_type === "TextGenerateLTX2Prompt"), "ltx25 leaves the prompt enhancer out");
+
+  const ltx25Flf = comfy.patchLtx25Workflow(comfy.loadLtx25Workflow(), {
+    imageName: "start.png",
+    endImageName: "end.png",
+    prompt: "a harbor at dusk",
+    seed: 17,
+    frames: 97,
+    width: 960,
+    height: 512,
+    fps: 24,
+  });
+  const ltx25FlfNodes = Object.values(ltx25Flf);
+  const ltx25FlfLatent = ltx25FlfNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  assert(ltx25FlfLatent?.inputs?.width === 960 && ltx25FlfLatent?.inputs?.height === 512, "ltx25 first-last uses the fitted size");
+  assert(
+    ltx25FlfNodes.some((node) => node.class_type === "LoadImage" && node._meta?.title === "End image" && node.inputs?.image === "end.png"),
+    "ltx25 injects the end still"
+  );
+  const ltx25Last = ltx25FlfNodes.find((node) => node.class_type === "LTXVAddGuide" && node._meta?.title === "Last frame guide");
+  assert(ltx25Last?.inputs?.frame_idx === -1 && ltx25Last?.inputs?.strength === 1, "ltx25 last-frame guide is index -1 at strength 1");
+  const ltx25First = ltx25FlfNodes.find((node) => node.class_type === "LTXVAddGuide" && node._meta?.title === "First frame guide");
+  assert(ltx25First?.inputs?.frame_idx === 0 && ltx25First?.inputs?.strength === 0.7, "ltx25 first-frame guide matches the template strength");
+  assert(ltx25FlfNodes.some((node) => node.class_type === "LTXVCropGuides"), "ltx25 first-last crops the guides");
+  assert(!ltx25FlfNodes.some((node) => node.class_type === "LatentUpscaleModelLoader" || node.class_type === "LTXVLatentUpsampler"), "ltx25 first-last does not load the upscaler");
+  assert(ltx25FlfNodes.filter((node) => node.class_type === "SamplerCustomAdvanced").length === 1, "ltx25 first-last samples once");
+  const ltx25FlfSampler = ltx25FlfNodes.find((node) => node.class_type === "SamplerCustomAdvanced");
+  assert(
+    Array.isArray(ltx25FlfSampler?.inputs?.sampler) && ltx25FlfSampler?.inputs?.sampler[0] === "38",
+    "ltx25 first-last uses SamplerEulerAncestral"
+  );
+  assert(ltx25FlfNodes.some((node) => node.class_type === "SamplerEulerAncestral"), "the euler ancestral sampler stays in the first-last prompt");
+
+  const ltx25MissingNodeInfo = JSON.parse(JSON.stringify(fixture)) as Record<string, unknown>;
+  delete ltx25MissingNodeInfo.LTXVAddGuide;
+  const ltx25MissingNode = readiness.checkComfyReadiness(
+    run.loadShippedWorkflow("ltx25"),
+    ltx25MissingNodeInfo,
+    readiness.modelSlotsFor("ltx25")
+  );
+  assert(
+    ltx25MissingNode.blocksQueue && ltx25MissingNode.missingNodes.some((item) => item.classType === "LTXVAddGuide"),
+    "a missing LTXVAddGuide blocks ltx25"
+  );
+  const ltx25MissingFileInfo = JSON.parse(JSON.stringify(fixture)) as {
+    LatentUpscaleModelLoader?: { input?: { required?: { model_name?: unknown } } };
+  };
+  if (ltx25MissingFileInfo.LatentUpscaleModelLoader?.input?.required) {
+    ltx25MissingFileInfo.LatentUpscaleModelLoader.input.required.model_name = [[], {}];
+  }
+  const ltx25MissingFile = readiness.checkComfyReadiness(
+    run.loadShippedWorkflow("ltx25"),
+    ltx25MissingFileInfo,
+    readiness.modelSlotsFor("ltx25")
+  );
+  assert(
+    ltx25MissingFile.blocksQueue &&
+      ltx25MissingFile.missingModels.some((item) => item.filename === info.LTX25_UPSCALER),
+    "a missing LTX-2.5 upscaler blocks the graph"
+  );
+  assert(/latent_upscale_models/.test(ltx25MissingFile.missingModels.find((item) => item.filename === info.LTX25_UPSCALER)?.nextStep || ""), "the upscaler note names its folder");
+
+  const shipped = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx", "ltx25", "minimax-h3"], fixture);
   assert(shipped.every((item) => item.ok), `fixture should pass: ${JSON.stringify(shipped.filter((item) => !item.ok))}`);
   assert(
     shipped.every((item) => item.inputNotes.length === 0 && item.inputBlocks.length === 0),
@@ -662,6 +792,7 @@ async function checkComfyObjectInfo() {
   assert(/wan_2\.1_vae/.test(mismatch14.vaeWarnings[0]?.nextStep || ""), "the 14B note names wan_2.1_vae");
   assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("svd")).length === 0, "SVD has no Wan VAE note");
   assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("ltx")).length === 0, "LTX has no Wan VAE note");
+  assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("ltx25")).length === 0, "LTX-2.5 has no Wan VAE note");
   assert(readiness.wanVaePairingWarnings(readiness.modelSlotsFor("minimax-h3")).length === 0, "MiniMax H3 has no Wan VAE note");
   const wanGraph = JSON.parse(fs.readFileSync(path.join(process.cwd(), "workflows/comfyui-wan22-ti2v-5b.api.json"), "utf8")) as {
     [id: string]: { class_type?: string; inputs?: Record<string, string> };
@@ -730,11 +861,11 @@ async function checkComfyObjectInfo() {
 
   const newerPath = path.join(process.cwd(), "fixtures", "comfyui", "object-info-newer.json");
   const newer = JSON.parse(fs.readFileSync(newerPath, "utf8")) as Record<string, unknown>;
-  const newerChecks = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx", "minimax-h3"], newer);
+  const newerChecks = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx", "ltx25", "minimax-h3"], newer);
   const newerById = Object.fromEntries(newerChecks.map((item) => [item.id, item]));
   assert(newerById.svd?.ok && newerById.svd.inputNotes.length === 0, "SVD has no CreateVideo input to fill");
   assert(newerById.wan?.ok && newerById.wan.inputNotes.length === 0, "Wan 5B has no CreateVideo input to fill");
-  for (const id of ["wan-flf", "ltx", "minimax-h3"] as const) {
+  for (const id of ["wan-flf", "ltx", "ltx25", "minimax-h3"] as const) {
     const row = newerById[id];
     assert(row?.ok && !row.blocksQueue && row.inputBlocks.length === 0, `${id} can still run after the fill`);
     assert(row.inputNotes.length === 1, `${id} reports the omitted chroma input`);
@@ -976,7 +1107,7 @@ async function checkComfyObjectInfo() {
     servers.push(ready);
     storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: ready.url, comfyuiWorkflow: "wan-flf" });
     assert(
-      (await comfy.guardComfyWorkflows(["svd", "wan", "wan-flf", "ltx", "minimax-h3"])) === null,
+      (await comfy.guardComfyWorkflows(["svd", "wan", "wan-flf", "ltx", "ltx25", "minimax-h3"])) === null,
       "a ready server does not block"
     );
 
@@ -1101,6 +1232,10 @@ async function checkComfyObjectInfo() {
     assert(/does not promise quality/.test(passCli.stdout || ""), "the table keeps the honesty line");
     assert(!(passCli.stdout || "").includes(secret) && !(passCli.stderr || "").includes(secret), "comfy:check does not print the auth header");
     assert(sawAuth === secret, "comfy:check sends the auth header");
+    const ltx25Cli = await runCli(["--url", ready.url, "--workflow", "ltx25-i2v"], cliEnv);
+    assert(ltx25Cli.status === 0, `comfy:check LTX-2.5 failed\n${ltx25Cli.stdout}\n${ltx25Cli.stderr}`);
+    assert(/LTX-2\.5/.test(ltx25Cli.stdout || ""), "the table names LTX-2.5");
+    assert(/Result: pass/.test(ltx25Cli.stdout || ""), "LTX-2.5 comfy:check passes the fixture");
     const h3Cli = await runCli(["--url", ready.url, "--workflow", "minimax-h3-i2v"], cliEnv);
     assert(h3Cli.status === 0, `comfy:check MiniMax H3 failed\n${h3Cli.stdout}\n${h3Cli.stderr}`);
     assert(/MiniMax H3/.test(h3Cli.stdout || ""), "the table names MiniMax H3");
@@ -3313,6 +3448,156 @@ async function main() {
     "ltx fps"
   );
   await ltxStandin.close();
+
+  const ltx25 = await import("../src/lib/ltx25");
+  assert(ltx25.ltx25FrameCount(10, true) === ltx25.LTX25_LOW_MAX_FRAMES, "ten seconds caps the LTX-2.5 low-memory clip");
+  assert(ltx25.ltx25FrameCount(4, false) === 97, "four seconds of LTX-2.5 is 97 frames");
+  assert(ltx25.ltx25StageSize(960, 512).width === 480 && ltx25.ltx25StageSize(960, 512).height === 256, "half of 960×512 stays on the 32 grid");
+  storage.updateProject(SAMPLE_PROJECT_ID, { comfyuiWorkflow: "ltx25", comfyLowMemory: null });
+  storage.updateShot(shot.id, { comfyuiWorkflow: null, comfyLowMemory: null });
+  const ltx25Inherited = (await import("../src/lib/comfy-choice")).resolveComfyChoice({
+    settings: storage.getSettings(),
+    project: storage.getProject(SAMPLE_PROJECT_ID),
+    shot: storage.getShot(shot.id),
+  });
+  assert(ltx25Inherited.workflow === "ltx25", "a shot inherits the project LTX-2.5 graph");
+  storage.updateShot(shot.id, { comfyuiWorkflow: "ltx", comfyLowMemory: true });
+  const ltx25LowDescribed = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: false,
+    hasEndImage: false,
+    comfy: { workflow: "ltx25", lowMemory: true },
+  });
+  assert(/reads the text prompt/i.test(ltx25LowDescribed.providerNote), "ltx25 note reads the prompt");
+  assert(!/character lock|lip-sync|long film/i.test(ltx25LowDescribed.providerNote), "ltx25 note makes no extra claims");
+  assert(/832×448/.test(ltx25LowDescribed.providerNote), "ltx25 low-memory note names the box");
+  assert(/two-stage/i.test(ltx25LowDescribed.providerNote), "ltx25 without an end still says two-stage");
+  const ltx25EndDescribed = info.describeProviderUse({
+    provider: "comfyui",
+    settings: storage.getSettings(),
+    hasCharacterSheet: true,
+    hasEndImage: true,
+    comfy: { workflow: "ltx25", lowMemory: false },
+  });
+  assert(/last-frame guide/i.test(ltx25EndDescribed.providerNote), "ltx25 end note names the guide");
+  assert(/does not load the spatial upscaler/i.test(ltx25EndDescribed.providerNote), "ltx25 end note drops the upscaler");
+  assert(/face will not match/i.test(ltx25EndDescribed.characterNote || ""), "ltx25 does not send a character sheet");
+  assert(info.comfyWorkflowFromModelName(info.LTX25_MODEL_NAME) === "ltx25", "ltx25 model name routes to ltx25");
+  assert(info.comfyWorkflowFromModelName(info.LTX_MODEL_NAME) === "ltx", "ltx 2.3 model name still routes to ltx");
+  const ltx25LowSize = ltx25.ltx25FrameSize(pixels!.width, pixels!.height, true);
+  const ltx25LowFrames = ltx25.ltx25FrameCount(10, true);
+  const ltx25FullSize = ltx25.ltx25FrameSize(pixels!.width, pixels!.height, false);
+  const ltx25FullFrames = ltx25.ltx25FrameCount(4, false);
+  let ltx25Uploads = 0;
+  const ltx25Bodies: string[] = [];
+  const ltx25Standin = await listen((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/system_stats") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/upload/image") {
+      ltx25Uploads += 1;
+      const name = `ltx25-${ltx25Uploads}.png`;
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ name, subfolder: "", type: "input" }));
+      });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/prompt") {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
+        ltx25Bodies.push(body);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ prompt_id: `standin-ltx25-${ltx25Bodies.length}`, node_errors: {} }));
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/history/")) {
+      const promptId = url.pathname.split("/").pop();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          [promptId || ""]: {
+            status: { status_str: "success", completed: true },
+            outputs: { "32": { images: [{ filename: "ltx25.mp4", subfolder: "", type: "output" }] } },
+          },
+        })
+      );
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/view") {
+      res.writeHead(200, { "Content-Type": "video/mp4" });
+      res.end(mp4);
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  storage.saveSettings({ comfyuiBaseUrl: ltx25Standin.url, comfyuiWorkflow: "svd" });
+  const ltx25LowJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    durationSec: 10,
+    modelName: ltx25LowDescribed.modelName,
+    providerNote: ltx25LowDescribed.providerNote,
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(ltx25LowJob.id);
+  assert(storage.getJob(ltx25LowJob.id)?.status === "completed", `ltx25 low-memory completed: ${storage.getJob(ltx25LowJob.id)?.error}`);
+  const ltx25FullJob = storage.createJob({
+    projectId: SAMPLE_PROJECT_ID,
+    shotId: shot.id,
+    prompt: shot.prompt,
+    presetId: shot.presetId,
+    provider: "comfyui",
+    imagePath: shot.startImagePath!,
+    endImagePath: shot.startImagePath,
+    durationSec: 4,
+    modelName: info.comfyModelName("ltx25", false),
+    status: "queued",
+  });
+  await comfy.runComfyuiGenerate(ltx25FullJob.id);
+  assert(storage.getJob(ltx25FullJob.id)?.status === "completed", `ltx25 completed: ${storage.getJob(ltx25FullJob.id)?.error}`);
+  function ltx25Posted(index: number) {
+    const posted = JSON.parse(ltx25Bodies[index] || "{}") as {
+      prompt?: Record<string, { class_type?: string; inputs?: Record<string, unknown>; _meta?: { title?: string } }>;
+    };
+    return Object.values(posted.prompt || {});
+  }
+  const ltx25LowNodes = ltx25Posted(0);
+  const ltx25FullNodes = ltx25Posted(1);
+  const ltx25LowLatent = ltx25LowNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  assert(ltx25LowLatent?.inputs?.length === ltx25LowFrames, "queued ltx25 low-memory frame count");
+  assert(
+    ltx25LowLatent?.inputs?.width === ltx25.ltx25StageSize(ltx25LowSize.width, ltx25LowSize.height).width &&
+      ltx25LowLatent?.inputs?.height === ltx25.ltx25StageSize(ltx25LowSize.width, ltx25LowSize.height).height,
+    "queued ltx25 low-memory stage size"
+  );
+  assert(!ltx25LowNodes.some((node) => node.class_type === "LTXVAddGuide"), "queued ltx25 without an end still has no guide");
+  assert(ltx25Uploads === 3, "ltx25 uploads the start still, then the start and the end");
+  const ltx25FullLatent = ltx25FullNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  assert(ltx25FullLatent?.inputs?.width === ltx25FullSize.width && ltx25FullLatent?.inputs?.height === ltx25FullSize.height, "queued ltx25 first-last size");
+  assert(ltx25FullLatent?.inputs?.length === ltx25FullFrames, "queued ltx25 first-last frame count");
+  const queuedLast = ltx25FullNodes.find((node) => node.class_type === "LTXVAddGuide" && node._meta?.title === "Last frame guide");
+  assert(queuedLast?.inputs?.frame_idx === -1 && queuedLast?.inputs?.strength === 1, "queued last-frame guide");
+  assert(
+    ltx25FullNodes.some((node) => node.class_type === "LoadImage" && node._meta?.title === "End image" && node.inputs?.image === "ltx25-3.png"),
+    "queued ltx25 end image name"
+  );
+  assert(!ltx25FullNodes.some((node) => node.class_type === "LatentUpscaleModelLoader"), "queued first-last prompt drops the upscaler");
+  await ltx25Standin.close();
 
   const h3 = await import("../src/lib/minimax-h3");
   assert(h3.h3FrameCount(5, false) === h3.H3_MAX_FRAMES, "five seconds snaps up to 124 frames");

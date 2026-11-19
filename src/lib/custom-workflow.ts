@@ -4,7 +4,7 @@
  *
  * Pure: no disk, no network, no secrets. The files live in
  * custom-workflow-files.ts. A broken mapping is refused in full.
- * Nothing here changes the five shipped graphs.
+ * Nothing here changes the shipped graphs.
  */
 
 export type GraphNode = {

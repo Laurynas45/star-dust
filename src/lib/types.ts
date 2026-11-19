@@ -10,7 +10,7 @@ export type CaptionMode = "burn" | "sidecar";
 
 export type JobKind = "take" | "preview";
 
-export const COMFY_WORKFLOW_IDS = ["svd", "wan", "wan-flf", "ltx", "minimax-h3"] as const;
+export const COMFY_WORKFLOW_IDS = ["svd", "wan", "wan-flf", "ltx", "ltx25", "minimax-h3"] as const;
 
 export type ComfyWorkflowId = (typeof COMFY_WORKFLOW_IDS)[number];
 
@@ -27,7 +27,14 @@ const CUSTOM_GRAPH_SLUG = /^[a-z][a-z0-9-]{0,47}$/;
 export type ComfyGraphId = ComfyWorkflowId | `custom:${string}`;
 
 export function isComfyWorkflowId(value: unknown): value is ComfyWorkflowId {
-  return value === "svd" || value === "wan" || value === "wan-flf" || value === "ltx" || value === "minimax-h3";
+  return (
+    value === "svd" ||
+    value === "wan" ||
+    value === "wan-flf" ||
+    value === "ltx" ||
+    value === "ltx25" ||
+    value === "minimax-h3"
+  );
 }
 
 /** Slug after custom:, or null when the id is not a usable custom graph id. */

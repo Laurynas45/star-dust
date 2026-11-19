@@ -42,6 +42,19 @@ export const LTX_TEXT_ENCODER = "gemma_3_12B_it_fp4_mixed.safetensors";
 
 export const LTX_MODEL_NAME = "ComfyUI LTX-2.3 distilled FP8";
 
+/** Files the LTX-2.5 graph writes. Same names as the current official I2V template's INT8 path. */
+export const LTX25_DIFFUSION = "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors";
+export const LTX25_TEXT_ENCODER = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors";
+export const LTX25_VIDEO_VAE = "ltx-2.5-video-vae-bf16.safetensors";
+export const LTX25_AUDIO_VAE = "ltx-2.5-audio-vae-bf16.safetensors";
+export const LTX25_UPSCALER = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors";
+
+export const LTX25_MODEL_NAME = "ComfyUI LTX-2.5";
+
+/** Shown when LTX-2.5 is selected. The end still is optional. The job still runs without one. */
+export const LTX25_END_NOTE =
+  "An end still is sent as a last-frame guide when this shot has one. That path is a single stage and does not load the spatial upscaler. A shot with no end still still runs, as two-stage image-to-video. This is not a character lock.";
+
 /** Files the MiniMax H3 graph writes. Same names as the current official I2V template. */
 export const H3_DIFFUSION = "minimax_h3_fl2va_pruned_int8_convrot.safetensors";
 export const H3_TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors";
@@ -54,7 +67,7 @@ export const H3_MODEL_NAME = "ComfyUI MiniMax H3";
 export const H3_END_NOTE =
   "An end still is sent as the last frame when this shot has one. A shot with no end still still runs.";
 
-export const COMFY_WORKFLOW_ORDER: ComfyWorkflowId[] = ["svd", "wan", "wan-flf", "ltx", "minimax-h3"];
+export const COMFY_WORKFLOW_ORDER: ComfyWorkflowId[] = ["svd", "wan", "wan-flf", "ltx", "ltx25", "minimax-h3"];
 
 export type ComfyWorkflowInfo = {
   title: string;
@@ -117,6 +130,20 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
     detail:
       "Reads the prompt. Star Dust injects the start image, prompt, frame count, size, and seed. Distilled FP8 checkpoint on core ComfyUI nodes. Not an 8 GB guarantee.",
   },
+  ltx25: {
+    title: "LTX-2.5",
+    file: "workflows/comfyui-ltx25-i2v.api.json",
+    goodAt:
+      "Image-to-video from one still, with an optional end still as a last-frame guide. Lighter than the Wan 14B first-last graph. One short clip. The downloaded file is silent video.",
+    memory:
+      "Lightricks' ComfyUI page lists a CUDA GPU with 32 GB+ VRAM for the full setup. This graph loads the INT8 ConvRot distilled transformer and the INT8 ConvRot Gemma text encoder, which that page calls the lower-VRAM files, plus the BF16 video and audio VAEs. That is a smaller official stack, not a measurement Star Dust ran. The low-memory preset still loads these weights. The x2 latent upscaler is an extra file, and only the two-stage path loads it.",
+    defaults:
+      "The still fitted inside 960×512. 24 fps, length snapped to 8n+1, capped at 121 frames (about five seconds). Without an end still, the first stage is half of that size and the x2 latent upscaler brings it back. With an end still, one stage at the fitted size.",
+    lowMemory:
+      "The still fitted inside 832×448 (about 480p) and the frame count capped at 25 (about one second). The same weights are still loaded.",
+    detail:
+      "Reads the prompt. Star Dust injects the start image, the prompt, the frame count, the size, and the seed. An end still is a last-frame guide. Core nodes. The prompt enhancer is not in the graph. Not a character lock. Not an 8 GB guarantee.",
+  },
   "minimax-h3": {
     title: "MiniMax H3",
     file: "workflows/comfyui-minimax-h3-i2v.api.json",
@@ -138,13 +165,15 @@ export function comfyModelName(workflow: ComfyGraphId, lowMemory: boolean): stri
     ? `ComfyUI ${workflow}`
     : workflow === "minimax-h3"
       ? H3_MODEL_NAME
-      : workflow === "ltx"
-        ? LTX_MODEL_NAME
-        : workflow === "wan-flf"
-          ? WAN_FLF_MODEL_NAME
-          : workflow === "wan"
-            ? WAN_MODEL_NAME
-            : COMFY_MODEL_NAME;
+      : workflow === "ltx25"
+        ? LTX25_MODEL_NAME
+        : workflow === "ltx"
+          ? LTX_MODEL_NAME
+          : workflow === "wan-flf"
+            ? WAN_FLF_MODEL_NAME
+            : workflow === "wan"
+              ? WAN_MODEL_NAME
+              : COMFY_MODEL_NAME;
   return lowMemory ? `${base}${LOW_MEMORY_MARK}` : base;
 }
 
@@ -174,6 +203,7 @@ export function comfyWorkflowFromModelName(modelName?: string): ComfyGraphId | n
   if (custom && isCustomGraphId(custom[1])) return custom[1];
   if (modelName.includes("MiniMax H3")) return "minimax-h3";
   if (modelName.includes("FLF2V")) return "wan-flf";
+  if (modelName.includes("LTX-2.5")) return "ltx25";
   if (modelName.includes("LTX-2.3")) return "ltx";
   if (modelName.includes("Wan 2.2")) return "wan";
   if (modelName.includes("SVD")) return "svd";
@@ -206,7 +236,7 @@ export const CAPABILITY: Record<
   comfyui: {
     title: "ComfyUI",
     label:
-      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3 distilled FP8, and MiniMax H3 graphs. A graph you export can be added as a pair of files. Not a node editor.",
+      "Needs a reachable ComfyUI server, on this machine or at COMFYUI_BASE_URL. Ships SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3 distilled FP8, LTX-2.5, and MiniMax H3 graphs. A graph you export can be added as a pair of files. Not a node editor.",
   },
 };
 
@@ -276,6 +306,29 @@ export function describeProviderUse(opts: {
     if (opts.hasCharacterSheet) {
       characterNote =
         "Character sheet was not applied. Mock only transforms the start still with ffmpeg, so the face will not match the sheet.";
+    }
+  } else if (opts.provider === "comfyui" && comfy.workflow === "ltx25") {
+    const box = comfy.lowMemory ? "832×448" : "960×512";
+    parts.push(
+      `${modelName} posts workflows/comfyui-ltx25-i2v.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the prompt, a frame count from the shot duration (24 fps, snapped to 8n+1, capped at 121 frames, about five seconds), the output size (the still fitted inside ${box}), and the seed. The clip is silent: the graph builds the audio latent LTX-2.5 expects, then does not write that audio into the file. It is one short clip. ${COMFY_SERVER_NOTE}`
+    );
+    if (comfy.lowMemory) {
+      parts.push(
+        "The low-memory preset is on: the still is fitted inside 832×448 (about 480p) and the frame count is capped at 25. The same weights are still loaded."
+      );
+    }
+    if (opts.hasEndImage) {
+      parts.push(
+        "The end image is sent as a last-frame guide (frame index -1, strength 1). That path is one stage at the fitted size and does not load the spatial upscaler. This is not a character lock."
+      );
+    } else {
+      parts.push(
+        "This shot has no end still. The job runs as two-stage image-to-video. The first stage is half of the fitted size, then the x2 latent upscaler. The last-frame guide is left off."
+      );
+    }
+    if (opts.hasCharacterSheet) {
+      characterNote =
+        "Character sheet was not sent. This LTX-2.5 workflow has no reference-image input, so the face will not match the sheet.";
     }
   } else if (opts.provider === "comfyui" && comfy.workflow === "ltx") {
     parts.push(

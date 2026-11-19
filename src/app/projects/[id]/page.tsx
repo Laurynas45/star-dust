@@ -20,6 +20,7 @@ import {
   CHARACTER_SHEET_HONESTY,
   CLOUD_RISK_NOTE,
   H3_END_NOTE,
+  LTX25_END_NOTE,
   WAN_FLF_MISSING_END,
   isPaidProvider,
   modelNameFor,
@@ -1646,6 +1647,9 @@ export default function ProjectStudioPage() {
           {projectChoice.workflow === "minimax-h3" && (
             <p className="mt-2 text-xs leading-relaxed text-sky-50/90">{H3_END_NOTE}</p>
           )}
+          {projectChoice.workflow === "ltx25" && (
+            <p className="mt-2 text-xs leading-relaxed text-sky-50/90">{LTX25_END_NOTE}</p>
+          )}
           <p className="mt-2 text-xs text-sky-50/70">
             A shot can override this. The server is the URL in Providers, or COMFYUI_BASE_URL if that
             is set. This is not a node editor.
@@ -1894,6 +1898,11 @@ export default function ProjectStudioPage() {
             projectChoice &&
             (shotWorkflow === "minimax-h3" || (!shotWorkflow && projectChoice.workflow === "minimax-h3")) && (
               <p className="text-xs leading-relaxed text-[var(--muted)]">{H3_END_NOTE}</p>
+            )}
+          {provider === "comfyui" &&
+            projectChoice &&
+            (shotWorkflow === "ltx25" || (!shotWorkflow && projectChoice.workflow === "ltx25")) && (
+              <p className="text-xs leading-relaxed text-[var(--muted)]">{LTX25_END_NOTE}</p>
             )}
           {provider === "comfyui" &&
             projectChoice &&
@@ -3099,6 +3108,9 @@ function ShotWorkflowFields(props: {
       )}
       {props.resolved.workflow === "minimax-h3" && (
         <p className="text-[11px] leading-relaxed text-[var(--muted)]">{H3_END_NOTE}</p>
+      )}
+      {props.resolved.workflow === "ltx25" && (
+        <p className="text-[11px] leading-relaxed text-[var(--muted)]">{LTX25_END_NOTE}</p>
       )}
       {props.cards.some((card) => card.ok && card.needsEndImage && card.id === props.resolved.workflow) && (
         <p
