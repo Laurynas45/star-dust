@@ -269,7 +269,9 @@ async function testListBackends() {
     assert(broken?.ready === false, "a graph that failed to load is not ready");
   });
   const readinessCalls = mocked.calls.filter((call) => call.path === "/api/comfyui/readiness");
-  assert(readinessCalls.length === 7, `readiness calls ${readinessCalls.length}`);
+  assert(readinessCalls.length === 8, `readiness calls ${readinessCalls.length}`);
+  const ltx25Call = readinessCalls.find((call) => text(asRecord(call.json)?.workflow) === "ltx25");
+  assert(ltx25Call, "list_backends asks about ltx25");
 }
 
 function text(value: unknown): string {

@@ -951,7 +951,7 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
     {
       title: "List backends",
       description:
-        "List Star Dust providers (mock, fal, Replicate, ComfyUI) and whether each one is ready on the running server. ComfyUI graphs include SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, MiniMax H3, and any custom:<slug> graph. Readiness comes from GET /api/settings and POST /api/comfyui/readiness. A missing key, a low credit balance, a locked pack, and a ComfyUI graph that would not queue are reported here. This does not start a render, spend credits, or change settings.",
+        "List Star Dust providers (mock, fal, Replicate, ComfyUI) and whether each one is ready on the running server. ComfyUI graphs include SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, LTX-2.5, MiniMax H3, and any custom:<slug> graph. Readiness comes from GET /api/settings and POST /api/comfyui/readiness. A missing key, a low credit balance, a locked pack, and a ComfyUI graph that would not queue are reported here. This does not start a render, spend credits, or change settings.",
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async () => guard(() => listBackends(client))

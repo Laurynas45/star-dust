@@ -6,6 +6,7 @@ import { nodesFromWorkflow } from "../comfy-progress";
 import { runFfmpeg } from "../ffmpeg";
 import { clearJobActivity, noteRunStarted } from "../job-activity";
 import { LTX_FPS, ltxFrameCount, ltxFrameSize } from "../ltx";
+import { LTX25_FPS, ltx25FrameCount, ltx25FrameSize, ltx25StageSize } from "../ltx25";
 import { H3_FPS, h3FrameCount, h3FrameSize } from "../minimax-h3";
 import {
   COMFY_CHECKPOINT,
@@ -17,6 +18,11 @@ import {
   H3_VIDEO_VAE,
   LTX_CHECKPOINT,
   LTX_TEXT_ENCODER,
+  LTX25_AUDIO_VAE,
+  LTX25_DIFFUSION,
+  LTX25_TEXT_ENCODER,
+  LTX25_UPSCALER,
+  LTX25_VIDEO_VAE,
   WAN_DIFFUSION,
   WAN_FLF_HIGH_NOISE,
   WAN_FLF_LOW_NOISE,
@@ -166,10 +172,10 @@ export function explainComfyProblem(raw: string, url: string): string | null {
       lower
     )
   ) {
-    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, and MiniMax H3. A custom graph uses the filenames already in that file. Star Dust does not download weights. The licence for those weights is yours. The job was not left running. Server said: ${text}`;
+    return `ComfyUI could not find a model file for this workflow at ${where}. The README lists the filenames for SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, LTX-2.5, and MiniMax H3. A custom graph uses the filenames already in that file. Star Dust does not download weights. The licence for those weights is yours. The job was not left running. Server said: ${text}`;
   }
   if (/does not exist|missing node|unknown node|node type|class_type|custom node/.test(lower)) {
-    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, the shipped LTX-2.3 graph, and MiniMax H3 use core nodes from a current ComfyUI. MiniMax H3 needs ComfyUI 0.31.0 or later. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. A custom graph uses the nodes in the file you exported. Star Dust does not install custom nodes. The job was not left running. Server said: ${text}`;
+    return `ComfyUI is missing a node for this workflow at ${where}. SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, the shipped LTX-2.3 graph, LTX-2.5, and MiniMax H3 use core nodes from a current ComfyUI. MiniMax H3 needs ComfyUI 0.31.0 or later. Optional GGUF loading needs the ComfyUI-GGUF custom node, which the shipped graph does not use. A custom graph uses the nodes in the file you exported. Star Dust does not install custom nodes. The job was not left running. Server said: ${text}`;
   }
   return null;
 }
@@ -202,6 +208,11 @@ export function loadWanFlfWorkflow(): Workflow {
 
 export function loadLtxWorkflow(): Workflow {
   const file = path.join(process.cwd(), "workflows", "comfyui-ltx23-i2v.api.json");
+  return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
+}
+
+export function loadLtx25Workflow(): Workflow {
+  const file = path.join(process.cwd(), "workflows", "comfyui-ltx25-i2v.api.json");
   return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
 }
 
@@ -372,6 +383,115 @@ export function patchLtxWorkflow(
   return next;
 }
 
+const LTX25_I2V_ONLY = ["13", "19", "20", "21", "22", "23", "24", "26", "27", "28", "29"];
+const LTX25_FLF_ONLY = ["33", "34", "35", "36", "37", "38"];
+
+/**
+ * Two-stage image-to-video, unless the shot has an end still.
+ * An end still switches the queued prompt to the single-stage first-last path:
+ * LTXVAddGuide at frame 0 and at frame -1, then one sample, no latent upscaler.
+ * The audio latent is built and sampled, then dropped. The saved file is silent video.
+ */
+export function patchLtx25Workflow(
+  workflow: Workflow,
+  opts: {
+    imageName: string;
+    endImageName?: string | null;
+    prompt: string;
+    seed: number;
+    frames: number;
+    width: number;
+    height: number;
+    fps: number;
+  }
+): Workflow {
+  const next = structuredClone(workflow);
+  const end = Boolean(opts.endImageName);
+  for (const id of end ? LTX25_I2V_ONLY : LTX25_FLF_ONLY) delete next[id];
+  for (const node of Object.values(next)) {
+    if (!node.inputs) continue;
+    if (node.class_type === "LoadImage" && node._meta?.title === "Start image") {
+      node.inputs.image = opts.imageName;
+    }
+    if (node.class_type === "LoadImage" && node._meta?.title === "End image" && opts.endImageName) {
+      node.inputs.image = opts.endImageName;
+    }
+    if (node.class_type === "UNETLoader") {
+      node.inputs.unet_name = LTX25_DIFFUSION;
+      node.inputs.weight_dtype = "default";
+    }
+    if (node.class_type === "CLIPLoader") {
+      node.inputs.clip_name = LTX25_TEXT_ENCODER;
+      node.inputs.type = "ltxv";
+      node.inputs.device = "default";
+    }
+    if (node.class_type === "VAELoader" && node._meta?.title === "Load video VAE") {
+      node.inputs.vae_name = LTX25_VIDEO_VAE;
+    }
+    if (node.class_type === "VAELoader" && node._meta?.title === "Load audio VAE") {
+      node.inputs.vae_name = LTX25_AUDIO_VAE;
+    }
+    if (node.class_type === "LatentUpscaleModelLoader") node.inputs.model_name = LTX25_UPSCALER;
+    if (node.class_type === "CLIPTextEncode" && node._meta?.title === "Positive prompt") {
+      node.inputs.text = opts.prompt;
+    }
+    if (node.class_type === "EmptyLTXVLatentVideo") {
+      const size = end ? { width: opts.width, height: opts.height } : ltx25StageSize(opts.width, opts.height);
+      node.inputs.width = size.width;
+      node.inputs.height = size.height;
+      node.inputs.length = opts.frames;
+    }
+    if (node.class_type === "LTXVEmptyLatentAudio") {
+      node.inputs.frames_number = opts.frames;
+      node.inputs.frame_rate = opts.fps;
+    }
+    if (node.class_type === "LTXVConditioning") node.inputs.frame_rate = opts.fps;
+    if (node.class_type === "RandomNoise" && node._meta?.title === "First stage noise") {
+      node.inputs.noise_seed = opts.seed;
+    }
+    if (node.class_type === "RandomNoise" && node._meta?.title === "Second stage noise") {
+      node.inputs.noise_seed = 42;
+    }
+    if (node.class_type === "LTXVAddGuide" && node._meta?.title === "First frame guide") {
+      node.inputs.frame_idx = 0;
+      node.inputs.strength = 0.7;
+    }
+    if (node.class_type === "LTXVAddGuide" && node._meta?.title === "Last frame guide") {
+      node.inputs.frame_idx = -1;
+      node.inputs.strength = 1;
+    }
+    if (node.class_type === "CreateVideo") node.inputs.fps = opts.fps;
+  }
+  const concat = next["16"];
+  const guider = next["15"];
+  const sampler = next["17"];
+  const decode = next["30"];
+  if (end) {
+    if (concat?.inputs) concat.inputs.video_latent = ["36", 2];
+    if (guider?.inputs) {
+      guider.inputs.positive = ["36", 0];
+      guider.inputs.negative = ["36", 1];
+    }
+    if (sampler?.inputs) sampler.inputs.sampler = ["38", 0];
+    if (decode?.inputs) decode.inputs.samples = ["37", 2];
+    const crop = next["37"];
+    if (crop?.inputs) {
+      crop.inputs.positive = ["36", 0];
+      crop.inputs.negative = ["36", 1];
+      crop.inputs.latent = ["18", 0];
+    }
+  } else {
+    if (concat?.inputs) concat.inputs.video_latent = ["19", 0];
+    if (guider?.inputs) {
+      guider.inputs.positive = ["9", 0];
+      guider.inputs.negative = ["9", 1];
+    }
+    if (sampler?.inputs) sampler.inputs.sampler = ["13", 0];
+    if (decode?.inputs) decode.inputs.samples = ["29", 0];
+  }
+  return next;
+}
+
 export function patchMinimaxH3Workflow(
   workflow: Workflow,
   opts: {
@@ -499,7 +619,7 @@ function historyError(entry: { status?: { status_str?: string; messages?: unknow
 
 /**
  * Queues the selected graph, polls /history, and downloads the file.
- * Shipped graphs are SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, and MiniMax H3.
+ * Shipped graphs are SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, LTX-2.5, and MiniMax H3.
  * A custom graph is the API export named by the mapping in data/workflows.
  * Not a node editor. If the server is down, or it reports OOM or a missing node or model, the job fails.
  * FLF2V requires an end image and does not fall back to TI2V-5B.
@@ -550,6 +670,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   if (
     plan.workflow === "wan-flf" ||
     (plan.workflow === "minimax-h3" && job.endImagePath) ||
+    (plan.workflow === "ltx25" && job.endImagePath) ||
     (customGraph?.map.endImage && job.endImagePath)
   ) {
     if (!endAbs || !fs.existsSync(endAbs)) {
@@ -573,13 +694,31 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const bytes = fs.readFileSync(inputAbs);
   const imageName = await uploadComfyImage(base, jobId, inputAbs, "start image");
   const sendEnd =
-    (plan.workflow === "wan-flf" || plan.workflow === "minimax-h3" || Boolean(customGraph?.map.endImage)) &&
+    (plan.workflow === "wan-flf" ||
+      plan.workflow === "minimax-h3" ||
+      plan.workflow === "ltx25" ||
+      Boolean(customGraph?.map.endImage)) &&
     Boolean(endAbs);
   const endImageName = sendEnd && endAbs ? await uploadComfyImage(base, jobId, endAbs, "end image") : null;
 
   const seed = providerSeed(job.seed);
   let workflow: Workflow;
-  if (plan.workflow === "ltx") {
+  if (plan.workflow === "ltx25") {
+    const pixels = imagePixelSize(bytes);
+    const size = pixels
+      ? ltx25FrameSize(pixels.width, pixels.height, plan.lowMemory)
+      : ltx25FrameSize(0, 0, plan.lowMemory);
+    workflow = patchLtx25Workflow(loadLtx25Workflow(), {
+      imageName,
+      endImageName,
+      prompt: job.prompt,
+      seed,
+      frames: ltx25FrameCount(duration, plan.lowMemory),
+      width: size.width,
+      height: size.height,
+      fps: LTX25_FPS,
+    });
+  } else if (plan.workflow === "ltx") {
     const pixels = imagePixelSize(bytes);
     const size = pixels
       ? ltxFrameSize(pixels.width, pixels.height, plan.lowMemory)

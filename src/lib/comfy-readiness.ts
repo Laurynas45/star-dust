@@ -23,6 +23,11 @@ import {
   H3_VIDEO_VAE,
   LTX_CHECKPOINT,
   LTX_TEXT_ENCODER,
+  LTX25_AUDIO_VAE,
+  LTX25_DIFFUSION,
+  LTX25_TEXT_ENCODER,
+  LTX25_UPSCALER,
+  LTX25_VIDEO_VAE,
   WAN_DIFFUSION,
   WAN_FLF_HIGH_NOISE,
   WAN_FLF_LOW_NOISE,
@@ -39,6 +44,7 @@ const CHECKPOINTS = "models/checkpoints";
 const DIFFUSION = "models/diffusion_models";
 const TEXT_ENCODERS = "models/text_encoders";
 const VAE_FOLDER = "models/vae";
+const LATENT_UPSCALE = "models/latent_upscale_models";
 
 export type ModelSlot = {
   classType: string;
@@ -188,6 +194,32 @@ export function modelSlotsFor(workflow: ComfyWorkflowId): ModelSlot[] {
         input: "vae_name",
         filename: H3_AUDIO_VAE,
         folder: VAE_FOLDER,
+      },
+    ];
+  }
+  if (workflow === "ltx25") {
+    return [
+      { classType: "UNETLoader", input: "unet_name", filename: LTX25_DIFFUSION, folder: DIFFUSION },
+      { classType: "CLIPLoader", input: "clip_name", filename: LTX25_TEXT_ENCODER, folder: TEXT_ENCODERS },
+      {
+        classType: "VAELoader",
+        title: "Load video VAE",
+        input: "vae_name",
+        filename: LTX25_VIDEO_VAE,
+        folder: VAE_FOLDER,
+      },
+      {
+        classType: "VAELoader",
+        title: "Load audio VAE",
+        input: "vae_name",
+        filename: LTX25_AUDIO_VAE,
+        folder: VAE_FOLDER,
+      },
+      {
+        classType: "LatentUpscaleModelLoader",
+        input: "model_name",
+        filename: LTX25_UPSCALER,
+        folder: LATENT_UPSCALE,
       },
     ];
   }
@@ -781,6 +813,11 @@ export function workflowIdFromFlag(flag: string): ComfyGraphId | null {
     "comfyui-ltx23-i2v": "ltx",
     "ltx-2.3": "ltx",
     "ltx-2.3-i2v": "ltx",
+    ltx25: "ltx25",
+    "ltx25-i2v": "ltx25",
+    "comfyui-ltx25-i2v": "ltx25",
+    "ltx-2.5": "ltx25",
+    "ltx-2.5-i2v": "ltx25",
     "minimax-h3": "minimax-h3",
     "minimax-h3-i2v": "minimax-h3",
     "comfyui-minimax-h3-i2v": "minimax-h3",
@@ -794,6 +831,7 @@ export const COMFY_CHECK_WORKFLOW_FLAGS = [
   "wan22-ti2v-5b",
   "wan22-14b-flf2v",
   "ltx23-i2v",
+  "ltx25-i2v",
   "minimax-h3-i2v",
 ] as const;
 

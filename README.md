@@ -17,7 +17,7 @@ Clone it and leave Mock on if you only want the shot list and a stitched mp4. Th
 | Backend | Use it when | Hardware and keys |
 | --- | --- | --- |
 | Mock (free) | You want the edit with no GPU and no account. CI renders this. | ffmpeg only. Camera motion on the still, not AI motion. No key. |
-| ComfyUI on this machine | ComfyUI is already running where Star Dust runs. | No key in Star Dust. Pick SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, or MiniMax H3 per shot or per project. TI2V-5B stays the low-VRAM Wan path. MiniMax H3 is a large model for a big or rented GPU. Start with the low-memory preset. Memory notes are guidance, not a measured benchmark. |
+| ComfyUI on this machine | ComfyUI is already running where Star Dust runs. | No key in Star Dust. Pick SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, LTX-2.5, or MiniMax H3 per shot or per project. TI2V-5B stays the low-VRAM Wan path. LTX-2.5 can steer a clip toward an end still without the Wan 14B weights. MiniMax H3 is a large model for a big or rented GPU. Start with the low-memory preset. Memory notes are guidance, not a measured benchmark. |
 | ComfyUI on another machine or a rented GPU | You do not have a card that can hold the model (an AMD iGPU laptop is the usual case). Run ComfyUI on a desktop or a rented GPU and point Star Dust at it. | Set `COMFYUI_BASE_URL`. If that host expects a header, set `COMFYUI_AUTH_HEADER`. Both stay in the environment. They are not saved in the database and not shown in the UI. |
 | fal | You want a cloud clip and you already have a fal key. | `FAL_KEY` in the environment. A rate you type yourself, in the billing unit you pick. That total is your estimate, not a vendor quote. |
 | Replicate | Same idea, on Replicate. | `REPLICATE_API_TOKEN` in the environment. Same kind of self-entered rate. |
@@ -39,7 +39,7 @@ The app listens on port 3000. Clips and the SQLite database stay in `./data` on 
 | Mock | No key. Camera motion only (ffmpeg Ken Burns). Not AI motion. |
 | fal | `FAL_KEY` |
 | Replicate | `REPLICATE_API_TOKEN` |
-| ComfyUI | A reachable server, on this machine or at `COMFYUI_BASE_URL`. One of the shipped workflows: SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, or MiniMax H3. Not a node editor. |
+| ComfyUI | A reachable server, on this machine or at `COMFYUI_BASE_URL`. One of the shipped workflows: SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, LTX-2.5, or MiniMax H3. Not a node editor. |
 
 Before a fal or Replicate job is created, Star Dust shows the model name. A key is required. Some vendors bill failed generations, and unused credits can expire. This app does not fetch a vendor price.
 
@@ -53,7 +53,7 @@ While a ComfyUI job runs, the shot and the job show the phase ComfyUI reports. Q
 
 Check server on the Providers page reads `GET /object_info` for the selected graph. When `COMFYUI_BASE_URL` is set, that check uses the environment host and does not print the URL. `COMFYUI_AUTH_HEADER` is sent as the `Authorization` value (override the header name with `COMFYUI_AUTH_HEADER_NAME`). The page shows whether the header is present. It never shows the value.
 
-Pick the graph in Providers (the app default), on the project, or on a shot. A shot overrides the project, and the project overrides Providers. The low-memory preset is the same idea: start at about 480p, short clip. Each graph's card says what that preset actually writes. A graph you export yourself sits in that same list. See [Use your own ComfyUI graph](#use-your-own-comfyui-graph). The five shipped graphs are unchanged.
+Pick the graph in Providers (the app default), on the project, or on a shot. A shot overrides the project, and the project overrides Providers. The low-memory preset is the same idea: start at about 480p, short clip. Each graph's card says what that preset actually writes. A graph you export yourself sits in that same list. See [Use your own ComfyUI graph](#use-your-own-comfyui-graph). The shipped graphs stay as they are. Adding your own does not change them.
 
 **Stable Video Diffusion** (`workflows/comfyui-svd-i2v.api.json`) does not read the text prompt, and it does not take a second reference image. The job says so. It expects `svd_xt_1_1.safetensors` in `ComfyUI/models/checkpoints`. Core nodes only. Default size in the graph is 1024×576, with the shot duration mapped to about 14–25 frames at 6 fps. The low-memory preset uses 768×448 and 14 frames. There is no published system-RAM number here. It is the lightest of the shipped graphs.
 
@@ -98,6 +98,28 @@ The checkpoint is the distilled FP8 file from [Lightricks/LTX-2.3-fp8](https://h
 Lightricks' ComfyUI-LTXVideo README lists a CUDA GPU with 32 GB+ VRAM for the full setup. This graph loads the distilled FP8 checkpoint instead of the full BF16 file `ltx-2.3-22b-distilled-1.1.safetensors`. That is a smaller official file, not a promise that it runs in 8 GB. Community reports, including r/comfyui threads, describe "runs on 8 GB" setups that still need on the order of 32–64 GB of system RAM when the weights do not fit in VRAM. Treat that as a warning. Star Dust did not measure it. If the job runs out of memory, it fails and names that preset.
 
 A GGUF UNet is optional and is not what this file loads. People who want that path install [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) and edit the diffusion loader. Star Dust does not install custom nodes or weights.
+
+**LTX-2.5** (`workflows/comfyui-ltx25-i2v.api.json`) is optional. The LTX-2.3 graph above is unchanged. This one reads the prompt. Star Dust injects the start image, the prompt, the frame count, the size, and the seed. Default size is the still fitted inside 960×512, at 24 fps, length snapped to 8n+1 and capped at 121 frames (about five seconds). The low-memory preset fits the still inside 832×448 (about 480p) and caps the length at 25 frames (about one second). The same weights are still loaded on that preset. The sides are multiples of 64 so the two-stage path can use half of each side, which is a multiple of 32, and the x2 latent upscaler lands back on that size. It is one short clip.
+
+Without an end still, the graph is the official two-stage image-to-video path: a first sample at half the fitted size, `LTXVLatentUpsampler` with the x2 latent upscaler, then a second sample. The first stage uses the template's long sigma list. The second stage uses the short list, and its noise seed stays 42, the fixed seed in that template. The shot seed is the first stage. With an end still, Star Dust drops the upscaler and the second stage and follows the official first-last template instead: `LTXVAddGuide` on the start still at frame 0 (strength 0.7, the template's value) and on the end still at frame -1 (strength 1.0). One sample, at the fitted size, with `SamplerEulerAncestral` (`eta` 0, `s_noise` 1) and the long sigma list. `LTXVCropGuides` runs after that sample, before the decode. A shot with no end still still runs. This is not a character lock. Identity can still drift.
+
+The graph builds the audio latent the model expects, concatenates it for the sample, then saves a silent mp4. It does not decode that audio into the file. The official templates do write audio. This graph matches the shipped LTX-2.3 graph on that point, so a stitch does not pick up an LTX-2.5 soundtrack.
+
+Core nodes only. No ComfyUI-LTXVideo and no KJNodes. The prompt enhancer is not in the graph, so the extra Gemma enhancer file is not required. The official templates also resize the still with `ResizeImageMaskNode` before `LTXVPreprocess`. This graph does not. `LTXVImgToVideoInplace` and `LTXVAddGuide` scale the image to the latent size themselves. Place these files on the ComfyUI server:
+
+```
+ComfyUI/models/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors
+ComfyUI/models/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors
+ComfyUI/models/vae/ltx-2.5-video-vae-bf16.safetensors
+ComfyUI/models/vae/ltx-2.5-audio-vae-bf16.safetensors
+ComfyUI/models/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors
+```
+
+The spatial upscaler is only loaded on the two-stage path. The readiness check still looks for it, because that loader is in the shipped file. Star Dust writes these filenames on every run and does not download them.
+
+The weights are in the gated Hugging Face repo [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5). The ComfyUI LTX-2.5 page also names [Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler](https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler) for the upscaler family. Open the repo, accept the model licence, and wait until the download is allowed. The licence on those weights is not MIT. Star Dust ships only the graph JSON. That JSON stays under this project's MIT licence. Read the model card before you use the weights.
+
+Lightricks' ComfyUI page lists a CUDA GPU with 32 GB+ VRAM for the full setup. The files above are the INT8 ConvRot transformer and text encoder, which that page calls the lower-VRAM set, with the BF16 video and audio VAEs. That is guidance from their docs, not a figure Star Dust measured. It is not a promise that the graph fits in 8 GB. System RAM is separate. If the job runs out of memory, it fails and names the low-memory preset.
 
 **MiniMax H3** (`workflows/comfyui-minimax-h3-i2v.api.json`) reads the prompt. It follows the current official ComfyUI image-to-video template (`templates/video_minimax_h3_i2v.json` in Comfy-Org/workflow_templates) on the path with turbo mode off. Core nodes only: `UNETLoader`, `CLIPLoader` (type `minimax`), two `VAELoader` nodes, `LoadImage`, `MiniMaxH3ImageToVideo`, `KSamplerSelect` (`res_multistep`), `BasicScheduler` (`simple`, 20 steps), `BasicGuider`, `RandomNoise`, `SamplerCustomAdvanced`, `VAEDecode`, `VAEDecodeAudio`, `CreateVideo`, and `SaveVideo`. The template's optional turbo LoRA is not loaded. No custom node pack.
 
@@ -150,8 +172,8 @@ Before Render all, and before `npm run render:shotlist` starts a job, Star Dust 
 
 The checks are deterministic:
 
-- The still's pixel size against the working frame. Mock writes 1280×720 and crops to fill it. The shipped SVD graph uses 1024×576 (768×448 on the low-memory preset). Wan, LTX, and MiniMax H3 fit the still inside a box and do not enlarge a small still. When the project output size is set, a different aspect is called out because the stitch pads instead of stretching. fal and Replicate have no frame size in Star Dust, so that check uses the project output only.
-- Width or height not divisible by 16. This note appears only when Settings is on ComfyUI and the shot's graph is Wan 2.2 TI2V-5B or Wan 2.2 14B first-last frame. The shipped Wan graph still snaps the size it writes to a multiple of 32, and the note says so. Mock, fal, Replicate, SVD, LTX, and MiniMax H3 do not get this note. MiniMax H3 still snaps the size it writes to a multiple of 32.
+- The still's pixel size against the working frame. Mock writes 1280×720 and crops to fill it. The shipped SVD graph uses 1024×576 (768×448 on the low-memory preset). Wan, LTX-2.3, LTX-2.5, and MiniMax H3 fit the still inside a box and do not enlarge a small still. When the project output size is set, a different aspect is called out because the stitch pads instead of stretching. fal and Replicate have no frame size in Star Dust, so that check uses the project output only.
+- Width or height not divisible by 16. This note appears only when Settings is on ComfyUI and the shot's graph is Wan 2.2 TI2V-5B or Wan 2.2 14B first-last frame. The shipped Wan graph still snaps the size it writes to a multiple of 32, and the note says so. Mock, fal, Replicate, SVD, LTX-2.3, LTX-2.5, and MiniMax H3 do not get this note. MiniMax H3 still snaps the size it writes to a multiple of 32. LTX-2.5 snaps the fitted size to a multiple of 64.
 - Prompt wording: an orbit or a fly-through, fast action or a fight, hands in close-up, moving text or a logo, and more than one action (a "then", a semicolon, or a second sentence).
 - Across a chained boundary, where shot N+1 starts from shot N's last frame: a different camera phrase, or a different shot-size phrase such as wide shot and close-up. The motion preset counts when the prompt does not name a camera move.
 
@@ -174,7 +196,7 @@ npm run comfy:check -- --url http://127.0.0.1:8188
 npm run comfy:check -- --url http://127.0.0.1:8188 --workflow wan22-14b-flf2v
 ```
 
-The command prints a pass/fail table and exits non-zero when a checked graph would not run, or when the server does not answer. With no `--workflow`, it checks SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, and MiniMax H3. A custom graph is `npm run comfy:check -- --url http://127.0.0.1:8188 --workflow custom:<slug>`. No API key. `COMFYUI_AUTH_HEADER` is sent when it is set, and the value is not printed. Mock is unchanged.
+The command prints a pass/fail table and exits non-zero when a checked graph would not run, or when the server does not answer. With no `--workflow`, it checks SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B first-last frame, LTX-2.3, LTX-2.5, and MiniMax H3. A custom graph is `npm run comfy:check -- --url http://127.0.0.1:8188 --workflow custom:<slug>`. No API key. `COMFYUI_AUTH_HEADER` is sent when it is set, and the value is not printed. Mock is unchanged.
 
 The same check warns when a Wan graph's VAE filename does not match the model. Wan 2.2 5B is paired with `wan2.2_vae`. Wan 2.2 14B uses `wan_2.1_vae`. The shipped graphs already match. A mismatch is a note on the project page and in the table. It does not block the queue. It does not promise the picture.
 
@@ -182,14 +204,14 @@ ComfyUI rejects an API prompt that leaves out a required input. A default on the
 
 ## Use your own ComfyUI graph
 
-The five shipped graphs stay as they are. To run a different one, export it from ComfyUI with Export (API) and add a mapping file. Star Dust does not install custom nodes and does not download weights. If the graph needs a custom node pack, you install that pack in ComfyUI yourself. The licence for the weights is yours.
+The shipped graphs stay as they are. To run a different one, export it from ComfyUI with Export (API) and add a mapping file. Star Dust does not install custom nodes and does not download weights. If the graph needs a custom node pack, you install that pack in ComfyUI yourself. The licence for the weights is yours.
 
 Put two files in `data/workflows`:
 
 - `<slug>.api.json` — the API export. This is not the other ComfyUI save, the one with a `nodes` array.
 - `<slug>.map.json` — which node id and input receive the still, the prompt, and the rest.
 
-The slug is a lowercase name such as `wan22-ti2v-5b`. It starts with a letter, then letters, digits, or hyphens, and it does not end with a hyphen. The id is `custom:wan22-ti2v-5b`. That cannot collide with `svd`, `wan`, `wan-flf`, `ltx`, or `minimax-h3`.
+The slug is a lowercase name such as `wan22-ti2v-5b`. It starts with a letter, then letters, digits, or hyphens, and it does not end with a hyphen. The id is `custom:wan22-ti2v-5b`. That cannot collide with `svd`, `wan`, `wan-flf`, `ltx`, `ltx25`, or `minimax-h3`.
 
 `examples/workflows/wan22-ti2v-5b.api.json` and `examples/workflows/wan22-ti2v-5b.map.json` are the shipped Wan 2.2 TI2V-5B graph copied as a custom graph. Copy both files into `data/workflows/` and pick `custom:wan22-ti2v-5b`. The copy is only an example. It still needs the same Wan files on the ComfyUI server. Star Dust does not fetch them.
 
@@ -376,7 +398,7 @@ PayPal turns on with `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and `PAYPAL_PAC
 
 A paid fal or Replicate **Render all** estimates one credit per second (override with `STAR_DUST_CREDITS_PER_SECOND`) and is blocked when the balance is lower. Credits are spent when those jobs are queued. A single shot and a retry use the same balance, so they cannot skip it. The operator's `FAL_KEY` or `REPLICATE_API_TOKEN` still has to be in the environment. Mock, ComfyUI, preview cut, and stitch do not spend credits. If Stripe and PayPal are both unset, the pay buttons stay hidden and Render all behaves as before: your own key, your own rate in the billing unit you picked, and the optional budget cap.
 
-**Self-hosted pack** is optional and does not gate that core. Set `STAR_DUST_LICENSE_KEY` to unlock a local worker plan (`workflows/pack-hold.json`, `npx tsx scripts/pack-worker.ts <projectId>`, and `GET /api/projects/<id>/pack-worker`). Any non-empty value unlocks it. The key is read from the environment only. Star Dust does not call a license server, so an air-gapped Mock render still runs when the key is unset. Without the key, Mock, fal, Replicate, ComfyUI, and the shipped SVD, Wan TI2V-5B, Wan 14B first-last frame, LTX, and MiniMax H3 graphs stay available.
+**Self-hosted pack** is optional and does not gate that core. Set `STAR_DUST_LICENSE_KEY` to unlock a local worker plan (`workflows/pack-hold.json`, `npx tsx scripts/pack-worker.ts <projectId>`, and `GET /api/projects/<id>/pack-worker`). Any non-empty value unlocks it. The key is read from the environment only. Star Dust does not call a license server, so an air-gapped Mock render still runs when the key is unset. Without the key, Mock, fal, Replicate, ComfyUI, and the shipped SVD, Wan TI2V-5B, Wan 14B first-last frame, LTX-2.3, LTX-2.5, and MiniMax H3 graphs stay available.
 
 ## Layout
 
@@ -400,7 +422,7 @@ docs/shotlist-schema.md  fields in that file
 examples/                Harbor dusk shot list, and examples/workflows for a custom ComfyUI graph
 src/lib/contact-sheet.ts ffmpeg contact sheet for a stitch and for that zip
 src/lib/mixed-pass.ts    names free clips and out-of-date shots before a stitch
-workflows/               shipped ComfyUI graphs (SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, MiniMax H3) and the optional pack plan
+workflows/               shipped ComfyUI graphs (SVD, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3, LTX-2.5, MiniMax H3) and the optional pack plan
 data/workflows/          your own ComfyUI API graph and its mapping (not in git)
 samples/                 Harbor dusk still and shot list
 ```

@@ -12,6 +12,7 @@ import {
   LTX_MAX_HEIGHT,
   LTX_MAX_WIDTH,
 } from "./ltx";
+import { LTX25_LOW_HEIGHT, LTX25_LOW_WIDTH, LTX25_MAX_HEIGHT, LTX25_MAX_WIDTH } from "./ltx25";
 import { H3_LOW_HEIGHT, H3_LOW_WIDTH, H3_MAX_HEIGHT, H3_MAX_WIDTH } from "./minimax-h3";
 import {
   MOCK_FRAME,
@@ -354,6 +355,20 @@ function workingFrame(input: PreflightInput, shot: PreflightShotInput): WorkingF
       writes: `The LTX-2.3 graph fits the still inside ${width}×${height}`,
       name,
       workflow: "ltx",
+      lowMemory: choice.lowMemory,
+    };
+  }
+  if (choice.workflow === "ltx25") {
+    const width = choice.lowMemory ? LTX25_LOW_WIDTH : LTX25_MAX_WIDTH;
+    const height = choice.lowMemory ? LTX25_LOW_HEIGHT : LTX25_MAX_HEIGHT;
+    const name = choice.lowMemory ? "the LTX-2.5 low-memory box" : "the LTX-2.5 box";
+    return {
+      width,
+      height,
+      mode: "fit",
+      writes: `The LTX-2.5 graph fits the still inside ${width}×${height}`,
+      name,
+      workflow: "ltx25",
       lowMemory: choice.lowMemory,
     };
   }
