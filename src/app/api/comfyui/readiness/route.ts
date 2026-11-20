@@ -3,6 +3,7 @@ import { toPublicCheck } from "@/lib/comfy-readiness";
 import { resolveComfyChoice } from "@/lib/comfy-choice";
 import { compareGraphIds } from "@/lib/provider-info";
 import { checkComfyServer } from "@/lib/providers/comfyui";
+import { lorasForProjectCheck } from "@/lib/render";
 import { getProject, getSettings, listShots } from "@/lib/storage";
 import { ComfyGraphId, isComfyGraphId } from "@/lib/types";
 
@@ -36,6 +37,7 @@ export async function POST(req: NextRequest) {
   } else {
     ids = [getSettings().comfyuiWorkflow];
   }
-  const report = toPublicCheck(await checkComfyServer(ids));
+  const loras = typeof body.projectId === "string" && body.projectId ? lorasForProjectCheck(body.projectId) : [];
+  const report = toPublicCheck(await checkComfyServer(ids, undefined, loras));
   return NextResponse.json(report);
 }

@@ -165,11 +165,11 @@ async function main() {
   if (args.first && !target) fail("No enabled shot to render.");
 
   const comfy = await import("../src/lib/providers/comfyui");
-  const pendingWorkflows =
+  const pending =
     args.first && target
-      ? render.comfyWorkflowsBeforeRenderShot(target.id)
-      : render.comfyWorkflowsBeforeRenderAll(imported.project.id);
-  const block = await comfy.guardComfyWorkflows(pendingWorkflows);
+      ? render.comfyGateBeforeRenderShot(target.id)
+      : render.comfyGateBeforeRenderAll(imported.project.id);
+  const block = await comfy.guardComfyWorkflows(pending.workflows, pending.loras);
   if (block) fail(block.error);
 
   const result = args.first && target ? render.renderShot(target.id) : render.renderAll(imported.project.id);

@@ -35,7 +35,8 @@ import {
   WAN_TEXT_ENCODER,
   WAN_VAE,
 } from "./provider-info";
-import { ComfyGraphId, ComfyWorkflowId, isComfyWorkflowId, isCustomGraphId } from "./types";
+import { LORA_FOLDER } from "./loras";
+import { ComfyGraphId, ComfyWorkflowId, LoraRef, isComfyWorkflowId, isCustomGraphId } from "./types";
 
 export const COMFY_CHECK_HONESTY =
   "This check looks at node names and the model filenames Star Dust will send. It does not measure memory. It does not promise quality, a character lock, or lip-sync.";
@@ -131,6 +132,13 @@ export type ComfyServerCheck = {
   /** Short failure detail. Not a URL and not a secret. */
   detail: string;
   workflows: ComfyWorkflowCheck[];
+  /**
+   * Set when a check was asked for specific LoRA files.
+   * The names ComfyUI would have to list. Missing ones are in loraIssues.
+   */
+  loraNames?: string[];
+  /** Missing LoRA files or a missing LoraLoaderModelOnly node. These block the queue. */
+  loraIssues?: ReadinessIssue[];
   /**
    * The /object_info body, kept for the queue fill. toPublicCheck removes it.
    * Not a URL and not an auth header.
@@ -234,6 +242,79 @@ export function modelSlotsFor(workflow: ComfyWorkflowId): ModelSlot[] {
     { classType: "LTXAVTextEncoderLoader", input: "ckpt_name", filename: LTX_CHECKPOINT, folder: CHECKPOINTS },
     { classType: "LTXVAudioVAELoader", input: "ckpt_name", filename: LTX_CHECKPOINT, folder: CHECKPOINTS },
   ];
+}
+
+export type LoraFileCheck = {
+  ok: boolean;
+  blocksQueue: boolean;
+  missing: ReadinessIssue[];
+};
+
+/**
+ * Each requested file must appear in LoraLoaderModelOnly lora_name.
+ * An empty list passes and does not require the node.
+ * A missing file or a missing node blocks the queue.
+ */
+export function checkLoraFiles(objectInfo: unknown, loras: readonly LoraRef[]): LoraFileCheck {
+  if (loras.length === 0) return { ok: true, blocksQueue: false, missing: [] };
+  const names: string[] = [];
+  for (const lora of loras) {
+    if (!names.includes(lora.name)) names.push(lora.name);
+  }
+  if (!isRecord(objectInfo)) {
+    const issue = loraIssue(
+      names[0] ?? "",
+      "ComfyUI answered GET /object_info, but the body was not a map of node class names. Update ComfyUI and run this check again. The render does not start."
+    );
+    return { ok: false, blocksQueue: true, missing: [issue] };
+  }
+  const node = objectInfo.LoraLoaderModelOnly;
+  if (!isRecord(node)) {
+    return {
+      ok: false,
+      blocksQueue: true,
+      missing: [
+        loraIssue(
+          "",
+          `Missing node LoraLoaderModelOnly. This server's /object_info list does not include it, so these LoRA files cannot be loaded: ${names.join(", ")}. Update ComfyUI. The render does not start.`
+        ),
+      ],
+    };
+  }
+  const choices = modelChoicesFromInput(inputSpec(node, "lora_name"));
+  if (choices === null) {
+    return {
+      ok: false,
+      blocksQueue: true,
+      missing: [
+        loraIssue(
+          "",
+          "LoraLoaderModelOnly is installed, but /object_info has no file list for lora_name. Update ComfyUI. The render does not start."
+        ),
+      ],
+    };
+  }
+  const missing = names
+    .filter((name) => !choices.some((option) => option === name))
+    .map((name) =>
+      loraIssue(
+        name,
+        `LoRA file "${name}" is not in LoraLoaderModelOnly lora_name. Put it in ComfyUI/${LORA_FOLDER}, using the name ComfyUI lists, and run the check again. The render does not start.`
+      )
+    );
+  return { ok: missing.length === 0, blocksQueue: missing.length > 0, missing };
+}
+
+function loraIssue(filename: string, nextStep: string): ReadinessIssue {
+  return {
+    kind: "model",
+    classType: "LoraLoaderModelOnly",
+    nodeId: "",
+    input: "lora_name",
+    filename: filename || undefined,
+    folder: LORA_FOLDER,
+    nextStep,
+  };
 }
 
 /**
@@ -702,10 +783,11 @@ export function statusMessage(check: ComfyServerCheck, revealUrl: boolean): stri
   const failed = check.workflows.filter((workflow) => !workflow.ok);
   const vae = check.workflows.filter((workflow) => workflow.vaeWarnings.length > 0);
   const inputs = check.workflows.filter((workflow) => workflow.inputNotes.length > 0);
-  if (failed.length === 0 && vae.length === 0 && inputs.length === 0) {
+  const loraMissing = (check.loraIssues?.length ?? 0) > 0;
+  if (failed.length === 0 && !loraMissing && vae.length === 0 && inputs.length === 0) {
     return "Every checked graph can run on this server. Every node is listed, and every model filename Star Dust will send is in that loader's list.";
   }
-  if (failed.length === 0) {
+  if (failed.length === 0 && !loraMissing) {
     const parts = ["Every checked graph can run on this server."];
     if (vae.length > 0) {
       const names = vae.map((workflow) => workflow.title).join(", ");
@@ -720,6 +802,9 @@ export function statusMessage(check: ComfyServerCheck, revealUrl: boolean): stri
       );
     }
     return parts.join(" ");
+  }
+  if (failed.length === 0 && loraMissing) {
+    return "A requested LoRA file is not on this server. The render does not start.";
   }
   const names = failed.map((workflow) => workflow.title).join(", ");
   return `${names} would not run. A render that uses a failing graph is refused before the shot is queued.`;
@@ -755,6 +840,10 @@ export function formatQueueRefusal(
     lines.push(`${workflow.title} (${workflow.file}):`);
     for (const issue of issues) lines.push(issue.nextStep);
   }
+  if ((check.loraIssues?.length ?? 0) > 0) {
+    lines.push("LoRAs:");
+    for (const issue of check.loraIssues ?? []) lines.push(issue.nextStep);
+  }
   lines.push(closing);
   return lines.join("\n");
 }
@@ -784,6 +873,15 @@ export function formatComfyCheckTable(check: ComfyServerCheck): string {
     for (const issue of issues) lines.push(`- ${issue.nextStep}`);
     for (const note of notes) lines.push(`- ${note.nextStep}`);
     if (notes.length > 0) lines.push("The VAE note does not block the queue.");
+    lines.push("");
+  }
+  if (check.loraNames && check.loraNames.length > 0) {
+    lines.push("LoRAs");
+    if ((check.loraIssues?.length ?? 0) === 0) {
+      lines.push("- Every requested LoRA file is in LoraLoaderModelOnly lora_name.");
+    } else {
+      for (const issue of check.loraIssues ?? []) lines.push(`- ${issue.nextStep}`);
+    }
     lines.push("");
   }
   lines.push(check.blocksQueue ? "Result: fail" : "Result: pass");

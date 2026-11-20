@@ -14,6 +14,7 @@ import JSZip from "jszip";
 import { OUTPUT_DIM_MAX, OUTPUT_DIM_MIN, OUTPUT_FPS_MAX, OUTPUT_FPS_MIN } from "./conform";
 import { assertExportHasNoSecrets } from "./edit-export";
 import { effectiveSeed } from "./input-key";
+import { parseLoraList } from "./loras";
 import { loadCustomGraphById } from "./custom-workflow-files";
 import {
   COMFY_WORKFLOW_TITLES,
@@ -48,6 +49,7 @@ import {
   MIN_SEAM_FADE_SEC,
   MIN_SHOT_SECONDS,
   MOTION_PRESETS,
+  LoraRef,
   Project,
   ProviderId,
   SeamFadeUnit,
@@ -80,6 +82,7 @@ const ROOT_KEYS = [
   "chainTrimStartFrames",
   "evenColour",
   "smoothFps",
+  "loras",
   "shots",
 ] as const;
 
@@ -98,6 +101,7 @@ const SHOT_KEYS = [
   "evenColour",
   "comfyuiWorkflow",
   "comfyLowMemory",
+  "loras",
 ] as const;
 
 const IMAGE_KEYS = ["file", "role"] as const;
@@ -135,6 +139,8 @@ export interface ShotListShot {
   evenColour: boolean | null;
   comfyuiWorkflow: string | null;
   comfyLowMemory: boolean | null;
+  /** Null inherits the project list. An array replaces it. Omitted in an older file means null. */
+  loras: LoraRef[] | null;
 }
 
 export interface ShotListOutput {
@@ -162,6 +168,11 @@ export interface ShotListDocument {
    * It is not RIFE or FILM.
    */
   smoothFps: boolean;
+  /**
+   * Project LoRA list. Omitted in an older file means none.
+   * A shot can replace this list.
+   */
+  loras: LoraRef[];
   shots: ShotListShot[];
 }
 
@@ -195,6 +206,7 @@ export interface ShotRenderSettings {
   chainTrimStartFrames: number;
   evenColour: boolean;
   smoothFps: boolean;
+  loras: LoraRef[];
   shots: Array<{
     prompt: string;
     durationSec: number;
@@ -211,6 +223,7 @@ export interface ShotRenderSettings {
     evenColour: boolean | null;
     comfyuiWorkflow: string | null;
     comfyLowMemory: boolean | null;
+    loras: LoraRef[] | null;
   }>;
 }
 
@@ -510,6 +523,13 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
   const transition = readTransition(parsed.transition, "Project transition", errors, false);
   const evenColour = readEvenColour(parsed.evenColour, "evenColour", errors, false);
   const smoothFps = readEvenColour(parsed.smoothFps, "smoothFps", errors, false);
+  let projectLoras: LoraRef[] | undefined;
+  if (!("loras" in parsed) || parsed.loras === undefined) projectLoras = [];
+  else {
+    const parsedLoras = parseLoraList(parsed.loras, "loras");
+    if (!parsedLoras.ok) errors.push(parsedLoras.error);
+    else projectLoras = parsedLoras.loras;
+  }
   const trim = parsed.chainTrimStartFrames;
   let chainTrim: number | undefined;
   if (typeof trim !== "number" || !Number.isInteger(trim)) {
@@ -669,6 +689,13 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       const shotEvenColour = readEvenColour(entry.evenColour, `${label} evenColour`, errors, true);
       const shotWorkflow = readWorkflow(entry.comfyuiWorkflow, `${label} workflow`, errors);
       const shotLow = readFlag(entry.comfyLowMemory, `${label} low-memory preset`, errors);
+      let shotLoras: LoraRef[] | null | undefined;
+      if (!("loras" in entry) || entry.loras == null) shotLoras = null;
+      else {
+        const parsedLoras = parseLoraList(entry.loras, `${label} loras`);
+        if (!parsedLoras.ok) errors.push(parsedLoras.error);
+        else shotLoras = parsedLoras.loras;
+      }
       const starts = images.filter((image) => image.role === "start").length;
       const ends = images.filter((image) => image.role === "end").length;
       if (
@@ -685,6 +712,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         shotEvenColour === undefined ||
         shotWorkflow === undefined ||
         shotLow === undefined ||
+        shotLoras === undefined ||
         starts !== 1 ||
         ends > 1
       ) {
@@ -705,6 +733,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         evenColour: shotEvenColour,
         comfyuiWorkflow: shotWorkflow,
         comfyLowMemory: shotLow,
+        loras: shotLoras,
       });
     });
   }
@@ -719,6 +748,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
     chainTrim == null ||
     typeof evenColour !== "boolean" ||
     typeof smoothFps !== "boolean" ||
+    !projectLoras ||
     typeof parsed.name !== "string" ||
     typeof parsed.description !== "string" ||
     typeof parsed.styleBase !== "string" ||
@@ -743,6 +773,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       chainTrimStartFrames: chainTrim,
       evenColour,
       smoothFps,
+      loras: projectLoras,
       shots,
     },
     errors: [],
@@ -826,6 +857,7 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
     chainTrimStartFrames: project.chainTrimStartFrames,
     evenColour: project.evenColour === true,
     smoothFps: project.smoothFps === true,
+    loras: project.loras.map((lora) => ({ ...lora })),
     shots: shots.map((shot) => {
       const images: ShotListImage[] = [
         { file: place(shot.startImagePath, shot.position, "start"), role: "start" },
@@ -848,6 +880,7 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
         evenColour: shot.evenColour ?? null,
         comfyuiWorkflow: workflowTitle(shot.comfyuiWorkflow),
         comfyLowMemory: shot.comfyLowMemory ?? null,
+        loras: shot.loras == null ? null : shot.loras.map((lora) => ({ ...lora })),
       };
     }),
   };
@@ -920,6 +953,7 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
     chainTrimStartFrames: document.chainTrimStartFrames,
     evenColour: document.evenColour,
     smoothFps: document.smoothFps,
+    loras: document.loras.map((lora) => ({ ...lora })),
     shots: document.shots.map((shot) => {
       const start = shot.images.find((image) => image.role === "start");
       const end = shot.images.find((image) => image.role === "end");
@@ -939,6 +973,7 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
         evenColour: shot.evenColour,
         comfyuiWorkflow: shot.comfyuiWorkflow,
         comfyLowMemory: shot.comfyLowMemory,
+        loras: shot.loras == null ? null : shot.loras.map((lora) => ({ ...lora })),
       };
     }),
   };
@@ -978,6 +1013,7 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
       chainTrimStartFrames: doc.chainTrimStartFrames,
       evenColour: doc.evenColour,
       smoothFps: doc.smoothFps,
+      loras: doc.loras,
       outputFps: doc.output.fps,
       outputWidth: doc.output.width,
       outputHeight: doc.output.height,
@@ -1007,6 +1043,7 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
         comfyLowMemory: shot.comfyLowMemory,
         chainFromPrevious: shot.chainFromPrevious,
         chainFrameBack: shot.chainFrameBack,
+        loras: shot.loras,
       });
       updateShot(created.id, {
         enabled: shot.enabled,

@@ -77,6 +77,21 @@ export function ComfyReadinessPanel(props: {
               </div>
             );
           })}
+          {(report.loraIssues?.length ?? 0) > 0 && (
+            <div className="rounded-lg border border-rose-400/40 bg-rose-500/10 px-2.5 py-2">
+              <p className="text-[11px] leading-relaxed text-white">LoRAs</p>
+              {report.loraIssues?.map((issue) => (
+                <p key={`${issue.filename ?? ""}:${issue.nextStep}`} className="mt-1 text-[11px] leading-relaxed text-rose-50">
+                  {issue.nextStep}
+                </p>
+              ))}
+            </div>
+          )}
+          {(report.loraNames?.length ?? 0) > 0 && (report.loraIssues?.length ?? 0) === 0 && (
+            <p className="text-[11px] leading-relaxed text-[var(--muted)]">
+              Every requested LoRA file is in LoraLoaderModelOnly lora_name.
+            </p>
+          )}
         </>
       )}
     </div>

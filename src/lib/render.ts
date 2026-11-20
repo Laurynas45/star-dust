@@ -5,6 +5,7 @@ import { chainProviderNote, planChain, previousShot } from "./continuity";
 import { creditEstimate, deductCredits } from "./credits";
 import { buildEstimate, estimateRenderAll, quoteRun, shotBill, withCredits } from "./cost";
 import { clipKeyForSeed, effectiveSeed, freshSeed, upstreamCutKey } from "./input-key";
+import { effectiveLoras, shouldInjectLoras } from "./loras";
 import {
   CLOUD_RISK_NOTE,
   LOW_MEMORY_MARK,
@@ -38,6 +39,8 @@ import {
   CostEstimate,
   CreditEstimate,
   ComfyGraphId,
+  LoraRef,
+  isComfyWorkflowId,
   isCustomGraphId,
   Job,
   HuntSeedCount,
@@ -219,26 +222,54 @@ function notedComfy<T extends { workflow: ComfyGraphId; lowMemory: boolean }>(ch
   return { ...choice, custom: describeCustomGraph(choice.workflow) };
 }
 
-function workflowsOf(shots: Shot[]): ComfyGraphId[] {
+export type ComfyQueueGate = {
+  workflows: ComfyGraphId[];
+  loras: LoraRef[];
+};
+
+function gateOf(shots: Shot[]): ComfyQueueGate {
   const settings = getSettings();
   const ids: ComfyGraphId[] = [];
+  const loras: LoraRef[] = [];
+  const seenLoras = new Set<string>();
   for (const shot of shots) {
-    const id = resolveComfyChoice({
-      settings,
-      project: getProject(shot.projectId),
-      shot,
-    }).workflow;
+    const project = getProject(shot.projectId);
+    const id = resolveComfyChoice({ settings, project, shot }).workflow;
     if (!ids.includes(id)) ids.push(id);
+    if (!project || !shouldInjectLoras(id)) continue;
+    for (const lora of effectiveLoras(project, shot)) {
+      if (seenLoras.has(lora.name)) continue;
+      seenLoras.add(lora.name);
+      loras.push(lora);
+    }
   }
-  return ids;
+  return { workflows: ids, loras };
+}
+
+/** LoRA files a project page should check. Empty when none of the graphs would load them. */
+export function lorasForProjectCheck(projectId: string): LoraRef[] {
+  const project = getProject(projectId);
+  if (!project) return [];
+  const settings = getSettings();
+  const shots = listShots(projectId);
+  if (shots.length === 0) {
+    const id = resolveComfyChoice({ settings, project }).workflow;
+    if (!isComfyWorkflowId(id) || !shouldInjectLoras(id)) return [];
+    return project.loras.map((lora) => ({ ...lora }));
+  }
+  return gateOf(shots).loras;
+}
+
+function emptyGate(): ComfyQueueGate {
+  return { workflows: [], loras: [] };
 }
 
 /** Workflows a ComfyUI Render all would queue. Mock and a fully reused list return none. */
-export function comfyWorkflowsBeforeRenderAll(projectId: string): ComfyGraphId[] {
+export function comfyGateBeforeRenderAll(projectId: string): ComfyQueueGate {
   const settings = getSettings();
-  if (settings.provider !== "comfyui") return [];
+  if (settings.provider !== "comfyui") return emptyGate();
   const project = getProject(projectId);
-  if (!project) return [];
+  if (!project) return emptyGate();
   const plan = projectRenderPlan(
     listShots(projectId),
     listJobs(projectId),
@@ -246,18 +277,22 @@ export function comfyWorkflowsBeforeRenderAll(projectId: string): ComfyGraphId[]
     (shot) => modelForShot(shot, settings.provider, settings),
     project.styleBase
   );
-  return workflowsOf(plan.filter((item) => item.action === "run").map((item) => item.shot));
+  return gateOf(plan.filter((item) => item.action === "run").map((item) => item.shot));
 }
 
-export function comfyWorkflowsBeforeRenderShot(
+export function comfyWorkflowsBeforeRenderAll(projectId: string): ComfyGraphId[] {
+  return comfyGateBeforeRenderAll(projectId).workflows;
+}
+
+export function comfyGateBeforeRenderShot(
   shotId: string,
   opts?: { force?: boolean; confirmApproved?: boolean }
-): ComfyGraphId[] {
+): ComfyQueueGate {
   const settings = getSettings();
-  if (settings.provider !== "comfyui") return [];
+  if (settings.provider !== "comfyui") return emptyGate();
   const shot = getShot(shotId);
-  if (!shot) return [];
-  if (shot.approvedJobId && !opts?.confirmApproved) return [];
+  if (!shot) return emptyGate();
+  if (shot.approvedJobId && !opts?.confirmApproved) return emptyGate();
   const force = Boolean(opts?.force || opts?.confirmApproved);
   const decision = classifyShot(
     shot,
@@ -265,22 +300,33 @@ export function comfyWorkflowsBeforeRenderShot(
     settings.provider,
     modelForShot(shot, settings.provider, settings)
   );
-  if (decision.action === "skip" && (decision.reason === "inflight" || !force)) return [];
-  return workflowsOf([shot]);
+  if (decision.action === "skip" && (decision.reason === "inflight" || !force)) return emptyGate();
+  return gateOf([shot]);
+}
+
+export function comfyWorkflowsBeforeRenderShot(
+  shotId: string,
+  opts?: { force?: boolean; confirmApproved?: boolean }
+): ComfyGraphId[] {
+  return comfyGateBeforeRenderShot(shotId, opts).workflows;
+}
+
+export function comfyGateBeforeRetake(shotId: string, confirmApproved: boolean): ComfyQueueGate {
+  const settings = getSettings();
+  if (settings.provider !== "comfyui") return emptyGate();
+  const shot = getShot(shotId);
+  if (!shot || shot.lockedJobId) return emptyGate();
+  if (shot.approvedJobId && !confirmApproved) return emptyGate();
+  return gateOf(retakeChain(shotId) ?? []);
 }
 
 export function comfyWorkflowsBeforeRetake(shotId: string, confirmApproved: boolean): ComfyGraphId[] {
-  const settings = getSettings();
-  if (settings.provider !== "comfyui") return [];
-  const shot = getShot(shotId);
-  if (!shot || shot.lockedJobId) return [];
-  if (shot.approvedJobId && !confirmApproved) return [];
-  return workflowsOf(retakeChain(shotId) ?? []);
+  return comfyGateBeforeRetake(shotId, confirmApproved).workflows;
 }
 
-export function comfyWorkflowsBeforeRetakeAll(projectId: string): ComfyGraphId[] {
+export function comfyGateBeforeRetakeAll(projectId: string): ComfyQueueGate {
   const settings = getSettings();
-  if (settings.provider !== "comfyui") return [];
+  if (settings.provider !== "comfyui") return emptyGate();
   const jobs = listJobs(projectId);
   const shots = listShots(projectId).filter((shot) => {
     if (shot.lockedJobId || shot.approvedJobId) return false;
@@ -288,27 +334,39 @@ export function comfyWorkflowsBeforeRetakeAll(projectId: string): ComfyGraphId[]
     const decision = classifyShot(shot, jobs, settings.provider, modelForShot(shot, settings.provider, settings));
     return decision.action !== "skip";
   });
-  return workflowsOf(shots);
+  return gateOf(shots);
+}
+
+export function comfyWorkflowsBeforeRetakeAll(projectId: string): ComfyGraphId[] {
+  return comfyGateBeforeRetakeAll(projectId).workflows;
+}
+
+export function comfyGateBeforeHunt(shotId: string, confirmApproved: boolean): ComfyQueueGate {
+  const settings = getSettings();
+  if (settings.provider !== "comfyui") return emptyGate();
+  const shot = getShot(shotId);
+  if (!shot || shot.lockedJobId) return emptyGate();
+  if (shot.approvedJobId && !confirmApproved) return emptyGate();
+  return gateOf([shot]);
 }
 
 export function comfyWorkflowsBeforeHunt(shotId: string, confirmApproved: boolean): ComfyGraphId[] {
+  return comfyGateBeforeHunt(shotId, confirmApproved).workflows;
+}
+
+export function comfyGateBeforeRetry(job: Job): ComfyQueueGate {
+  if (job.provider !== "comfyui") return emptyGate();
+  if (job.status === "queued" || job.status === "running") return emptyGate();
+  const named = comfyWorkflowFromModelName(job.modelName);
   const settings = getSettings();
-  if (settings.provider !== "comfyui") return [];
-  const shot = getShot(shotId);
-  if (!shot || shot.lockedJobId) return [];
-  if (shot.approvedJobId && !confirmApproved) return [];
-  return workflowsOf([shot]);
+  const shot = job.shotId ? getShot(job.shotId) : undefined;
+  if (!shot) return { workflows: [named ?? settings.comfyuiWorkflow], loras: [] };
+  if (named) return gateOf([{ ...shot, comfyuiWorkflow: named }]);
+  return gateOf([shot]);
 }
 
 export function comfyWorkflowsBeforeRetry(job: Job): ComfyGraphId[] {
-  if (job.provider !== "comfyui") return [];
-  if (job.status === "queued" || job.status === "running") return [];
-  const named = comfyWorkflowFromModelName(job.modelName);
-  if (named) return [named];
-  const settings = getSettings();
-  const shot = job.shotId ? getShot(job.shotId) : undefined;
-  if (!shot) return [settings.comfyuiWorkflow];
-  return workflowsOf([shot]);
+  return comfyGateBeforeRetry(job).workflows;
 }
 
 function modelForShot(shot: Shot, provider: ProviderId, settings: AppSettings): string {

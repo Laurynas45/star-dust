@@ -7,6 +7,8 @@ import { ClipFlagNote } from "@/components/ClipFlagNote";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
 import { ComfyReadinessPanel, ShotComfyNote } from "@/components/ComfyReadinessPanel";
+import { LoraEditor } from "@/components/LoraEditor";
+import { shouldInjectLoras } from "@/lib/loras";
 import type { ComfyServerCheck } from "@/lib/comfy-readiness";
 import type { PreflightReport } from "@/lib/preflight";
 import { chainStaleShotIds } from "@/lib/chain-stale";
@@ -53,6 +55,7 @@ import {
   SEED_PIN_NOTE,
   HuntSeedCount,
   Job,
+  LoraRef,
   MAX_SHOT_SECONDS,
   MIN_SHOT_SECONDS,
   MOTION_PRESETS,
@@ -365,9 +368,9 @@ export default function ProjectStudioPage() {
   const comfyKey = useMemo(() => {
     if (!detail || provider !== "comfyui") return "";
     const shotKey = detail.shots
-      .map((shot) => `${shot.id}:${shot.comfyuiWorkflow ?? ""}`)
+      .map((shot) => `${shot.id}:${shot.comfyuiWorkflow ?? ""}:${loraKey(shot.loras)}`)
       .join("|");
-    return `${settings?.comfyuiWorkflow ?? ""}:${detail.project.comfyuiWorkflow ?? ""}:${shotKey}`;
+    return `${settings?.comfyuiWorkflow ?? ""}:${detail.project.comfyuiWorkflow ?? ""}:${loraKey(detail.project.loras)}:${shotKey}`;
   }, [detail, provider, settings?.comfyuiWorkflow]);
 
   useEffect(() => {
@@ -894,6 +897,7 @@ export default function ProjectStudioPage() {
     captionMode?: CaptionMode | null;
     evenColour?: boolean;
     smoothFps?: boolean;
+    loras?: LoraRef[];
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -926,6 +930,7 @@ export default function ProjectStudioPage() {
       seed?: number | null;
       seedPinned?: boolean;
       lockedJobId?: string | null;
+      loras?: LoraRef[] | null;
     }
   ) {
     const res = await fetch(`/api/projects/${projectId}/shots/${shotId}`, {
@@ -1654,6 +1659,15 @@ export default function ProjectStudioPage() {
             A shot can override this. The server is the URL in Providers, or COMFYUI_BASE_URL if that
             is set. This is not a node editor.
           </p>
+          <LoraEditor
+            loras={project.loras}
+            missingNames={missingLoraNames(comfyCheck)}
+            inactiveNote={loraInactiveNote(projectChoice.workflow)}
+            hint="Files go in ComfyUI/models/loras. The name is the file name ComfyUI lists. A shot list replaces this one. A speed LoRA usually needs fewer steps and CFG 1. Star Dust does not change steps or CFG."
+            onChange={(next) => {
+              if (next) void saveProjectPatch({ loras: next });
+            }}
+          />
         </div>
       )}
       {provider === "mock" && (
@@ -2421,6 +2435,17 @@ export default function ProjectStudioPage() {
                         onChange={(patch) => void saveShotPatch(shot.id, patch)}
                       />
                     )}
+                    {provider === "comfyui" && settings && (
+                      <LoraEditor
+                        loras={shot.loras ?? []}
+                        allowInherit
+                        inherited={shot.loras == null}
+                        projectLoras={project.loras}
+                        missingNames={missingLoraNames(comfyCheck)}
+                        inactiveNote={loraInactiveNote(resolveComfyChoice({ settings, project, shot }).workflow)}
+                        onChange={(next) => void saveShotPatch(shot.id, { loras: next })}
+                      />
+                    )}
                     {shot.approvedJobId && (
                       <div className="mt-3 space-y-2">
                         <p
@@ -3167,4 +3192,23 @@ function ShotWorkflowFields(props: {
       </div>
     </div>
   );
+}
+
+function loraKey(loras: LoraRef[] | null | undefined): string {
+  if (!loras) return "";
+  return loras.map((lora) => `${lora.name}@${lora.strength}`).join(",");
+}
+
+function missingLoraNames(report: ComfyServerCheck | null): string[] {
+  return (report?.loraIssues ?? []).map((issue) => issue.filename).filter((name): name is string => Boolean(name));
+}
+
+function loraInactiveNote(workflow: string): string | undefined {
+  if (!shouldInjectLoras(workflow)) {
+    if (workflow === "svd") {
+      return "The SVD graph uses ImageOnlyCheckpointLoader, so this list is not loaded.";
+    }
+    return "A custom graph is not changed. This list is not loaded.";
+  }
+  return undefined;
 }

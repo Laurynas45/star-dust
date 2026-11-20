@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { enqueueJob } from "@/lib/providers";
 import { guardComfyWorkflows } from "@/lib/providers/comfyui";
-import { comfyWorkflowsBeforeRenderShot, renderShot } from "@/lib/render";
+import { comfyGateBeforeRenderShot, renderShot } from "@/lib/render";
 import { getShot } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -20,9 +20,8 @@ export async function POST(
     typeof body.acknowledgeModel === "string" ? body.acknowledgeModel : undefined;
   const force = body.force === true;
   const confirmApproved = body.confirmApproved === true;
-  const block = await guardComfyWorkflows(
-    comfyWorkflowsBeforeRenderShot(shot.id, { force, confirmApproved })
-  );
+  const gate = comfyGateBeforeRenderShot(shot.id, { force, confirmApproved });
+  const block = await guardComfyWorkflows(gate.workflows, gate.loras);
   if (block) return NextResponse.json({ ok: false, ...block }, { status: block.status });
   const result = renderShot(shot.id, { acknowledgeModel, force, confirmApproved });
   if (!result.ok) return NextResponse.json(result, { status: result.status });

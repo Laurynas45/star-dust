@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { effectiveSeed, normalizeSeed } from "@/lib/input-key";
+import { parseLoraList } from "@/lib/loras";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getJob, getProject, getShot, updateShot } from "@/lib/storage";
-import { ComfyGraphId, SeamFadeUnit, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, clampSeamFadeFrames, effectivePrompt, isComfyGraphId, isSeamFadeUnit, presetById } from "@/lib/types";
+import { ComfyGraphId, LoraRef, SeamFadeUnit, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, clampSeamFadeFrames, effectivePrompt, isComfyGraphId, isSeamFadeUnit, presetById } from "@/lib/types";
 
 function workflowField(value: unknown): ComfyGraphId | null | undefined {
   if (value === null) return null;
@@ -86,6 +87,13 @@ export async function PATCH(
     let seedPinned: boolean | undefined;
     if (typeof body.seedPinned === "boolean") seedPinned = body.seedPinned;
     if (seedPinned === true && seed === undefined) seed = effectiveSeed(shot);
+    let loras: LoraRef[] | null | undefined;
+    if (body.loras === null) loras = null;
+    else if (body.loras !== undefined) {
+      const parsed = parseLoraList(body.loras, "loras");
+      if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+      loras = parsed.loras;
+    }
     let lockedJobId: string | null | undefined;
     if (body.lockedJobId === null) lockedJobId = null;
     else if (typeof body.lockedJobId === "string" && body.lockedJobId) {
@@ -119,6 +127,7 @@ export async function PATCH(
       seamFadeFrames: fadeFramesField(body.seamFadeFrames),
       evenColour: optionalBool(body.evenColour),
       enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
+      loras,
     });
     return NextResponse.json(updated);
   }

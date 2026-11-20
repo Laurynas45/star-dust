@@ -2745,6 +2745,297 @@ async function checkCustomGraphs() {
 }
 
 
+async function checkLoras() {
+  const loraLib = await import("../src/lib/loras");
+  const graphLib = await import("../src/lib/lora-graph");
+  const readiness = await import("../src/lib/comfy-readiness");
+  const run = await import("../src/lib/comfy-readiness-run");
+  const keys = await import("../src/lib/input-key");
+  const shotlist = await import("../src/lib/shotlist");
+  const storage = await import("../src/lib/storage");
+
+  const empty = loraLib.parseLoraList([], "loras");
+  assert(empty.ok && empty.loras.length === 0, "an empty LoRA list is valid");
+  const implied = loraLib.parseLoraList([{ name: "style.safetensors" }], "loras");
+  assert(implied.ok && implied.loras[0]?.strength === 1, "a missing strength defaults to 1");
+  const bounds = loraLib.parseLoraList([{ name: "style.safetensors", strength: -2 }], "loras");
+  assert(bounds.ok && bounds.loras[0]?.strength === -2, "strength -2 is allowed");
+  const high = loraLib.parseLoraList([{ name: "style.safetensors", strength: 2.1 }], "loras");
+  assert(!high.ok && /range is -2 to 2/.test(high.ok ? "" : high.error), "strength above 2 is rejected");
+  const pathName = loraLib.parseLoraList([{ name: "../secret.safetensors", strength: 1 }], "loras");
+  assert(!pathName.ok && /LoRA folder/.test(pathName.ok ? "" : pathName.error), "a parent path is rejected");
+  const tooMany = loraLib.parseLoraList(
+    [1, 2, 3, 4, 5].map((index) => ({ name: `lora-${index}.safetensors`, strength: 1 })),
+    "loras"
+  );
+  assert(!tooMany.ok && /limit is 4/.test(tooMany.ok ? "" : tooMany.error), "a fifth LoRA is rejected");
+  const nested = loraLib.parseLoraList([{ name: "wan/style.safetensors", strength: 0.6 }], "loras");
+  assert(nested.ok, "a subfolder name is the name ComfyUI lists");
+  assert(
+    loraLib.effectiveLoras({ loras: [{ name: "project.safetensors", strength: 1 }] }, { loras: null })[0]?.name ===
+      "project.safetensors",
+    "a shot with no list uses the project list"
+  );
+  assert(
+    loraLib.effectiveLoras({ loras: [{ name: "project.safetensors", strength: 1 }] }, { loras: [] }).length === 0,
+    "an empty shot list replaces the project list"
+  );
+  assert(
+    loraLib.effectiveLoras(
+      { loras: [{ name: "project.safetensors", strength: 1 }] },
+      { loras: [{ name: "shot.safetensors", strength: 0.4 }] }
+    )[0]?.name === "shot.safetensors",
+    "a shot list replaces the project list"
+  );
+  assert(!loraLib.shouldInjectLoras("svd"), "SVD is not wrapped");
+  assert(!loraLib.shouldInjectLoras("custom:harbor"), "a custom graph is not wrapped");
+  for (const id of ["wan", "wan-flf", "ltx", "ltx25", "minimax-h3"] as const) {
+    assert(loraLib.shouldInjectLoras(id), `${id} loads LoRAs`);
+  }
+
+  const stack = [
+    { name: "lightx2v_4step.safetensors", strength: 1 },
+    { name: "wan/style.safetensors", strength: 0.6 },
+  ];
+  type Node = { class_type?: string; inputs?: Record<string, unknown>; _meta?: { title?: string } };
+  function chainFrom(workflow: Record<string, Node>, loaderId: string) {
+    const chain: { id: string; name: unknown; strength: unknown }[] = [];
+    let current = loaderId;
+    for (let step = 0; step < 8; step += 1) {
+      const nextId = Object.keys(workflow).find((id) => {
+        const model = workflow[id]?.inputs?.model;
+        return (
+          workflow[id]?.class_type === "LoraLoaderModelOnly" &&
+          Array.isArray(model) &&
+          model[0] === current &&
+          model[1] === 0
+        );
+      });
+      if (!nextId) break;
+      chain.push({
+        id: nextId,
+        name: workflow[nextId]?.inputs?.lora_name,
+        strength: workflow[nextId]?.inputs?.strength_model,
+      });
+      current = nextId;
+    }
+    return { chain, end: current };
+  }
+
+  for (const id of ["svd", "wan", "wan-flf", "ltx", "ltx25", "minimax-h3"] as const) {
+    const file = run.loadShippedWorkflow(id) as Record<string, Node>;
+    const untouched = graphLib.injectModelLoras(file, []);
+    assert(untouched === file, `${id} with no LoRAs is the same object`);
+    assert(JSON.stringify(untouched) === JSON.stringify(file), `${id} with no LoRAs is byte-identical`);
+    const injected = graphLib.injectModelLoras(file, stack);
+    if (!loraLib.shouldInjectLoras(id)) {
+      assert(injected === file, `${id} stays unchanged when LoRAs are set`);
+      continue;
+    }
+    const loaders = Object.entries(file).filter(
+      ([, node]) => node.class_type === "UNETLoader" || node.class_type === "CheckpointLoaderSimple"
+    );
+    const loraNodes = Object.values(injected).filter((node) => node.class_type === "LoraLoaderModelOnly");
+    assert(loraNodes.length === loaders.length * stack.length, `${id} stacks both LoRAs on each diffusion loader`);
+    for (const [loaderId] of loaders) {
+      const chained = chainFrom(injected, loaderId);
+      assert(chained.chain.length === stack.length, `${id} loader ${loaderId} has the full stack`);
+      assert(chained.chain[0]?.name === stack[0].name && chained.chain[0]?.strength === 1, `${id} first LoRA`);
+      assert(chained.chain[1]?.name === stack[1].name && chained.chain[1]?.strength === 0.6, `${id} second LoRA`);
+      const stillLinked = Object.values(injected).some((node) =>
+        Object.values(node.inputs ?? {}).some(
+          (value) =>
+            Array.isArray(value) &&
+            value[0] === loaderId &&
+            value[1] === 0 &&
+            node.class_type !== "LoraLoaderModelOnly"
+        )
+      );
+      assert(!stillLinked, `${id} loader ${loaderId} MODEL output is only read by the first LoRA`);
+    }
+    for (const [nodeId, node] of Object.entries(file)) {
+      const next = injected[nodeId];
+      if (!node.inputs || !next?.inputs) continue;
+      if ("steps" in node.inputs) assert(next.inputs.steps === node.inputs.steps, `${id} ${nodeId} steps stay`);
+      if ("cfg" in node.inputs) assert(next.inputs.cfg === node.inputs.cfg, `${id} ${nodeId} cfg stays`);
+      if ("video_cfg" in node.inputs) {
+        assert(next.inputs.video_cfg === node.inputs.video_cfg, `${id} ${nodeId} video cfg stays`);
+      }
+    }
+    if (id === "wan-flf") {
+      const high = chainFrom(injected, "1");
+      const low = chainFrom(injected, "2");
+      assert(high.end !== low.end, "Wan 14B high and low noise each get a chain");
+      const highNode = Object.values(injected).find((node) => node._meta?.title === "High-noise sampling");
+      const lowNode = Object.values(injected).find((node) => node._meta?.title === "Low-noise sampling");
+      assert(
+        Array.isArray(highNode?.inputs?.model) && highNode.inputs.model[0] === high.end,
+        "the high-noise sampler reads the high-noise LoRA chain"
+      );
+      assert(
+        Array.isArray(lowNode?.inputs?.model) && lowNode.inputs.model[0] === low.end,
+        "the low-noise sampler reads the low-noise LoRA chain"
+      );
+    }
+    if (id === "ltx") {
+      const vaeStill = Object.values(injected).some((node) =>
+        Object.values(node.inputs ?? {}).some((value) => Array.isArray(value) && value[0] === "1" && value[1] === 2)
+      );
+      assert(vaeStill, "LTX keeps the checkpoint VAE output on the checkpoint");
+    }
+    if (id === "ltx25" || id === "minimax-h3") {
+      const end = chainFrom(injected, "1").end;
+      const readers = Object.values(injected).filter((node) =>
+        Object.values(node.inputs ?? {}).some(
+          (value) => Array.isArray(value) && value[0] === end && value[1] === 0 && node.class_type !== "LoraLoaderModelOnly"
+        )
+      );
+      assert(readers.length >= 2, `${id} sends the LoRA stack to every model consumer`);
+    }
+  }
+
+  const fixture = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), "fixtures", "comfyui", "object-info-loras.json"), "utf8")
+  ) as unknown;
+  const present = readiness.checkLoraFiles(fixture, [{ name: "lightx2v_4step.safetensors", strength: 1 }]);
+  assert(present.ok && !present.blocksQueue, "a listed LoRA file passes the fixture");
+  const absent = readiness.checkLoraFiles(fixture, [
+    { name: "lightx2v_4step.safetensors", strength: 1 },
+    { name: "missing.safetensors", strength: 1 },
+  ]);
+  assert(!absent.ok && absent.blocksQueue, "a missing LoRA file blocks the queue");
+  assert(/missing\.safetensors/.test(absent.missing[0]?.nextStep ?? ""), "the missing file is named");
+  assert(/models\/loras/.test(absent.missing[0]?.nextStep ?? ""), "the missing file names models/loras");
+  assert(/does not start/.test(absent.missing[0]?.nextStep ?? ""), "the missing file says the render does not start");
+  const noNode = readiness.checkLoraFiles({}, [{ name: "lightx2v_4step.safetensors", strength: 1 }]);
+  assert(!noNode.ok && /LoraLoaderModelOnly/.test(noNode.missing[0]?.nextStep ?? ""), "a missing LoRA node is reported");
+  assert(readiness.checkLoraFiles({}, []).ok, "no requested LoRA does not require the node");
+  const combo = {
+    LoraLoaderModelOnly: {
+      input: { required: { lora_name: ["COMBO", { options: ["only.safetensors"] }] } },
+    },
+  };
+  assert(
+    readiness.checkLoraFiles(combo, [{ name: "only.safetensors", strength: 1 }]).ok,
+    "a COMBO lora_name list is accepted"
+  );
+  assert(
+    !readiness.checkLoraFiles(combo, [{ name: "other.safetensors", strength: 1 }]).ok,
+    "a COMBO list still rejects a missing file"
+  );
+
+  const previous = storage.getSettings();
+  storage.saveSettings({ provider: "comfyui", comfyuiWorkflow: "wan" });
+  const keyProject = storage.createProject("LoRA keys", "");
+  const keyStill = storage.getProject(keyProject.id);
+  assert(keyStill?.loras.length === 0, "a new project has no LoRAs");
+  const keyShot = storage.createShot({
+    projectId: keyProject.id,
+    prompt: "A lantern.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: "uploads/missing.png",
+  });
+  assert(keyShot.loras === null, "a new shot inherits the project LoRAs");
+  const beforeKey = keys.desiredClipKey(keyShot);
+  storage.updateProject(keyProject.id, { loras: [{ name: "style.safetensors", strength: 1 }] });
+  const withProject = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  assert(beforeKey !== withProject, "a project LoRA changes the ComfyUI content key");
+  storage.updateShot(keyShot.id, { loras: [] });
+  const cleared = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  assert(cleared === beforeKey, "an empty shot list matches a render with no LoRAs");
+  storage.saveSettings({ provider: "mock", comfyuiWorkflow: "svd" });
+  storage.updateShot(keyShot.id, { loras: null });
+  const mockWithout = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  storage.updateProject(keyProject.id, { loras: [{ name: "style.safetensors", strength: 1 }] });
+  const mockWith = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  assert(mockWithout === mockWith, "Mock ignores LoRAs in the content key");
+  storage.saveSettings({
+    provider: previous.provider,
+    comfyuiWorkflow: previous.comfyuiWorkflow,
+    comfyLowMemory: previous.comfyLowMemory,
+  });
+
+  const still = solidPng(dataDir, "lora-still.png", "teal");
+  const baseShot = {
+    prompt: "A teal card.",
+    durationSec: 2,
+    preset: "slow-zoom-in",
+    enabled: true,
+    seed: 3,
+    seedPinned: false,
+    images: [{ file: "stills/lora.png", role: "start" }],
+    chainFromPrevious: false,
+    chainFrameBack: 0,
+    chainTrimStartFrames: null,
+    transition: null,
+    evenColour: null,
+    comfyuiWorkflow: null,
+    comfyLowMemory: null,
+  };
+  const doc = {
+    schema: "stardust.shotlist/1",
+    name: "LoRA list",
+    description: "",
+    styleBase: "",
+    provider: "mock",
+    comfyuiWorkflow: null,
+    comfyLowMemory: null,
+    output: { fps: null, width: null, height: null },
+    transition: { mode: "cut", fadeSec: 0.5, fadeUnit: "seconds", fadeFrames: 4 },
+    chainTrimStartFrames: 1,
+    evenColour: false,
+    smoothFps: false,
+    loras: [{ name: "project-style.safetensors", strength: 0.8 }],
+    shots: [
+      { ...baseShot, loras: [{ name: "shot-motion.safetensors", strength: -1 }] },
+      { ...baseShot, prompt: "A second card.", loras: null },
+    ],
+  };
+  const files = new Map([["stills/lora.png", still]]);
+  const imported = shotlist.importShotList({ json: JSON.stringify(doc), files, source: "json" });
+  assert(imported.ok, `LoRA shot list import failed: ${imported.ok ? "" : imported.errors.join(" | ")}`);
+  if (!imported.ok) throw new Error("unreachable");
+  assert(imported.project.loras[0]?.name === "project-style.safetensors", "import stores the project LoRA");
+  const importedShots = storage.listShots(imported.project.id);
+  assert(importedShots[0]?.loras?.[0]?.name === "shot-motion.safetensors", "import stores the shot LoRA");
+  assert(importedShots[0]?.loras?.[0]?.strength === -1, "import stores the shot strength");
+  assert(importedShots[1]?.loras === null, "a null shot list inherits");
+  const exported = shotlist.renderSettingsOf(imported.project.id);
+  const again = shotlist.importShotList({
+    json: shotlist.shotListJson(shotlist.buildShotList(imported.project.id).document),
+    files: shotlist.buildShotList(imported.project.id).files,
+    source: "json",
+  });
+  assert(again.ok, `LoRA round trip failed: ${again.ok ? "" : again.errors.join(" | ")}`);
+  if (!again.ok) throw new Error("unreachable");
+  assert(
+    JSON.stringify(shotlist.renderSettingsOf(again.project.id)) === JSON.stringify(exported),
+    "export and import keep the LoRA lists"
+  );
+  const idsBefore = storage.listProjects().map((project) => project.id);
+  const bad = shotlist.importShotList({
+    json: JSON.stringify({ ...doc, loras: [{ name: "../no.safetensors", strength: 1 }] }),
+    files,
+    source: "json",
+  });
+  assert(!bad.ok, "a bad LoRA name is not imported");
+  if (bad.ok) throw new Error("unreachable");
+  assert(bad.errors.some((error) => /LoRA folder/.test(error)), `bad LoRA errors: ${bad.errors.join(" | ")}`);
+  assert(
+    JSON.stringify(storage.listProjects().map((project) => project.id)) === JSON.stringify(idsBefore),
+    "a bad LoRA list creates no project"
+  );
+  const oldDoc = { ...doc, shots: doc.shots.map((shot) => ({ ...shot })) };
+  delete (oldDoc as { loras?: unknown }).loras;
+  for (const shot of oldDoc.shots) delete (shot as { loras?: unknown }).loras;
+  const older = shotlist.importShotList({ json: JSON.stringify(oldDoc), files, source: "json" });
+  assert(older.ok, `an older shot list without LoRAs still imports: ${older.ok ? "" : older.errors.join(" | ")}`);
+  if (!older.ok) throw new Error("unreachable");
+  assert(older.project.loras.length === 0, "an omitted project list means none");
+  assert(storage.listShots(older.project.id).every((shot) => shot.loras === null), "an omitted shot list inherits");
+}
+
 async function main() {
   await checkPreflight();
   await checkComfyObjectInfo();
@@ -8084,14 +8375,27 @@ async function main() {
     "the locked estimate did not call fal"
   );
 
+  storage.updateProject(seedProject.id, {
+    loras: [{ name: "project-style.safetensors", strength: 0.8 }],
+  });
+  storage.updateShot(pinShot.id, { loras: [{ name: "shot-motion.safetensors", strength: 0.5 }] });
   storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
   const seedStitch = await stitch.stitchProject(seedProject.id);
   assert(fs.existsSync(storage.resolveDataPath(seedStitch.contactSheetPath)), "the stitch still writes a contact sheet");
   const seedManifest = JSON.parse(fs.readFileSync(storage.resolveDataPath(seedStitch.manifestPath), "utf8")) as {
-    shots: { shotId: string; seed: number | null }[];
+    shots: { shotId: string; seed: number | null; loras?: { name: string; strength: number }[] }[];
   };
   const pinEntry = seedManifest.shots.find((item) => item.shotId === pinShot.id);
   assert(pinEntry?.seed === 4242, "the stitch manifest records the pinned seed");
+  assert(
+    pinEntry?.loras?.[0]?.name === "shot-motion.safetensors" && pinEntry.loras[0].strength === 0.5,
+    "the stitch manifest records the shot LoRA next to the seed"
+  );
+  const lockEntry = seedManifest.shots.find((item) => item.shotId === lockShot.id);
+  assert(
+    lockEntry?.loras?.[0]?.name === "project-style.safetensors",
+    "a shot with no list uses the project LoRAs in the stitch manifest"
+  );
   const sheetLib = await import("../src/lib/contact-sheet");
   assert(
     sheetLib.contactLabelLines({
@@ -8109,6 +8413,10 @@ async function main() {
   assert(
     pinManifest?.seed === 4242 && pinManifest.seedPinned === true,
     "the edit manifest records the pinned seed"
+  );
+  assert(
+    pinManifest?.loras?.[0]?.name === "shot-motion.safetensors",
+    "the edit manifest records the shot LoRA next to the seed"
   );
   const { seedBackendNote } = await import("../src/lib/types");
   assert(/may ignore this seed/i.test(seedBackendNote("fal")), "fal says it may ignore the seed");
@@ -8548,6 +8856,7 @@ async function main() {
   assert(!/does not move|flagged clip|all black/.test(lookCli.stdout || ""), "a flat Mock clip is not flagged in CI");
 
   storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
+  await checkLoras();
   await checkComfyProgress();
 
   console.log("provider checks ok");
