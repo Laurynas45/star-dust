@@ -132,18 +132,22 @@ export function serverCheck(args: {
   httpStatus: number | null;
   detail: string;
   workflows: ComfyWorkflowCheck[];
+  loraNames?: string[];
+  loraIssues?: ComfyServerCheck["loraIssues"];
 }): ComfyServerCheck {
+  const loraBlock = (args.loraIssues?.length ?? 0) > 0;
   const check: ComfyServerCheck = {
     reachable: args.reachable,
     url: args.url,
     source: args.source,
     message: "",
     honesty: COMFY_CHECK_HONESTY,
-    blocksQueue: !args.reachable || args.workflows.some((workflow) => !workflow.ok),
+    blocksQueue: !args.reachable || args.workflows.some((workflow) => !workflow.ok) || loraBlock,
     timedOut: args.timedOut,
     httpStatus: args.httpStatus,
     detail: args.detail,
     workflows: args.workflows,
+    ...(args.loraNames ? { loraNames: args.loraNames, loraIssues: args.loraIssues ?? [] } : {}),
   };
   check.message = statusMessage(check, check.source !== "env");
   return check;

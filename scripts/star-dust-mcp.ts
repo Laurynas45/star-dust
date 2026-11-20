@@ -9,6 +9,7 @@ import path from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { parseLoraList } from "../src/lib/loras";
 import { COMFY_WORKFLOWS } from "../src/lib/provider-info";
 import {
   COMFY_WORKFLOW_IDS,
@@ -19,6 +20,7 @@ import {
   isComfyWorkflowId,
   isProviderId,
   type ComfyGraphId,
+  type LoraRef,
 } from "../src/lib/types";
 
 const DEFAULT_STUDIO_URL = "http://localhost:3000";
@@ -571,13 +573,20 @@ async function listBackends(client: StarDustClient): Promise<CallToolResult> {
 
 async function createProject(
   client: StarDustClient,
-  args: { name: string; description?: string | null }
+  args: { name: string; description?: string | null; loras?: LoraRef[] | null }
 ): Promise<CallToolResult> {
   const name = args.name.trim();
   if (!name) return failResult("Project name is required.");
+  let loras: LoraRef[] | undefined;
+  if (args.loras != null) {
+    const parsed = parseLoraList(args.loras, "loras");
+    if (!parsed.ok) return failResult(parsed.error);
+    loras = parsed.loras;
+  }
   const result = await client.postJson("/api/projects", {
     name,
     description: args.description?.trim() ?? "",
+    ...(loras ? { loras } : {}),
   });
   if (!result.ok || asRecord(result.json)?.ok === false) return client.fail(result);
   const project = asRecord(result.json);
@@ -587,6 +596,7 @@ async function createProject(
     id,
     name: text(project?.name) || name,
     description: typeof project?.description === "string" ? project.description : "",
+    loras: Array.isArray(project?.loras) ? project.loras : loras ?? [],
   });
 }
 
@@ -670,6 +680,7 @@ type AddShotArgs = {
   comfyWorkflow?: string | null;
   comfyLowMemory?: boolean | null;
   chainFromPrevious?: boolean | null;
+  loras?: LoraRef[] | null;
 };
 
 async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallToolResult> {
@@ -692,6 +703,12 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
   if (workflow && !isComfyGraphId(workflow)) {
     return failResult(`comfyWorkflow must be ${GRAPH_LIST}.`);
   }
+  let loras: LoraRef[] | undefined;
+  if (args.loras != null) {
+    const parsed = parseLoraList(args.loras, "loras");
+    if (!parsed.ok) return failResult(parsed.error);
+    loras = parsed.loras;
+  }
   const start = await loadStill(client, args.imagePath, args.imageUrl, "a start image");
   if (!start) return failResult("Pass imagePath (a local file) or imageUrl (http or https).");
   const end = await loadStill(client, args.endImagePath, args.endImageUrl, "an end image");
@@ -710,6 +727,7 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
   if (workflow) form.append("comfyuiWorkflow", workflow);
   if (typeof args.comfyLowMemory === "boolean") form.append("comfyLowMemory", args.comfyLowMemory ? "true" : "false");
   if (args.chainFromPrevious === true) form.append("chainFromPrevious", "1");
+  if (loras) form.append("loras", JSON.stringify(loras));
 
   const result = await client.postForm(`/api/projects/${encodeURIComponent(projectId)}/shots`, form);
   if (!result.ok || asRecord(result.json)?.ok === false) {
@@ -737,6 +755,7 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
     comfyLowMemory: typeof shot?.comfyLowMemory === "boolean" ? shot.comfyLowMemory : args.comfyLowMemory ?? null,
     startImagePath: text(shot?.startImagePath) || null,
     endImagePath: text(shot?.endImagePath) || null,
+    loras: Array.isArray(shot?.loras) ? shot.loras : loras ?? null,
   });
 }
 
@@ -961,10 +980,15 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
     "create_project",
     {
       title: "Create project",
-      description: "Create a Star Dust project with POST /api/projects. Returns the project id for add_shot and start_render.",
+      description:
+        "Create a Star Dust project with POST /api/projects. Returns the project id for add_shot and start_render. loras is an optional list of { name, strength } for ComfyUI. At most 4. strength defaults to 1 and must be from -2 to 2. name is the file name ComfyUI lists.",
       inputSchema: {
         name: z.string().describe("Project name."),
         description: z.string().optional().describe("Short description. Optional."),
+        loras: z
+          .array(z.object({ name: z.string(), strength: z.number().optional() }).strict())
+          .optional()
+          .describe("Optional ComfyUI LoRAs. name is the file name ComfyUI lists. strength defaults to 1, from -2 to 2. At most 4."),
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
@@ -975,7 +999,7 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
     "add_shot",
     {
       title: "Add shot",
-      description: `Add one shot. The still is uploaded to POST /api/projects/{id}/shots, so the server stores it and runs its safety check. Pass imagePath (a local file) or imageUrl (http or https). durationSec is ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. presetId is ${PRESET_LIST}. provider sets the studio provider the same way the Providers page does, and the next render uses it. comfyWorkflow (${GRAPH_LIST}) and comfyLowMemory are stored on the shot. The first shot cannot chain from a previous shot. Keys, credits, the licence gate, and ComfyUI readiness are still enforced when you render.`,
+      description: `Add one shot. The still is uploaded to POST /api/projects/{id}/shots, so the server stores it and runs its safety check. Pass imagePath (a local file) or imageUrl (http or https). durationSec is ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. presetId is ${PRESET_LIST}. provider sets the studio provider the same way the Providers page does, and the next render uses it. comfyWorkflow (${GRAPH_LIST}) and comfyLowMemory are stored on the shot. loras is an optional list that replaces the project LoRA list. The first shot cannot chain from a previous shot. Keys, credits, the licence gate, and ComfyUI readiness are still enforced when you render.`,
       inputSchema: {
         projectId: z.string().describe("Project id from create_project."),
         prompt: z.string().describe("Shot prompt. The server refuses sexual content involving a minor."),
@@ -989,6 +1013,10 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
         comfyWorkflow: z.string().optional().describe(`ComfyUI graph on this shot: ${GRAPH_LIST}.`),
         comfyLowMemory: z.boolean().optional().describe("Use the graph's low-memory preset on this shot."),
         chainFromPrevious: z.boolean().optional().describe("When true, and this is not the first shot, the next take starts from the previous shot's last frame."),
+        loras: z
+          .array(z.object({ name: z.string(), strength: z.number().optional() }).strict())
+          .optional()
+          .describe("Optional ComfyUI LoRAs for this shot. Replaces the project list. name is the file name ComfyUI lists. strength defaults to 1, from -2 to 2. At most 4."),
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },

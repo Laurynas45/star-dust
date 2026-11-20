@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { parseLoraList } from "@/lib/loras";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { createShot, getProject, listShots } from "@/lib/storage";
-import { ComfyGraphId, clampChainFrameBack, clampDuration, effectivePrompt, isComfyGraphId, presetById } from "@/lib/types";
+import { ComfyGraphId, LoraRef, clampChainFrameBack, clampDuration, effectivePrompt, isComfyGraphId, presetById } from "@/lib/types";
 
 function formWorkflow(value: FormDataEntryValue | null): ComfyGraphId | null {
   if (isComfyGraphId(value)) return value;
@@ -37,6 +38,19 @@ export async function POST(
   const prompt = String(form.get("prompt") || "");
   if (!prompt.trim()) {
     return NextResponse.json({ error: "Prompt is required" }, { status: 400 });
+  }
+  let loras: LoraRef[] | null | undefined;
+  const loraField = form.get("loras");
+  if (typeof loraField === "string" && loraField.trim()) {
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(loraField);
+    } catch {
+      return NextResponse.json({ error: "loras must be a JSON list of { name, strength }." }, { status: 400 });
+    }
+    const parsed = parseLoraList(parsedJson, "loras");
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+    loras = parsed.loras;
   }
   const preset = presetById(String(form.get("presetId") || ""));
   const durationSec = clampDuration(Number(form.get("durationSec")), preset.durationSec);
@@ -90,6 +104,7 @@ export async function POST(
     comfyLowMemory: formFlag(form.get("comfyLowMemory")),
     chainFromPrevious: hasPrevious && form.get("chainFromPrevious") === "1",
     chainFrameBack: clampChainFrameBack(Number(form.get("chainFrameBack") || 0)),
+    loras,
   });
   return NextResponse.json(shot, { status: 201 });
 }

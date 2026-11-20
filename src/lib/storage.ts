@@ -14,6 +14,7 @@ import {
   EMPTY_RATES,
   Job,
   JobKind,
+  LoraRef,
   JobStatus,
   Project,
   ProviderId,
@@ -42,6 +43,7 @@ import {
   shotChainTrimFromStored,
 } from "./types";
 import { canonicalFps, evenDim, OUTPUT_DIM_MIN } from "./conform";
+import { decodeProjectLoras, decodeShotLoras, encodeProjectLoras, encodeShotLoras } from "./loras";
 
 type DB = Database.Database;
 
@@ -105,7 +107,8 @@ function openDatabase(): DB {
       captions_path TEXT,
       caption_mode TEXT,
       even_colour INTEGER NOT NULL DEFAULT 0,
-      smooth_fps INTEGER NOT NULL DEFAULT 0
+      smooth_fps INTEGER NOT NULL DEFAULT 0,
+      loras_json TEXT
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -138,7 +141,8 @@ function openDatabase(): DB {
       even_colour INTEGER,
       approved_job_id TEXT,
       approved_start_stamp TEXT,
-      approved_end_stamp TEXT
+      approved_end_stamp TEXT,
+      loras_json TEXT
     );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -398,6 +402,12 @@ function migrate(db: DB) {
   if (!hasColumn(db, "projects", "smooth_fps")) {
     db.exec("ALTER TABLE projects ADD COLUMN smooth_fps INTEGER NOT NULL DEFAULT 0");
   }
+  if (!hasColumn(db, "projects", "loras_json")) {
+    db.exec("ALTER TABLE projects ADD COLUMN loras_json TEXT");
+  }
+  if (!hasColumn(db, "shots", "loras_json")) {
+    db.exec("ALTER TABLE shots ADD COLUMN loras_json TEXT");
+  }
 }
 
 function seedSample(db: DB) {
@@ -510,6 +520,7 @@ function mapProject(row: Record<string, unknown>): Project {
     provider: isProviderId(row.shotlist_provider) ? row.shotlist_provider : null,
     evenColour: Number(row.even_colour) === 1,
     smoothFps: Number(row.smooth_fps) === 1,
+    loras: decodeProjectLoras(row.loras_json),
     ...trimFields(
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
@@ -642,6 +653,7 @@ function mapShot(row: Record<string, unknown>): Shot {
     seamFadeFrames: row.seam_fade_frames == null ? null : clampSeamFadeFrames(Number(row.seam_fade_frames)),
     evenColour:
       row.even_colour == null || row.even_colour === "" ? null : Number(row.even_colour) === 1,
+    loras: decodeShotLoras(row.loras_json),
     enabled: row.enabled == null ? true : Number(row.enabled) !== 0,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -739,7 +751,7 @@ export function getProject(id: string): Project | undefined {
   return row ? mapProject(row) : undefined;
 }
 
-export function createProject(name: string, description = ""): Project {
+export function createProject(name: string, description = "", loras: LoraRef[] = []): Project {
   const now = new Date().toISOString();
   const project: Project = {
     id: uuidv4(),
@@ -767,13 +779,15 @@ export function createProject(name: string, description = ""): Project {
     provider: null,
     evenColour: false,
     smoothFps: false,
+    loras,
   };
   getDb()
     .prepare(
-      `INSERT INTO projects (id, name, description, character_sheet_path, created_at, updated_at)
-       VALUES (?, ?, ?, NULL, ?, ?)`
+      `INSERT INTO projects (
+        id, name, description, character_sheet_path, created_at, updated_at, loras_json
+      ) VALUES (?, ?, ?, NULL, ?, ?, ?)`
     )
-    .run(project.id, project.name, project.description, now, now);
+    .run(project.id, project.name, project.description, now, now, encodeProjectLoras(loras));
   fs.mkdirSync(path.join(uploadsDir(), project.id), { recursive: true });
   fs.mkdirSync(path.join(outputsDir(), project.id), { recursive: true });
   return project;
@@ -806,6 +820,7 @@ export function updateProject(
       | "provider"
       | "evenColour"
       | "smoothFps"
+      | "loras"
     >
   > & {
     characterSheetPath?: string | null;
@@ -861,6 +876,7 @@ export function updateProject(
           : null,
     evenColour: patch.evenColour === undefined ? current.evenColour : patch.evenColour,
     smoothFps: patch.smoothFps === undefined ? current.smoothFps : patch.smoothFps,
+    loras: patch.loras === undefined ? current.loras : patch.loras,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -873,7 +889,7 @@ export function updateProject(
            output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
            music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
            captions_path = ?, caption_mode = ?, shotlist_provider = ?, even_colour = ?,
-           smooth_fps = ?
+           smooth_fps = ?, loras_json = ?
        WHERE id = ?`
     )
     .run(
@@ -903,6 +919,7 @@ export function updateProject(
       next.provider,
       next.evenColour ? 1 : 0,
       next.smoothFps ? 1 : 0,
+      encodeProjectLoras(next.loras),
       id
     );
   return getProject(id);
@@ -958,6 +975,7 @@ export function createShot(input: {
   comfyLowMemory?: boolean | null;
   chainFromPrevious?: boolean;
   chainFrameBack?: number;
+  loras?: LoraRef[] | null;
   id?: string;
 }): Shot {
   const now = new Date().toISOString();
@@ -978,6 +996,7 @@ export function createShot(input: {
     chainFromPrevious: Boolean(input.chainFromPrevious),
     chainFrameBack: clampChainFrameBack(input.chainFrameBack ?? 0),
     evenColour: null,
+    loras: input.loras === undefined ? null : input.loras,
     enabled: true,
     createdAt: now,
     updatedAt: now,
@@ -987,8 +1006,9 @@ export function createShot(input: {
       `INSERT INTO shots (
         id, project_id, position, prompt, preset_id, duration_sec,
         start_image_path, end_image_path, created_at, updated_at,
-        comfyui_workflow, comfy_low_memory, chain_from_previous, chain_frame_back
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        comfyui_workflow, comfy_low_memory, chain_from_previous, chain_frame_back,
+        loras_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       shot.id,
@@ -1004,7 +1024,8 @@ export function createShot(input: {
       shot.comfyuiWorkflow,
       shot.comfyLowMemory == null ? null : shot.comfyLowMemory ? 1 : 0,
       shot.chainFromPrevious ? 1 : 0,
-      shot.chainFrameBack
+      shot.chainFrameBack,
+      encodeShotLoras(shot.loras)
     );
   touchProject(shot.projectId);
   return shot;
@@ -1040,10 +1061,11 @@ export function updateShot(
         | "seed"
         | "seedPinned"
         | "lockedJobId"
+        | "loras"
       >,
       "seed" | "lockedJobId"
     >
-  > & { seed?: number | null; lockedJobId?: string | null }
+  > & { seed?: number | null; lockedJobId?: string | null; loras?: LoraRef[] | null }
 ): Shot | undefined {
   const current = getShot(id);
   if (!current) return undefined;
@@ -1113,6 +1135,7 @@ export function updateShot(
           ? null
           : clampSeamFadeFrames(patch.seamFadeFrames),
     evenColour: patch.evenColour === undefined ? current.evenColour ?? null : patch.evenColour,
+    loras: patch.loras === undefined ? current.loras : patch.loras,
     enabled: patch.enabled === undefined ? current.enabled !== false : patch.enabled,
     updatedAt: new Date().toISOString(),
   };
@@ -1123,7 +1146,7 @@ export function updateShot(
            end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?,
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
            seam_mode = ?, seam_fade_sec = ?, seam_fade_unit = ?, seam_fade_frames = ?,
-           even_colour = ?, enabled = ?, chain_frame_back = ?,
+           even_colour = ?, enabled = ?, loras_json = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
            chain_trim_start_frames = ?, seed = ?, seed_pinned = ?, locked_job_id = ?, updated_at = ?
        WHERE id = ?`
@@ -1145,6 +1168,7 @@ export function updateShot(
       next.seamFadeFrames,
       next.evenColour == null ? null : next.evenColour ? 1 : 0,
       next.enabled ? 1 : 0,
+      encodeShotLoras(next.loras),
       next.chainFrameBack,
       next.chainedFrameBack,
       next.chainedFrameRequest,

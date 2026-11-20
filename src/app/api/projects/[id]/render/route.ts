@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { enqueueJob } from "@/lib/providers";
 import { guardComfyWorkflows } from "@/lib/providers/comfyui";
-import { comfyWorkflowsBeforeRenderAll, renderAll } from "@/lib/render";
+import { comfyGateBeforeRenderAll, renderAll } from "@/lib/render";
 import { getProject } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -17,7 +17,8 @@ export async function POST(
   const body = await req.json().catch(() => ({}));
   const acknowledgeModel =
     typeof body.acknowledgeModel === "string" ? body.acknowledgeModel : undefined;
-  const block = await guardComfyWorkflows(comfyWorkflowsBeforeRenderAll(params.id));
+  const gate = comfyGateBeforeRenderAll(params.id);
+  const block = await guardComfyWorkflows(gate.workflows, gate.loras);
   if (block) return NextResponse.json({ ok: false, ...block }, { status: block.status });
   const result = renderAll(params.id, { acknowledgeModel });
   if (!result.ok) return NextResponse.json(result, { status: result.status });

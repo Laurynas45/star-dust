@@ -57,6 +57,15 @@ export function isProviderId(value: unknown): value is ProviderId {
   return value === "mock" || value === "fal" || value === "replicate" || value === "comfyui";
 }
 
+/**
+ * One ComfyUI LoRA, named the way LoraLoaderModelOnly lists the file.
+ * Strength defaults to 1. The stored range is -2 to 2. At most four per list.
+ */
+export interface LoraRef {
+  name: string;
+  strength: number;
+}
+
 export type JobStatus =
   | "queued"
   | "running"
@@ -115,6 +124,11 @@ export interface Project {
   outputWidth: number | null;
   /** Stitch height. Set with outputWidth. */
   outputHeight: number | null;
+  /**
+   * ComfyUI LoRAs for shots that do not set their own list.
+   * Empty means none. Not applied on Mock, fal, Replicate, SVD, or a custom graph.
+   */
+  loras: LoraRef[];
   /**
    * EBU R128 on the final file. Null means on only when a clip has audio.
    * Off when every clip is silent, even if this is true.
@@ -192,6 +206,11 @@ export interface Shot {
   comfyuiWorkflow?: ComfyGraphId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
+  /**
+   * Null uses the project LoRA list. An array replaces that list.
+   * An empty array means this shot loads no LoRA.
+   */
+  loras: LoraRef[] | null;
   /** When true, the next take starts from a frame near the end of the previous shot. */
   chainFromPrevious: boolean;
   /**

@@ -11,6 +11,7 @@ import { editRateNote, resolveConformTarget } from "./conform";
 import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
 import { joinOmissionWarning, type JoinOmission } from "./join";
 import { describeCustomGraph } from "./custom-workflow-files";
+import { effectiveLoras } from "./loras";
 import { COMFY_WORKFLOWS, comfyWorkflowFromModelName } from "./provider-info";
 import { isComfyWorkflowId, isCustomGraphId } from "./types";
 import { getProject, listJobs, listShots, resolveDataPath } from "./storage";
@@ -18,6 +19,7 @@ import { planStitchSeams } from "./stitch";
 import {
   Job,
   ProviderId,
+  LoraRef,
   Shot,
   chainFramePhrase,
   styleBaseText,
@@ -51,6 +53,8 @@ export interface TakeManifest {
   seed: number | null;
   /** True when the shot was pinned to this number. */
   seedPinned: boolean;
+  /** LoRAs the shot would send on a shipped ComfyUI graph. Empty means none. */
+  loras: LoraRef[];
   frames: number;
   fps: number;
   width: number;
@@ -298,6 +302,7 @@ function manifestFor(
     comfyuiWorkflowName: workflowName(job),
     seed: job.seed == null ? null : job.seed,
     seedPinned: Boolean(shot.seedPinned),
+    loras: effectiveLoras(getProject(shot.projectId) ?? { loras: [] }, shot),
     frames: info.frames,
     fps: roundFps(info.fps),
     width: info.width,

@@ -35,11 +35,14 @@ import {
 import {
   absoluteOutputPath,
   getJob,
+  getProject,
   getSettings,
+  getShot,
   resolveDataPath,
   updateJob,
 } from "../storage";
 import {
+  checkLoraFiles,
   fillMissingRequiredInputs,
   formatQueueRefusal,
   literalModelSlots,
@@ -47,6 +50,8 @@ import {
   toPublicCheck,
   type ComfyCheckSource,
 } from "../comfy-readiness";
+import { injectModelLoras } from "../lora-graph";
+import { effectiveLoras, shouldInjectLoras } from "../loras";
 import { assessWorkflows, prepareGraphChecks, serverCheck } from "../comfy-readiness-run";
 import {
   customEndMissingMessage,
@@ -55,7 +60,7 @@ import {
   type CustomGraph,
 } from "../custom-workflow";
 import { loadCustomGraphById } from "../custom-workflow-files";
-import { ComfyGraphId, isComfyWorkflowId, isCustomGraphId } from "../types";
+import { ComfyGraphId, LoraRef, isComfyWorkflowId, isCustomGraphId } from "../types";
 import {
   WAN_FPS,
   WAN_LOW_MAX_FRAMES,
@@ -679,6 +684,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   }
 
   const readiness = await checkComfyServer([plan.workflow], { base, source });
+  const requestedLoras = shouldInjectLoras(plan.workflow) ? lorasForJob(job) : [];
   // Stand-in servers used in tests do not expose /object_info. A real ComfyUI does.
   // The render API refuses a 404 before a job exists. Here, 404 keeps the older path.
   if (!(readiness.httpStatus === 404 && !readiness.reachable) && readiness.blocksQueue) {
@@ -689,6 +695,18 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
         closing: "The job was not left running. ComfyUI was not asked to run this graph.",
       })
     );
+  }
+  if (requestedLoras.length > 0 && readiness.reachable && readiness.objectInfo !== undefined) {
+    const loraCheck = checkLoraFiles(readiness.objectInfo, requestedLoras);
+    if (!loraCheck.ok) {
+      fail(
+        jobId,
+        [
+          ...loraCheck.missing.map((issue) => issue.nextStep),
+          "The job was not left running. ComfyUI was not asked to run this graph.",
+        ].join("\n")
+      );
+    }
   }
 
   const bytes = fs.readFileSync(inputAbs);
@@ -800,6 +818,8 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       height: plan.lowMemory ? SVD_LOW_FRAME.height : undefined,
     });
   }
+
+  if (requestedLoras.length > 0) workflow = injectModelLoras(workflow, requestedLoras);
 
   // Stand-in servers used in tests do not expose /object_info. Leave the graph alone then.
   // A real ComfyUI lists required inputs. Omitted ones fail validation, and the server does not fill defaults.
@@ -1048,9 +1068,18 @@ export async function fetchComfyObjectInfo(base: string): Promise<ComfyObjectInf
   }
 }
 
+function lorasForJob(job: { projectId: string; shotId?: string }): LoraRef[] {
+  if (!job.shotId) return [];
+  const shot = getShot(job.shotId);
+  const project = getProject(job.projectId);
+  if (!shot || !project) return [];
+  return effectiveLoras(project, shot);
+}
+
 export async function checkComfyServer(
   ids: readonly ComfyGraphId[],
-  override?: { base: string; source: ComfyCheckSource }
+  override?: { base: string; source: ComfyCheckSource },
+  loras: readonly LoraRef[] = []
 ): Promise<ReturnType<typeof serverCheck>> {
   const resolved = override
     ? { base: override.base.replace(/\/$/, ""), source: override.source }
@@ -1079,6 +1108,7 @@ export async function checkComfyServer(
       workflows: prepared.failed,
     });
   }
+  const loraCheck = loras.length > 0 ? checkLoraFiles(fetched.objectInfo, loras) : null;
   const check = serverCheck({
     reachable: true,
     url: fetched.publicUrl,
@@ -1087,6 +1117,9 @@ export async function checkComfyServer(
     httpStatus: null,
     detail: "",
     workflows: assessWorkflows(ids, fetched.objectInfo),
+    ...(loraCheck
+      ? { loraNames: loras.map((lora) => lora.name), loraIssues: loraCheck.missing }
+      : {}),
   });
   check.objectInfo = fetched.objectInfo;
   return check;
@@ -1094,10 +1127,11 @@ export async function checkComfyServer(
 
 /** Refuses a ComfyUI render before any job row is created. Empty means nothing to queue. */
 export async function guardComfyWorkflows(
-  ids: readonly ComfyGraphId[]
+  ids: readonly ComfyGraphId[],
+  loras: readonly LoraRef[] = []
 ): Promise<{ status: number; error: string } | null> {
-  if (ids.length === 0) return null;
-  const report = toPublicCheck(await checkComfyServer(ids));
+  if (ids.length === 0 && loras.length === 0) return null;
+  const report = toPublicCheck(await checkComfyServer(ids, undefined, loras));
   if (!report.blocksQueue) return null;
   return { status: 400, error: formatQueueRefusal(report) };
 }

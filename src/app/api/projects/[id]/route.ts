@@ -20,10 +20,12 @@ import {
   resolveDataPath,
   updateProject,
 } from "@/lib/storage";
+import { parseLoraList } from "@/lib/loras";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import {
   CaptionMode,
   ComfyGraphId,
+  LoraRef,
   SeamMode,
   clampChainTrimStartFrames,
   clampMusicFadeSec,
@@ -146,6 +148,12 @@ export async function PATCH(
   { params }: { params: { id: string } }
 ) {
   const body = await req.json().catch(() => ({}));
+  let loras: LoraRef[] | undefined;
+  if ("loras" in body && body.loras !== undefined) {
+    const parsed = parseLoraList(body.loras, "loras");
+    if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+    loras = parsed.loras;
+  }
   const styleBase = typeof body.styleBase === "string" ? body.styleBase : undefined;
   if (styleBase !== undefined) {
     const project = getProject(params.id);
@@ -185,6 +193,7 @@ export async function PATCH(
     captionMode: captionModeField(body.captionMode),
     evenColour: typeof body.evenColour === "boolean" ? body.evenColour : undefined,
     smoothFps: typeof body.smoothFps === "boolean" ? body.smoothFps : undefined,
+    loras,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

@@ -21,6 +21,7 @@ import {
 import { clipFlagLabel, clipHeldFromStitch } from "./clip-check";
 import { evenOutClips, type StitchColour } from "./colour-match";
 import { contactVersion, writeContactSheet } from "./contact-sheet";
+import { effectiveLoras } from "./loras";
 import { finishedTake } from "./continuity";
 import {
   probeClipShape,
@@ -777,6 +778,7 @@ async function concatClips(
     return {
       shotId: part.shotId,
       seed: job?.seed ?? null,
+      loras: effectiveLoras(project, part.shot),
       provider: job?.provider ?? "mock",
       durationSec: shapes[index]?.durationSec ?? job?.durationSec ?? 0,
       version: job ? contactVersion(pool, part.jobId) : 1,

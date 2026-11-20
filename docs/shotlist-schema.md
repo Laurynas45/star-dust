@@ -36,6 +36,7 @@ After each clip is written, the command prints a note when the file is all black
 | `chainTrimStartFrames` | Whole number from 0 to 4. Default in a new project is 1. |
 | `evenColour` | `true` or `false`. Off evens nothing. On, at stitch time, matches each later included shot's overall colour and brightness to the first included shot. One measurement for the whole clip, so the grade does not flicker. It does not fix a character or an outfit. Omitted means `false`, so an older file stays off. |
 | `smoothFps` | `true` or `false`. Off raises a lower frame rate by duplicating frames. On, at stitch time, raises a clip below the target rate with ffmpeg motion interpolation (minterpolate). The clip stays the same length. Fast motion and thin edges can warp. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. Omitted means `false`, so an older file stays off. |
+| `loras` | A list of `{ "name", "strength" }`, at most 4. `name` is the file name ComfyUI lists under `models/loras`. `strength` is a number from -2 to 2. Omitted strength is 1. Omitted list means none. A shot can replace this list. |
 | `shots` | One object per shot, in order. At least one. At most 200. |
 
 ## Transition
@@ -65,5 +66,6 @@ On a shot, `transition` is that object, or `null` to inherit the project join. T
 | `evenColour` | `true`, `false`, or `null` to inherit the project. The boundary that leads into this shot. `true` matches this shot to the first included shot. `false` leaves this shot's colour as rendered. Omitted means `null`. |
 | `comfyuiWorkflow` | A workflow name, `custom:<slug>`, or `null` to inherit the project, then the app default. |
 | `comfyLowMemory` | `true`, `false`, or `null` to inherit. |
+| `loras` | A list of `{ "name", "strength" }`, or `null` to inherit the project list. The same limits as the project list. An empty list means this shot loads no LoRA. Omitted means `null`. |
 
-Unknown fields are an error. A missing field is an error, except `evenColour` and `smoothFps`. An older file that omits `evenColour` stays off on the project and inherits on each shot. An older file that omits `smoothFps` stays off. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.
+Unknown fields are an error. A missing field is an error, except `evenColour`, `smoothFps`, and `loras`. An older file that omits `evenColour` stays off on the project and inherits on each shot. An older file that omits `smoothFps` stays off. An older file that omits `loras` has none on the project, and each shot inherits. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.

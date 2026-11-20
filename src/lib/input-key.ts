@@ -2,6 +2,7 @@ import { createHash, randomInt } from "crypto";
 import fs from "fs";
 import { completedTakesFor, cutTake } from "./chain-stale";
 import { resolveComfyChoice } from "./comfy-choice";
+import { effectiveLoras, loraInputToken, shouldInjectLoras } from "./loras";
 import { modelNameFor } from "./provider-info";
 import { resolveChainTrimStartFrames } from "./stitch";
 import { getProject, getSettings, listJobs, listShots, resolveDataPath } from "./storage";
@@ -30,6 +31,8 @@ export type ClipKeyParts = {
   durationSec: number;
   startFrameTrim: number | null;
   upstreamKey: string;
+  /** Set only when this render will load LoRAs. Absent keeps older keys stable. */
+  loras?: string;
 };
 
 export function normalizeSeed(seed: number): number {
@@ -58,7 +61,7 @@ export function freshSeed(avoid: readonly number[]): number {
 }
 
 export function buildInputKey(parts: ClipKeyParts): string {
-  const canonical = {
+  const canonical: Record<string, unknown> = {
     v: 1,
     image: parts.image,
     endImage: parts.endImage,
@@ -73,6 +76,7 @@ export function buildInputKey(parts: ClipKeyParts): string {
     startFrameTrim: parts.startFrameTrim,
     upstreamKey: parts.upstreamKey,
   };
+  if (parts.loras) canonical.loras = parts.loras;
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
@@ -156,6 +160,10 @@ function clipParts(shot: Shot, seed: number, upstreamKey: string): ClipKeyParts 
   const provider = settings.provider;
   const comfy =
     provider === "comfyui" ? resolveComfyChoice({ settings, project, shot }) : undefined;
+  const loraToken =
+    project && comfy && shouldInjectLoras(comfy.workflow)
+      ? loraInputToken(effectiveLoras(project, shot))
+      : "";
   return {
     image: sourceToken(shot, upstreamKey),
     endImage: fileToken(shot.endImagePath),
@@ -169,6 +177,7 @@ function clipParts(shot: Shot, seed: number, upstreamKey: string): ClipKeyParts 
     durationSec: Number(shot.durationSec) || 0,
     startFrameTrim: project ? applicableStartFrameTrim(project, shot) : null,
     upstreamKey: shot.chainFromPrevious ? upstreamKey : "",
+    ...(loraToken ? { loras: loraToken } : {}),
   };
 }
 

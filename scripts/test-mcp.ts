@@ -713,6 +713,60 @@ async function testExportShotList() {
   }
 }
 
+async function testLoras() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "star-dust-mcp-lora-"));
+  const still = path.join(dir, "still.png");
+  fs.writeFileSync(still, "png");
+  let posts = 0;
+  const mocked = mockFetch(async (call) => {
+    if (call.method === "POST" && call.path === "/api/projects") {
+      posts += 1;
+      const body = asRecord(call.json);
+      assert(Array.isArray(body?.loras) && (body.loras as { name: string }[])[0]?.name === "style.safetensors", "project loras");
+      return jsonResponse({ id: "proj-lora", name: "LoRA", description: "", loras: body?.loras }, 201);
+    }
+    if (call.method === "POST" && call.path === "/api/projects/proj-lora/shots") {
+      posts += 1;
+      assert(call.form?.get("loras") === JSON.stringify([{ name: "shot.safetensors", strength: 0.5 }]), "shot loras");
+      return jsonResponse({ id: "shot-lora", projectId: "proj-lora", loras: [{ name: "shot.safetensors", strength: 0.5 }] }, 201);
+    }
+    throw new Error(`unexpected ${call.method} ${call.path}`);
+  });
+  try {
+    await withTools(mocked.fetch, async (call) => {
+      const bad = await call("create_project", {
+        name: "LoRA",
+        loras: [{ name: "../no.safetensors", strength: 1 }],
+      });
+      assert(bad.isError && bad.text.includes("LoRA folder"), bad.text);
+      const high = await call("add_shot", {
+        projectId: "proj-lora",
+        prompt: "A lantern",
+        imagePath: still,
+        loras: [{ name: "shot.safetensors", strength: 4 }],
+      });
+      assert(high.isError && high.text.includes("range is -2 to 2"), high.text);
+      const created = await call("create_project", {
+        name: "LoRA",
+        loras: [{ name: "style.safetensors" }],
+      });
+      assert(!created.isError, created.text);
+      assert((created.json?.loras as { strength?: number }[])?.[0]?.strength === 1, "default strength is 1");
+      const added = await call("add_shot", {
+        projectId: "proj-lora",
+        prompt: "A lantern",
+        imagePath: still,
+        loras: [{ name: "shot.safetensors", strength: 0.5 }],
+      });
+      assert(!added.isError, added.text);
+      assert((added.json?.loras as { name?: string }[])?.[0]?.name === "shot.safetensors", added.text);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert(posts === 2, `invalid LoRAs must not call the API, posts=${posts}`);
+}
+
 async function main() {
   await testBaseUrl();
   await testPaymentRoutesAreNotCalled();
@@ -721,6 +775,7 @@ async function main() {
   await testListBackendsUnreachableAndCredits();
   await testServerDown();
   await testCreateProject();
+  await testLoras();
   await testAddShot();
   await testAddShotRefusal();
   await testStartRender();
