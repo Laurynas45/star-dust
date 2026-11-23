@@ -183,6 +183,7 @@ function readiness(id: string, opts?: { reachable?: boolean; blocks?: boolean })
             ]
           : [],
         vaeWarnings: [],
+        audioNotes: [],
         inputNotes: [],
         inputBlocks: [],
       },
@@ -362,6 +363,7 @@ async function testAddShot() {
       assert(call.form?.get("presetId") === "slow-zoom-in", "preset");
       assert(call.form?.get("comfyuiWorkflow") === "wan", "workflow");
       assert(call.form?.get("comfyLowMemory") === "true", "low memory");
+      assert(call.form?.get("generatedAudio") === "false", "generated audio");
       assert(call.form?.get("chainFromPrevious") === null, "chain is omitted unless asked");
       const start = call.form?.get("startImage");
       assert((await blobBytes(start)).equals(png), "start bytes");
@@ -415,6 +417,7 @@ async function testAddShot() {
         provider: "comfyui",
         comfyWorkflow: "wan",
         comfyLowMemory: true,
+        generatedAudio: false,
       });
       assert(!result.isError, result.text);
       assert(result.json?.id === "shot-1", result.text);

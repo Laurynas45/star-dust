@@ -116,6 +116,7 @@ export async function PATCH(
       endImagePath: body.clearEndImage ? "" : undefined,
       comfyuiWorkflow: workflowField(body.comfyuiWorkflow),
       comfyLowMemory: flagField(body.comfyLowMemory),
+      generatedAudio: flagField(body.generatedAudio),
       chainFromPrevious:
         typeof body.chainFromPrevious === "boolean" ? body.chainFromPrevious : undefined,
       chainFrameBack: typeof body.chainFrameBack === "number" ? clampChainFrameBack(body.chainFrameBack) : undefined,

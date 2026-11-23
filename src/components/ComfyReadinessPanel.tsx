@@ -36,7 +36,7 @@ export function ComfyReadinessPanel(props: {
           </p>
           {report.workflows.map((workflow) => {
             const issues = [...workflow.missingNodes, ...workflow.missingModels, ...workflow.inputBlocks];
-            const notes = [...workflow.vaeWarnings, ...workflow.inputNotes];
+            const notes = [...workflow.vaeWarnings, ...workflow.inputNotes, ...workflow.audioNotes];
             const warnOnly = workflow.ok && notes.length > 0;
             return (
               <div
@@ -110,7 +110,7 @@ export function ShotComfyNote(props: { report: Shown | null; workflow: ComfyGrap
       </p>
     );
   }
-  const notes = [...row.vaeWarnings, ...row.inputNotes];
+  const notes = [...row.vaeWarnings, ...row.inputNotes, ...row.audioNotes];
   if (notes.length === 0) return null;
   return (
     <>

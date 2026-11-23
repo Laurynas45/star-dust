@@ -563,5 +563,18 @@
     "input": { "required": {} },
     "name": "SamplerEulerAncestral",
     "output_node": false
+  },
+  "LTXVAudioVAEDecode": {
+    "input": {
+      "required": {
+        "samples": ["LATENT", { "tooltip": "The latent to be decoded." }],
+        "audio_vae": ["VAE", { "tooltip": "The Audio VAE model used for decoding the latent." }]
+      }
+    },
+    "output": ["AUDIO"],
+    "name": "LTXVAudioVAEDecode",
+    "display_name": "LTXV Audio VAE Decode",
+    "category": "model/latent/ltxv",
+    "output_node": false
   }
 }

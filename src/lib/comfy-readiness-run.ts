@@ -119,6 +119,7 @@ function customFailureCheck(id: ComfyGraphId, errors: string[]): ComfyWorkflowCh
     ],
     missingModels: [],
     vaeWarnings: [],
+    audioNotes: [],
     inputNotes: [],
     inputBlocks: [],
   };

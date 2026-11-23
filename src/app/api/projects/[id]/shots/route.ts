@@ -102,6 +102,7 @@ export async function POST(
     endImagePath: endPath,
     comfyuiWorkflow: formWorkflow(form.get("comfyuiWorkflow")),
     comfyLowMemory: formFlag(form.get("comfyLowMemory")),
+    generatedAudio: formFlag(form.get("generatedAudio")),
     chainFromPrevious: hasPrevious && form.get("chainFromPrevious") === "1",
     chainFrameBack: clampChainFrameBack(Number(form.get("chainFrameBack") || 0)),
     loras,

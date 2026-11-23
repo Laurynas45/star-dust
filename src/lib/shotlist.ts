@@ -77,6 +77,7 @@ const ROOT_KEYS = [
   "provider",
   "comfyuiWorkflow",
   "comfyLowMemory",
+  "generatedAudio",
   "output",
   "transition",
   "chainTrimStartFrames",
@@ -101,6 +102,7 @@ const SHOT_KEYS = [
   "evenColour",
   "comfyuiWorkflow",
   "comfyLowMemory",
+  "generatedAudio",
   "loras",
 ] as const;
 
@@ -139,6 +141,11 @@ export interface ShotListShot {
   evenColour: boolean | null;
   comfyuiWorkflow: string | null;
   comfyLowMemory: boolean | null;
+  /**
+   * LTX-2.3 and LTX-2.5. Null inherits the project, and a null project means on.
+   * Off keeps a silent mp4. Other graphs ignore it. Omitted in an older file means null.
+   */
+  generatedAudio: boolean | null;
   /** Null inherits the project list. An array replaces it. Omitted in an older file means null. */
   loras: LoraRef[] | null;
 }
@@ -157,6 +164,8 @@ export interface ShotListDocument {
   provider: ProviderId;
   comfyuiWorkflow: string | null;
   comfyLowMemory: boolean | null;
+  /** Null means on for LTX graphs. Omitted in an older file means null. */
+  generatedAudio: boolean | null;
   output: ShotListOutput;
   transition: ShotListTransition;
   chainTrimStartFrames: number;
@@ -201,6 +210,7 @@ export interface ShotRenderSettings {
   provider: ProviderId;
   comfyuiWorkflow: string | null;
   comfyLowMemory: boolean | null;
+  generatedAudio: boolean | null;
   output: ShotListOutput;
   transition: ShotListTransition;
   chainTrimStartFrames: number;
@@ -223,6 +233,7 @@ export interface ShotRenderSettings {
     evenColour: boolean | null;
     comfyuiWorkflow: string | null;
     comfyLowMemory: boolean | null;
+    generatedAudio: boolean | null;
     loras: LoraRef[] | null;
   }>;
 }
@@ -371,6 +382,16 @@ function readFlag(value: unknown, where: string, errors: string[]): boolean | nu
   return value;
 }
 
+/** Omitted means null, so an older shot list keeps the LTX default (on). */
+function readOptionalFlag(value: unknown, where: string, errors: string[]): boolean | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "boolean") {
+    errors.push(`${where} must be true, false, or null.`);
+    return undefined;
+  }
+  return value;
+}
+
 /**
  * Project: omitted means false, so an older shot list stays off. null is an error.
  * Shot: omitted or null means inherit.
@@ -467,6 +488,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
   }
   const comfyuiWorkflow = readWorkflow(parsed.comfyuiWorkflow, "Project workflow", errors);
   const comfyLowMemory = readFlag(parsed.comfyLowMemory, "Project low-memory preset", errors);
+  const generatedAudio = readOptionalFlag(parsed.generatedAudio, "Project generated audio", errors);
 
   let output: ShotListOutput | undefined;
   if (!isRecord(parsed.output)) {
@@ -689,6 +711,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       const shotEvenColour = readEvenColour(entry.evenColour, `${label} evenColour`, errors, true);
       const shotWorkflow = readWorkflow(entry.comfyuiWorkflow, `${label} workflow`, errors);
       const shotLow = readFlag(entry.comfyLowMemory, `${label} low-memory preset`, errors);
+      const shotAudio = readOptionalFlag(entry.generatedAudio, `${label} generated audio`, errors);
       let shotLoras: LoraRef[] | null | undefined;
       if (!("loras" in entry) || entry.loras == null) shotLoras = null;
       else {
@@ -712,6 +735,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         shotEvenColour === undefined ||
         shotWorkflow === undefined ||
         shotLow === undefined ||
+        shotAudio === undefined ||
         shotLoras === undefined ||
         starts !== 1 ||
         ends > 1
@@ -733,6 +757,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         evenColour: shotEvenColour,
         comfyuiWorkflow: shotWorkflow,
         comfyLowMemory: shotLow,
+        generatedAudio: shotAudio,
         loras: shotLoras,
       });
     });
@@ -743,6 +768,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
     !provider ||
     comfyuiWorkflow === undefined ||
     comfyLowMemory === undefined ||
+    generatedAudio === undefined ||
     !output ||
     !transition ||
     chainTrim == null ||
@@ -768,6 +794,7 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       provider,
       comfyuiWorkflow,
       comfyLowMemory,
+      generatedAudio,
       output,
       transition,
       chainTrimStartFrames: chainTrim,
@@ -843,6 +870,7 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
     provider,
     comfyuiWorkflow: workflowTitle(project.comfyuiWorkflow),
     comfyLowMemory: project.comfyLowMemory ?? null,
+    generatedAudio: project.generatedAudio ?? null,
     output: {
       fps: project.outputFps,
       width: project.outputWidth,
@@ -880,6 +908,7 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
         evenColour: shot.evenColour ?? null,
         comfyuiWorkflow: workflowTitle(shot.comfyuiWorkflow),
         comfyLowMemory: shot.comfyLowMemory ?? null,
+        generatedAudio: shot.generatedAudio ?? null,
         loras: shot.loras == null ? null : shot.loras.map((lora) => ({ ...lora })),
       };
     }),
@@ -948,6 +977,7 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
     provider: document.provider,
     comfyuiWorkflow: document.comfyuiWorkflow,
     comfyLowMemory: document.comfyLowMemory,
+    generatedAudio: document.generatedAudio,
     output: document.output,
     transition: document.transition,
     chainTrimStartFrames: document.chainTrimStartFrames,
@@ -973,6 +1003,7 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
         evenColour: shot.evenColour,
         comfyuiWorkflow: shot.comfyuiWorkflow,
         comfyLowMemory: shot.comfyLowMemory,
+        generatedAudio: shot.generatedAudio,
         loras: shot.loras == null ? null : shot.loras.map((lora) => ({ ...lora })),
       };
     }),
@@ -1006,6 +1037,7 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
       provider: doc.provider,
       comfyuiWorkflow: workflowId(doc.comfyuiWorkflow),
       comfyLowMemory: doc.comfyLowMemory,
+      generatedAudio: doc.generatedAudio,
       seamMode: doc.transition.mode,
       seamFadeSec: doc.transition.fadeSec,
       seamFadeUnit: doc.transition.fadeUnit,
@@ -1041,6 +1073,7 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
         endImagePath: end ? saveStill(end.file) : undefined,
         comfyuiWorkflow: workflowId(shot.comfyuiWorkflow),
         comfyLowMemory: shot.comfyLowMemory,
+        generatedAudio: shot.generatedAudio,
         chainFromPrevious: shot.chainFromPrevious,
         chainFrameBack: shot.chainFrameBack,
         loras: shot.loras,

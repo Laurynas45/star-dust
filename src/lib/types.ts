@@ -88,6 +88,11 @@ export interface Project {
   comfyuiWorkflow?: ComfyGraphId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
+  /**
+   * LTX-2.3 and LTX-2.5 only. Null means on.
+   * Off keeps the silent mp4. Other graphs ignore this.
+   */
+  generatedAudio?: boolean | null;
   /** How clips join in the stitch. Cut is the historical hard cut. */
   seamMode: SeamMode;
   /** Crossfade length when the unit is seconds. Ignored for a hard cut and for a frame fade. */
@@ -206,6 +211,11 @@ export interface Shot {
   comfyuiWorkflow?: ComfyGraphId | null;
   /** Null inherits the project, then the app default. */
   comfyLowMemory?: boolean | null;
+  /**
+   * Null inherits the project. On LTX-2.3 and LTX-2.5, null on the project means on.
+   * Off keeps today's silent mp4. SVD, Wan, and a custom graph ignore this.
+   */
+  generatedAudio?: boolean | null;
   /**
    * Null uses the project LoRA list. An array replaces that list.
    * An empty array means this shot loads no LoRA.

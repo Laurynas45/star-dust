@@ -14,7 +14,7 @@ import type { PreflightReport } from "@/lib/preflight";
 import { chainStaleShotIds } from "@/lib/chain-stale";
 import { joinPlanSummary, projectFadeLabel, type JoinPlan } from "@/lib/join";
 import { reviewStitchPasses } from "@/lib/mixed-pass";
-import { resolveComfyChoice } from "@/lib/comfy-choice";
+import { ltxGraphSupportsGeneratedAudio, resolveComfyChoice, resolveGeneratedAudio } from "@/lib/comfy-choice";
 import { graphBlurb, graphChoices } from "@/lib/comfy-graph-view";
 import type { CustomGraphCard } from "@/lib/custom-workflow";
 import {
@@ -281,6 +281,7 @@ export default function ProjectStudioPage() {
   const [endImage, setEndImage] = useState<File | null>(null);
   const [shotWorkflow, setShotWorkflow] = useState("");
   const [shotLowMemory, setShotLowMemory] = useState("");
+  const [shotGeneratedAudio, setShotGeneratedAudio] = useState("");
   const [chainNew, setChainNew] = useState(false);
   const [chainBackNew, setChainBackNew] = useState(0);
   const [preview, setPreview] = useState<string | null>(null);
@@ -624,6 +625,7 @@ export default function ProjectStudioPage() {
       if (endImage) form.set("endImage", endImage);
       if (shotWorkflow) form.set("comfyuiWorkflow", shotWorkflow);
       if (shotLowMemory) form.set("comfyLowMemory", shotLowMemory);
+      if (shotGeneratedAudio) form.set("generatedAudio", shotGeneratedAudio === "1" ? "true" : "false");
       if (chainNew) {
         form.set("chainFromPrevious", "1");
         form.set("chainFrameBack", String(chainBackNew));
@@ -636,6 +638,7 @@ export default function ProjectStudioPage() {
       setEndImage(null);
       setShotWorkflow("");
       setShotLowMemory("");
+      setShotGeneratedAudio("");
       setChainNew(false);
       setChainBackNew(0);
       await load();
@@ -881,6 +884,7 @@ export default function ProjectStudioPage() {
   async function saveProjectPatch(patch: {
     comfyuiWorkflow?: ComfyGraphId | null;
     comfyLowMemory?: boolean | null;
+    generatedAudio?: boolean | null;
     seamMode?: SeamMode;
     seamFadeSec?: number;
     seamFadeUnit?: SeamFadeUnit;
@@ -917,6 +921,7 @@ export default function ProjectStudioPage() {
     patch: {
       comfyuiWorkflow?: ComfyGraphId | null;
       comfyLowMemory?: boolean | null;
+      generatedAudio?: boolean | null;
       chainFromPrevious?: boolean;
       chainFrameBack?: number;
       chainTrimStartFrames?: number | null;
@@ -1642,6 +1647,12 @@ export default function ProjectStudioPage() {
                 <option value="0">Off</option>
               </select>
             </label>
+            <GeneratedAudioField
+              value={project.generatedAudio ?? null}
+              inheritLabel="Default (on for LTX)"
+              enabled={ltxGraphSupportsGeneratedAudio(projectChoice.workflow)}
+              onChange={(generatedAudio) => void saveProjectPatch({ generatedAudio })}
+            />
           </div>
           {projectChoice.workflow === "wan-flf" && (
             <p className="mt-2 text-xs leading-relaxed text-sky-50/90">
@@ -1897,6 +1908,14 @@ export default function ProjectStudioPage() {
                   <option value="0">Off</option>
                 </select>
               </label>
+              <GeneratedAudioField
+                value={shotGeneratedAudio === "" ? null : shotGeneratedAudio === "1"}
+                inheritLabel={`Project default (${resolveGeneratedAudio({ workflow: "ltx", project }) ? "on" : "off"})`}
+                enabled={ltxGraphSupportsGeneratedAudio(
+                  isComfyGraphId(shotWorkflow) ? shotWorkflow : projectChoice.workflow
+                )}
+                onChange={(value) => setShotGeneratedAudio(value == null ? "" : value ? "1" : "0")}
+              />
             </div>
           )}
           {provider === "comfyui" &&
@@ -2431,6 +2450,7 @@ export default function ProjectStudioPage() {
                         shot={shot}
                         cards={settings.customWorkflows ?? []}
                         projectDefault={resolveComfyChoice({ settings, project, shot: null })}
+                        projectAudio={project.generatedAudio ?? null}
                         resolved={resolveComfyChoice({ settings, project, shot })}
                         onChange={(patch) => void saveShotPatch(shot.id, patch)}
                       />
@@ -3108,9 +3128,14 @@ export default function ProjectStudioPage() {
 function ShotWorkflowFields(props: {
   shot: Shot;
   cards: readonly CustomGraphCard[];
-  projectDefault: { workflow: ComfyGraphId; lowMemory: boolean };
+  projectDefault: { workflow: ComfyGraphId; lowMemory: boolean; generatedAudio?: boolean };
+  projectAudio: boolean | null;
   resolved: { workflow: ComfyGraphId; lowMemory: boolean };
-  onChange: (patch: { comfyuiWorkflow?: ComfyGraphId | null; comfyLowMemory?: boolean | null }) => void;
+  onChange: (patch: {
+    comfyuiWorkflow?: ComfyGraphId | null;
+    comfyLowMemory?: boolean | null;
+    generatedAudio?: boolean | null;
+  }) => void;
 }) {
   const info = graphBlurb(props.resolved.workflow, props.cards);
   return (
@@ -3189,8 +3214,45 @@ function ShotWorkflowFields(props: {
             <option value="0">Off</option>
           </select>
         </label>
+        <GeneratedAudioField
+          value={props.shot.generatedAudio ?? null}
+          inheritLabel={`Project default (${(props.projectAudio ?? true) ? "on" : "off"})`}
+          enabled={ltxGraphSupportsGeneratedAudio(props.resolved.workflow)}
+          onChange={(generatedAudio) => props.onChange({ generatedAudio })}
+        />
       </div>
     </div>
+  );
+}
+
+function GeneratedAudioField(props: {
+  value: boolean | null;
+  inheritLabel: string;
+  enabled: boolean;
+  onChange: (value: boolean | null) => void;
+}) {
+  return (
+    <label className="text-[11px] text-[var(--muted)]">
+      Generated audio
+      <select
+        className="input mt-1"
+        value={props.value == null ? "" : props.value ? "1" : "0"}
+        disabled={!props.enabled}
+        onChange={(e) => {
+          const value = e.target.value;
+          props.onChange(value === "" ? null : value === "1");
+        }}
+      >
+        <option value="">{props.inheritLabel}</option>
+        <option value="1">On</option>
+        <option value="0">Off — silent mp4</option>
+      </select>
+      <span className="mt-1 block leading-relaxed">
+        {props.enabled
+          ? "On decodes the LTX audio latent into the mp4. Off saves a silent file. This does not follow a given voice. The prompt is the only control over the sound."
+          : "Generated audio applies to LTX-2.3 and LTX-2.5. This graph does not use it."}
+      </span>
+    </label>
   );
 }
 

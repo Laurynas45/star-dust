@@ -8,11 +8,11 @@ import { clipFlagLabel } from "./clip-check";
 import { writeContactSheet } from "./contact-sheet";
 import { completedTakesFor, cutTake } from "./chain-stale";
 import { editRateNote, resolveConformTarget } from "./conform";
-import { probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
+import { probeHasAudio, probeVideoStream, type VideoStreamInfo } from "./ffmpeg";
 import { joinOmissionWarning, type JoinOmission } from "./join";
 import { describeCustomGraph } from "./custom-workflow-files";
 import { effectiveLoras } from "./loras";
-import { COMFY_WORKFLOWS, comfyWorkflowFromModelName } from "./provider-info";
+import { COMFY_WORKFLOWS, comfyWorkflowFromModelName, generatedAudioFromModelName } from "./provider-info";
 import { isComfyWorkflowId, isCustomGraphId } from "./types";
 import { getProject, listJobs, listShots, resolveDataPath } from "./storage";
 import { planStitchSeams } from "./stitch";
@@ -55,6 +55,10 @@ export interface TakeManifest {
   seedPinned: boolean;
   /** LoRAs the shot would send on a shipped ComfyUI graph. Empty means none. */
   loras: LoraRef[];
+  /** True when this take was queued with LTX generated audio on. */
+  generatedAudio: boolean;
+  /** True when the mp4 has an audio stream. */
+  hasAudio: boolean;
   frames: number;
   fps: number;
   width: number;
@@ -234,7 +238,14 @@ export function formatCmx3600(title: string, events: EditEvent[], fps = EDIT_FPS
 function workflowName(job: Job): string | null {
   if (job.provider !== "comfyui") return null;
   const id = comfyWorkflowFromModelName(job.modelName);
-  if (!id) return job.modelName?.replace(/\s*·\s*low-memory preset\s*$/i, "").trim() || null;
+  if (!id) {
+    return (
+      job.modelName
+        ?.replace(/\s*·\s*generated audio\s*$/i, "")
+        .replace(/\s*·\s*low-memory preset\s*$/i, "")
+        .trim() || null
+    );
+  }
   if (isCustomGraphId(id)) {
     const described = describeCustomGraph(id);
     if (!described.ok) return id;
@@ -303,6 +314,8 @@ function manifestFor(
     seed: job.seed == null ? null : job.seed,
     seedPinned: Boolean(shot.seedPinned),
     loras: effectiveLoras(getProject(shot.projectId) ?? { loras: [] }, shot),
+    generatedAudio: generatedAudioFromModelName(job.modelName),
+    hasAudio: job.outputPath ? probeHasAudio(resolveDataPath(job.outputPath)) : false,
     frames: info.frames,
     fps: roundFps(info.fps),
     width: info.width,

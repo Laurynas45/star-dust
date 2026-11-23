@@ -22,6 +22,7 @@ import { clipFlagLabel, clipHeldFromStitch } from "./clip-check";
 import { evenOutClips, type StitchColour } from "./colour-match";
 import { contactVersion, writeContactSheet } from "./contact-sheet";
 import { effectiveLoras } from "./loras";
+import { generatedAudioFromModelName } from "./provider-info";
 import { finishedTake } from "./continuity";
 import {
   probeClipShape,
@@ -783,6 +784,8 @@ async function concatClips(
       durationSec: shapes[index]?.durationSec ?? job?.durationSec ?? 0,
       version: job ? contactVersion(pool, part.jobId) : 1,
       preview: Boolean(preview),
+      generatedAudio: generatedAudioFromModelName(job?.modelName),
+      hasAudio: shapes[index]?.hasAudio ?? false,
       ...(job?.clipCheck?.flagged ? { flag: clipFlagLabel(job.clipCheck) } : {}),
     };
   });

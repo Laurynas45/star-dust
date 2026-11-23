@@ -171,6 +171,7 @@ export async function PATCH(
     description: typeof body.description === "string" ? body.description : undefined,
     comfyuiWorkflow: workflowField(body.comfyuiWorkflow),
     comfyLowMemory: flagField(body.comfyLowMemory),
+    generatedAudio: flagField(body.generatedAudio),
     seamMode: seamModeField(body.seamMode),
     seamFadeSec: typeof body.seamFadeSec === "number" ? clampSeamFade(body.seamFadeSec) : undefined,
     seamFadeUnit: seamFadeUnitField(body.seamFadeUnit),

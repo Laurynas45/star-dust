@@ -2,6 +2,8 @@ import { formatCustomProviderNote, type CustomGraphNote } from "./custom-workflo
 import { AppSettings, ComfyGraphId, ComfyWorkflowId, isComfyWorkflowId, isCustomGraphId, ProviderId } from "./types";
 
 export const LOW_MEMORY_MARK = " · low-memory preset";
+/** Appended when an LTX graph will decode the audio latent into the mp4. */
+export const GENERATED_AUDIO_MARK = " · generated audio";
 
 /** Frame the Mock Ken Burns filter writes. The historic stitch default is the same 1280×720. */
 export const MOCK_FRAME = { width: 1280, height: 720 } as const;
@@ -120,7 +122,7 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
     title: "LTX-2.3 distilled FP8",
     file: "workflows/comfyui-ltx23-i2v.api.json",
     goodAt:
-      "Distilled image-to-video for a longer clip than the Wan 81-frame cap, at a smaller compute budget than the full LTX checkpoint. One short clip. The downloaded file is silent video.",
+      "Distilled image-to-video for a longer clip than the Wan 81-frame cap, at a smaller compute budget than the full LTX checkpoint. One short clip. Generated audio is on unless the shot turns it off.",
     memory:
       "Lightricks' ComfyUI-LTXVideo README lists a CUDA GPU with 32 GB+ VRAM for the full setup. This graph loads the distilled FP8 checkpoint instead of that full BF16 file. That is the smaller official distilled file, not a claim that it fits in 8 GB. Community reports, including r/comfyui threads, describe 8 GB VRAM claims that still need on the order of 32–64 GB of system RAM when the weights spill out of VRAM. Treat that as a warning, not a number Star Dust measured. A GGUF UNet via ComfyUI-GGUF is a separate, optional swap and is not what this file loads.",
     defaults:
@@ -128,13 +130,13 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
     lowMemory:
       "Start here: the still fitted inside 832×480 (about 480p) and the frame count capped at 25 (about one second).",
     detail:
-      "Reads the prompt. Star Dust injects the start image, prompt, frame count, size, and seed. Distilled FP8 checkpoint on core ComfyUI nodes. Not an 8 GB guarantee.",
+      "Reads the prompt. Star Dust injects the start image, prompt, frame count, size, and seed. Generated audio decodes the audio latent into the mp4. Off saves a silent file. Distilled FP8 checkpoint on core ComfyUI nodes. Not an 8 GB guarantee.",
   },
   ltx25: {
     title: "LTX-2.5",
     file: "workflows/comfyui-ltx25-i2v.api.json",
     goodAt:
-      "Image-to-video from one still, with an optional end still as a last-frame guide. Lighter than the Wan 14B first-last graph. One short clip. The downloaded file is silent video.",
+      "Image-to-video from one still, with an optional end still as a last-frame guide. Lighter than the Wan 14B first-last graph. One short clip. Generated audio is on unless the shot turns it off.",
     memory:
       "Lightricks' ComfyUI page lists a CUDA GPU with 32 GB+ VRAM for the full setup. This graph loads the INT8 ConvRot distilled transformer and the INT8 ConvRot Gemma text encoder, which that page calls the lower-VRAM files, plus the BF16 video and audio VAEs. That is a smaller official stack, not a measurement Star Dust ran. The low-memory preset still loads these weights. The x2 latent upscaler is an extra file, and only the two-stage path loads it.",
     defaults:
@@ -142,7 +144,7 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
     lowMemory:
       "The still fitted inside 832×448 (about 480p) and the frame count capped at 25 (about one second). The same weights are still loaded.",
     detail:
-      "Reads the prompt. Star Dust injects the start image, the prompt, the frame count, the size, and the seed. An end still is a last-frame guide. Core nodes. The prompt enhancer is not in the graph. Not a character lock. Not an 8 GB guarantee.",
+      "Reads the prompt. Star Dust injects the start image, the prompt, the frame count, the size, and the seed. Generated audio decodes the audio latent into the mp4. Off saves a silent file. An end still is a last-frame guide. Core nodes. The prompt enhancer is not in the graph. Not a character lock. Not an 8 GB guarantee.",
   },
   "minimax-h3": {
     title: "MiniMax H3",
@@ -160,7 +162,7 @@ export const COMFY_WORKFLOWS: Record<ComfyWorkflowId, ComfyWorkflowInfo> = {
   },
 };
 
-export function comfyModelName(workflow: ComfyGraphId, lowMemory: boolean): string {
+export function comfyModelName(workflow: ComfyGraphId, lowMemory: boolean, generatedAudio = false): string {
   const base = isCustomGraphId(workflow)
     ? `ComfyUI ${workflow}`
     : workflow === "minimax-h3"
@@ -174,7 +176,14 @@ export function comfyModelName(workflow: ComfyGraphId, lowMemory: boolean): stri
             : workflow === "wan"
               ? WAN_MODEL_NAME
               : COMFY_MODEL_NAME;
-  return lowMemory ? `${base}${LOW_MEMORY_MARK}` : base;
+  let name = lowMemory ? `${base}${LOW_MEMORY_MARK}` : base;
+  if (generatedAudio && (workflow === "ltx" || workflow === "ltx25")) name += GENERATED_AUDIO_MARK;
+  return name;
+}
+
+/** True when this take was queued with LTX generated audio on. */
+export function generatedAudioFromModelName(modelName?: string): boolean {
+  return Boolean(modelName?.includes(GENERATED_AUDIO_MARK));
 }
 
 /** Title written into a shot list. The internal id is not the file's name. */
@@ -247,7 +256,7 @@ export function isPaidProvider(provider: ProviderId): boolean {
 export function modelNameFor(
   provider: ProviderId,
   settings: AppSettings,
-  comfy?: { workflow: ComfyGraphId; lowMemory: boolean }
+  comfy?: { workflow: ComfyGraphId; lowMemory: boolean; generatedAudio?: boolean }
 ): string {
   switch (provider) {
     case "mock":
@@ -259,7 +268,8 @@ export function modelNameFor(
     case "comfyui":
       return comfyModelName(
         comfy?.workflow ?? settings.comfyuiWorkflow,
-        comfy?.lowMemory ?? settings.comfyLowMemory
+        comfy?.lowMemory ?? settings.comfyLowMemory,
+        Boolean(comfy?.generatedAudio)
       );
     default:
       return provider;
@@ -282,17 +292,27 @@ export function missingKeyMessage(
 const COMFY_SERVER_NOTE =
   "The server is COMFYUI_BASE_URL when that environment variable is set, otherwise the URL saved in Providers. An optional Authorization value comes from COMFYUI_AUTH_HEADER and is not stored.";
 
+function ltxAudioSentence(generatedAudio: boolean): string {
+  if (!generatedAudio) {
+    return "Generated audio is off. The graph still builds the audio latent the model expects, then saves a silent mp4.";
+  }
+  return "Generated audio is on. The graph separates the audio latent, decodes it with LTXVAudioVAEDecode, and writes it into the mp4. The stitch keeps that audio when the file has an audio stream. It does not follow a given voice. The prompt is the only control over the sound.";
+}
+
 export function describeProviderUse(opts: {
   provider: ProviderId;
   settings: AppSettings;
   hasCharacterSheet: boolean;
   hasEndImage: boolean;
-  comfy?: { workflow: ComfyGraphId; lowMemory: boolean; custom?: CustomGraphNote };
+  comfy?: { workflow: ComfyGraphId; lowMemory: boolean; generatedAudio?: boolean; custom?: CustomGraphNote };
 }): { modelName: string; characterNote?: string; providerNote: string } {
-  const comfy = opts.comfy ?? {
+  const picked = opts.comfy ?? {
     workflow: opts.settings.comfyuiWorkflow,
     lowMemory: opts.settings.comfyLowMemory,
   };
+  const generatedAudio =
+    picked.generatedAudio ?? (picked.workflow === "ltx" || picked.workflow === "ltx25");
+  const comfy = { ...picked, generatedAudio };
   const modelName = modelNameFor(opts.provider, opts.settings, opts.provider === "comfyui" ? comfy : undefined);
   const parts: string[] = [];
   let characterNote: string | undefined;
@@ -310,7 +330,7 @@ export function describeProviderUse(opts: {
   } else if (opts.provider === "comfyui" && comfy.workflow === "ltx25") {
     const box = comfy.lowMemory ? "832×448" : "960×512";
     parts.push(
-      `${modelName} posts workflows/comfyui-ltx25-i2v.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the prompt, a frame count from the shot duration (24 fps, snapped to 8n+1, capped at 121 frames, about five seconds), the output size (the still fitted inside ${box}), and the seed. The clip is silent: the graph builds the audio latent LTX-2.5 expects, then does not write that audio into the file. It is one short clip. ${COMFY_SERVER_NOTE}`
+      `${modelName} posts workflows/comfyui-ltx25-i2v.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the prompt, a frame count from the shot duration (24 fps, snapped to 8n+1, capped at 121 frames, about five seconds), the output size (the still fitted inside ${box}), and the seed. ${ltxAudioSentence(comfy.generatedAudio)} It is one short clip. ${COMFY_SERVER_NOTE}`
     );
     if (comfy.lowMemory) {
       parts.push(
@@ -332,7 +352,7 @@ export function describeProviderUse(opts: {
     }
   } else if (opts.provider === "comfyui" && comfy.workflow === "ltx") {
     parts.push(
-      `${modelName} posts workflows/comfyui-ltx23-i2v.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the prompt, a frame count from the shot duration (24 fps, snapped to 8n+1, capped at 121 frames, about five seconds), the output size (the still fitted inside 960×544), and the seed. The clip is silent: the graph builds the audio latent LTX-2.3 expects, then does not write that audio into the file. It is one short clip. ${COMFY_SERVER_NOTE}`
+      `${modelName} posts workflows/comfyui-ltx23-i2v.api.json, polls history, and downloads the video. The graph reads the text prompt. Star Dust sends the start image, the prompt, a frame count from the shot duration (24 fps, snapped to 8n+1, capped at 121 frames, about five seconds), the output size (the still fitted inside 960×544), and the seed. ${ltxAudioSentence(comfy.generatedAudio)} It is one short clip. ${COMFY_SERVER_NOTE}`
     );
     if (comfy.lowMemory) {
       parts.push(
