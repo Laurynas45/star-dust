@@ -93,6 +93,13 @@ export type ComfyReadiness = {
    */
   vaeWarnings: ReadinessIssue[];
   /**
+   * LTXVAudioVAEDecode is missing, so generated audio stays off.
+   * A note only. It does not block the queue. The clip is saved silent.
+   * A missing audio VAE file is not this list: that file builds the latent
+   * the sampler needs, so it stays in missingModels and blocks the queue.
+   */
+  audioNotes: ReadinessIssue[];
+  /**
    * Required inputs the graph omits and Star Dust can fill.
    * A note only. It does not block the queue.
    */
@@ -113,6 +120,7 @@ export type ComfyWorkflowCheck = {
   missingNodes: ReadinessIssue[];
   missingModels: ReadinessIssue[];
   vaeWarnings: ReadinessIssue[];
+  audioNotes: ReadinessIssue[];
   inputNotes: ReadinessIssue[];
   inputBlocks: ReadinessIssue[];
 };
@@ -359,6 +367,7 @@ export function checkComfyReadiness(
       missingNodes: [issue],
       missingModels: [],
       vaeWarnings: [],
+      audioNotes: [],
       inputNotes: [],
       inputBlocks: [],
     };
@@ -435,6 +444,7 @@ export function checkComfyReadiness(
   missingNodes.sort(byIssue);
   missingModels.sort(byIssue);
   const vaeWarnings = wanVaePairingWarnings(slots);
+  const audioNotes = ltxAudioNotes(workflow, objectInfo, slots);
   const inputs = collectInputFindings(workflow, objectInfo, slots);
   const ok = missingNodes.length === 0 && missingModels.length === 0 && inputs.blocks.length === 0;
   return {
@@ -444,9 +454,42 @@ export function checkComfyReadiness(
     missingNodes,
     missingModels,
     vaeWarnings,
+    audioNotes,
     inputNotes: inputs.notes,
     inputBlocks: inputs.blocks,
   };
+}
+
+/** True when /object_info lists the core LTX audio VAE decode node. */
+export function ltxAudioDecodeAvailable(objectInfo: unknown): boolean {
+  return isRecord(objectInfo) && isRecord(objectInfo.LTXVAudioVAEDecode);
+}
+
+/**
+ * Shipped LTX graphs add LTXVAudioVAEDecode only when generated audio is on.
+ * A server without that node still runs the silent graph.
+ * The audio VAE file is not optional: LTXVEmptyLatentAudio needs it to sample.
+ */
+function ltxAudioNotes(
+  workflow: unknown,
+  objectInfo: Record<string, unknown>,
+  slots: readonly ModelSlot[]
+): ReadinessIssue[] {
+  if (!slots.some((slot) => slot.classType === "LTXVAudioVAELoader" || slot.filename === LTX25_AUDIO_VAE)) {
+    return [];
+  }
+  if (collectNodes(workflow).some((entry) => entry.node.class_type === "LTXVAudioVAEDecode")) return [];
+  if (ltxAudioDecodeAvailable(objectInfo)) return [];
+  return [
+    {
+      kind: "node",
+      classType: "LTXVAudioVAEDecode",
+      nodeId: "",
+      input: "samples",
+      nextStep:
+        "LTXVAudioVAEDecode is not in this server's /object_info. Generated audio will be off, and the clip is saved silent. Update ComfyUI so the core LTX audio VAE decode node is listed. This does not block the queue.",
+    },
+  ];
 }
 
 type Scalar = string | number | boolean;
@@ -782,9 +825,10 @@ export function statusMessage(check: ComfyServerCheck, revealUrl: boolean): stri
   if (!check.reachable) return describeUnreachable(check, revealUrl);
   const failed = check.workflows.filter((workflow) => !workflow.ok);
   const vae = check.workflows.filter((workflow) => workflow.vaeWarnings.length > 0);
+  const audio = check.workflows.filter((workflow) => workflow.audioNotes.length > 0);
   const inputs = check.workflows.filter((workflow) => workflow.inputNotes.length > 0);
   const loraMissing = (check.loraIssues?.length ?? 0) > 0;
-  if (failed.length === 0 && !loraMissing && vae.length === 0 && inputs.length === 0) {
+  if (failed.length === 0 && !loraMissing && vae.length === 0 && audio.length === 0 && inputs.length === 0) {
     return "Every checked graph can run on this server. Every node is listed, and every model filename Star Dust will send is in that loader's list.";
   }
   if (failed.length === 0 && !loraMissing) {
@@ -794,6 +838,10 @@ export function statusMessage(check: ComfyServerCheck, revealUrl: boolean): stri
       parts.push(
         `${names} sends a VAE filename that does not match the Wan model. That note does not block the queue.`
       );
+    }
+    if (audio.length > 0) {
+      const names = audio.map((workflow) => workflow.title).join(", ");
+      parts.push(`${names}: Generated audio will be off. That note does not block the queue.`);
     }
     if (inputs.length > 0) {
       const names = inputs.map((workflow) => workflow.title).join(", ");
@@ -867,12 +915,17 @@ export function formatComfyCheckTable(check: ComfyServerCheck): string {
   lines.push("");
   for (const workflow of check.workflows) {
     const issues = [...workflow.missingNodes, ...workflow.missingModels, ...workflow.inputBlocks];
-    const notes = [...workflow.vaeWarnings, ...workflow.inputNotes];
+    const notes = [...workflow.vaeWarnings, ...workflow.inputNotes, ...workflow.audioNotes];
     if (issues.length === 0 && notes.length === 0) continue;
     lines.push(workflow.title);
     for (const issue of issues) lines.push(`- ${issue.nextStep}`);
     for (const note of notes) lines.push(`- ${note.nextStep}`);
-    if (notes.length > 0) lines.push("The VAE note does not block the queue.");
+    if (workflow.vaeWarnings.length > 0 || workflow.inputNotes.length > 0) {
+      lines.push("The VAE note does not block the queue.");
+    }
+    if (workflow.audioNotes.length > 0) {
+      lines.push("Generated audio will be off. That note does not block the queue.");
+    }
     lines.push("");
   }
   if (check.loraNames && check.loraNames.length > 0) {
@@ -975,7 +1028,11 @@ export function literalModelSlots(workflow: unknown): ModelSlot[] {
 
 function missingFileStep(slot: ModelSlot): string {
   const which = slot.title ? `${slot.classType} (${slot.title})` : slot.classType;
-  return `Missing file ${slot.filename}. Put it in ComfyUI/${slot.folder} so ${which} lists that exact name under ${slot.input}, then restart ComfyUI. A file inside a subfolder is listed with the subfolder prefix and does not match the name Star Dust sends. Star Dust does not download weights.`;
+  const place = `Missing file ${slot.filename}. Put it in ComfyUI/${slot.folder} so ${which} lists that exact name under ${slot.input}, then restart ComfyUI. A file inside a subfolder is listed with the subfolder prefix and does not match the name Star Dust sends. Star Dust does not download weights.`;
+  if (slot.classType === "LTXVAudioVAELoader" || slot.filename === LTX25_AUDIO_VAE) {
+    return `${place} This file builds the audio latent the sampler expects, even when Generated audio is off. Turning Generated audio off does not skip it. The render does not start.`;
+  }
+  return place;
 }
 
 function slotLabel(slot: ModelSlot): string {
@@ -1050,6 +1107,7 @@ export function workflowCheckFromReadiness(
     missingNodes: readiness.missingNodes,
     missingModels: readiness.missingModels,
     vaeWarnings: readiness.vaeWarnings,
+    audioNotes: readiness.audioNotes,
     inputNotes: readiness.inputNotes,
     inputBlocks: readiness.inputBlocks,
   };

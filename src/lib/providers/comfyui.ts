@@ -31,6 +31,7 @@ import {
   WAN_TEXT_ENCODER,
   WAN_VAE,
   comfyWorkflowFromModelName,
+  generatedAudioFromModelName,
 } from "../provider-info";
 import {
   absoluteOutputPath,
@@ -46,6 +47,7 @@ import {
   fillMissingRequiredInputs,
   formatQueueRefusal,
   literalModelSlots,
+  ltxAudioDecodeAvailable,
   modelSlotsFor,
   toPublicCheck,
   type ComfyCheckSource,
@@ -229,13 +231,14 @@ export function loadMinimaxH3Workflow(): Workflow {
 export function comfyPlanForJob(
   job: { modelName?: string },
   settings: { comfyuiWorkflow: ComfyGraphId; comfyLowMemory?: boolean }
-): { workflow: ComfyGraphId; lowMemory: boolean } {
+): { workflow: ComfyGraphId; lowMemory: boolean; generatedAudio: boolean } {
   const named = comfyWorkflowFromModelName(job.modelName);
   const workflow = named ?? settings.comfyuiWorkflow;
   const lowMemory = job.modelName
     ? job.modelName.includes(LOW_MEMORY_MARK)
     : Boolean(settings.comfyLowMemory);
-  return { workflow, lowMemory };
+  const generatedAudio = generatedAudioFromModelName(job.modelName) && (workflow === "ltx" || workflow === "ltx25");
+  return { workflow, lowMemory, generatedAudio };
 }
 
 export function comfyWorkflowForJob(
@@ -357,6 +360,8 @@ export function patchLtxWorkflow(
     width: number;
     height: number;
     fps: number;
+    /** On decodes the audio latent into the mp4. Off leaves the silent file. */
+    generatedAudio?: boolean;
   }
 ): Workflow {
   const next = structuredClone(workflow);
@@ -385,6 +390,7 @@ export function patchLtxWorkflow(
     if (node.class_type === "RandomNoise") node.inputs.noise_seed = opts.seed;
     if (node.class_type === "CreateVideo") node.inputs.fps = opts.fps;
   }
+  applyLtxGeneratedAudio(next, opts.generatedAudio === true);
   return next;
 }
 
@@ -395,7 +401,8 @@ const LTX25_FLF_ONLY = ["33", "34", "35", "36", "37", "38"];
  * Two-stage image-to-video, unless the shot has an end still.
  * An end still switches the queued prompt to the single-stage first-last path:
  * LTXVAddGuide at frame 0 and at frame -1, then one sample, no latent upscaler.
- * The audio latent is built and sampled, then dropped. The saved file is silent video.
+ * Generated audio decodes the separated audio latent into CreateVideo.
+ * Off leaves that latent unused, so the saved file stays silent.
  */
 export function patchLtx25Workflow(
   workflow: Workflow,
@@ -408,6 +415,8 @@ export function patchLtx25Workflow(
     width: number;
     height: number;
     fps: number;
+    /** On decodes the audio latent into the mp4. Off leaves the silent file. */
+    generatedAudio?: boolean;
   }
 ): Workflow {
   const next = structuredClone(workflow);
@@ -494,7 +503,80 @@ export function patchLtx25Workflow(
     if (sampler?.inputs) sampler.inputs.sampler = ["13", 0];
     if (decode?.inputs) decode.inputs.samples = ["29", 0];
   }
+  applyLtxGeneratedAudio(next, opts.generatedAudio === true);
   return next;
+}
+
+/**
+ * Official LTX-2 I2V templates use the core node LTXVAudioVAEDecode.
+ * samples is LTXVSeparateAVLatent output 1 (the audio latent).
+ * audio_vae is the same VAE LTXVEmptyLatentAudio already uses.
+ * CreateVideo.audio takes that AUDIO output. SaveVideo writes the file.
+ * Off deletes the decode node and the audio input, which is today's silent mp4.
+ */
+function applyLtxGeneratedAudio(workflow: Workflow, enabled: boolean): void {
+  for (const id of Object.keys(workflow)) {
+    if (workflow[id]?.class_type === "LTXVAudioVAEDecode") delete workflow[id];
+  }
+  for (const node of Object.values(workflow)) {
+    if (node.class_type === "CreateVideo" && node.inputs && Object.prototype.hasOwnProperty.call(node.inputs, "audio")) {
+      delete node.inputs.audio;
+    }
+  }
+  if (!enabled) return;
+  const separateId = ltxAudioSeparateId(workflow);
+  const audioVae = ltxAudioVaeLink(workflow);
+  if (!separateId || !audioVae) return;
+  const id = nextWorkflowId(workflow);
+  workflow[id] = {
+    class_type: "LTXVAudioVAEDecode",
+    inputs: {
+      samples: [separateId, 1],
+      audio_vae: audioVae,
+    },
+    _meta: { title: "LTXV Audio VAE Decode" },
+  };
+  for (const node of Object.values(workflow)) {
+    if (node.class_type === "CreateVideo" && node.inputs) node.inputs.audio = [id, 0];
+  }
+}
+
+function workflowLink(value: unknown): [string, number] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const [id, slot] = value;
+  if ((typeof id !== "string" && typeof id !== "number") || typeof slot !== "number") return null;
+  return [String(id), slot];
+}
+
+/** The separate node whose video output is the one the picture decode uses. */
+function ltxAudioSeparateId(workflow: Workflow): string | null {
+  const decode = Object.entries(workflow).find(([, node]) => node.class_type === "VAEDecodeTiled");
+  const samples = workflowLink(decode?.[1].inputs?.samples);
+  if (!samples) return null;
+  const source = workflow[samples[0]];
+  if (!source) return null;
+  if (source.class_type === "LTXVSeparateAVLatent" && samples[1] === 0) return samples[0];
+  if (source.class_type === "LTXVCropGuides") {
+    const latent = workflowLink(source.inputs?.latent);
+    if (!latent) return null;
+    const separate = workflow[latent[0]];
+    if (separate?.class_type === "LTXVSeparateAVLatent" && latent[1] === 0) return latent[0];
+  }
+  return null;
+}
+
+function ltxAudioVaeLink(workflow: Workflow): [string, number] | null {
+  const empty = Object.values(workflow).find((node) => node.class_type === "LTXVEmptyLatentAudio");
+  return workflowLink(empty?.inputs?.audio_vae);
+}
+
+function nextWorkflowId(workflow: Workflow): string {
+  let max = 0;
+  for (const id of Object.keys(workflow)) {
+    const value = Number(id);
+    if (Number.isInteger(value) && value > max) max = value;
+  }
+  return String(max + 1);
 }
 
 export function patchMinimaxH3Workflow(
@@ -720,6 +802,13 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   const endImageName = sendEnd && endAbs ? await uploadComfyImage(base, jobId, endAbs, "end image") : null;
 
   const seed = providerSeed(job.seed);
+  const writeLtxAudio =
+    plan.generatedAudio &&
+    !(
+      readiness.reachable &&
+      readiness.objectInfo !== undefined &&
+      !ltxAudioDecodeAvailable(readiness.objectInfo)
+    );
   let workflow: Workflow;
   if (plan.workflow === "ltx25") {
     const pixels = imagePixelSize(bytes);
@@ -735,6 +824,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       width: size.width,
       height: size.height,
       fps: LTX25_FPS,
+      generatedAudio: writeLtxAudio,
     });
   } else if (plan.workflow === "ltx") {
     const pixels = imagePixelSize(bytes);
@@ -749,6 +839,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
       width: size.width,
       height: size.height,
       fps: LTX_FPS,
+      generatedAudio: writeLtxAudio,
     });
   } else if (plan.workflow === "wan") {
     const pixels = imagePixelSize(bytes);

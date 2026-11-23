@@ -691,8 +691,108 @@ async function checkComfyObjectInfo() {
   );
   const ltx25Video = ltx25PlainNodes.find((node) => node.class_type === "CreateVideo");
   assert(ltx25Video?.inputs?.fps === ltx25Mod.LTX25_FPS, "ltx25 fps");
-  assert(!Object.prototype.hasOwnProperty.call(ltx25Video?.inputs || {}, "audio"), "ltx25 does not write audio into the file");
-  assert(!ltx25PlainNodes.some((node) => node.class_type === "LTXVAudioVAEDecode"), "ltx25 does not decode the audio latent");
+  assert(!Object.prototype.hasOwnProperty.call(ltx25Video?.inputs || {}, "audio"), "ltx25 with generated audio off does not write audio into the file");
+  assert(!ltx25PlainNodes.some((node) => node.class_type === "LTXVAudioVAEDecode"), "ltx25 with generated audio off does not decode the audio latent");
+  const ltx25Audio = comfy.patchLtx25Workflow(comfy.loadLtx25Workflow(), {
+    imageName: "start.png",
+    prompt: "a harbor at dusk",
+    seed: 17,
+    frames: ltx25Mod.ltx25FrameCount(4, false),
+    width: 960,
+    height: 512,
+    fps: ltx25Mod.LTX25_FPS,
+    generatedAudio: true,
+  });
+  const ltx25AudioNodes = Object.values(ltx25Audio);
+  const ltx25Decode = ltx25AudioNodes.find((node) => node.class_type === "LTXVAudioVAEDecode");
+  const ltx25AudioVideo = ltx25AudioNodes.find((node) => node.class_type === "CreateVideo");
+  const ltx25FinalSeparate = ltx25AudioNodes.find((node) => node.class_type === "LTXVSeparateAVLatent" && node._meta?.title === "Second stage separate");
+  assert(ltx25Decode?.inputs?.samples?.[0] && ltx25Audio["29"]?.class_type === "LTXVSeparateAVLatent", "ltx25 audio decode reads the final separate");
+  assert(
+    Array.isArray(ltx25Decode?.inputs?.samples) && ltx25Decode.inputs.samples[0] === "29" && ltx25Decode.inputs.samples[1] === 1,
+    "ltx25 audio decode uses separate output 1"
+  );
+  assert(
+    Array.isArray(ltx25Decode?.inputs?.audio_vae) && ltx25Decode.inputs.audio_vae[0] === "4" && ltx25Decode.inputs.audio_vae[1] === 0,
+    "ltx25 audio decode uses the audio VAE loader"
+  );
+  assert(
+    Array.isArray(ltx25AudioVideo?.inputs?.audio) && ltx25Audio[String(ltx25AudioVideo.inputs.audio[0])]?.class_type === "LTXVAudioVAEDecode",
+    "ltx25 CreateVideo receives the decoded audio"
+  );
+  assert(ltx25FinalSeparate, "the second-stage separate stays in the two-stage graph");
+  const ltx25LowAudio = comfy.patchLtx25Workflow(comfy.loadLtx25Workflow(), {
+    imageName: "start.png",
+    prompt: "a harbor at dusk",
+    seed: 17,
+    frames: ltx25Mod.ltx25FrameCount(4, true),
+    width: ltx25Mod.ltx25FrameSize(960, 512, true).width,
+    height: ltx25Mod.ltx25FrameSize(960, 512, true).height,
+    fps: ltx25Mod.LTX25_FPS,
+    generatedAudio: true,
+  });
+  const ltx25LowAudioNodes = Object.values(ltx25LowAudio);
+  const ltx25LowLatentAudio = ltx25LowAudioNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  const ltx25LowBox = ltx25Mod.ltx25StageSize(ltx25Mod.ltx25FrameSize(960, 512, true).width, ltx25Mod.ltx25FrameSize(960, 512, true).height);
+  assert(ltx25LowLatentAudio?.inputs?.width === ltx25LowBox.width && ltx25LowLatentAudio?.inputs?.height === ltx25LowBox.height, "low memory still fits the first stage");
+  assert(ltx25LowLatentAudio?.inputs?.length === ltx25Mod.ltx25FrameCount(4, true), "low memory still caps the frame count");
+  assert(ltx25LowAudioNodes.some((node) => node.class_type === "LTXVAudioVAEDecode"), "low memory still decodes generated audio");
+  const ltx25AudioFlf = comfy.patchLtx25Workflow(comfy.loadLtx25Workflow(), {
+    imageName: "start.png",
+    endImageName: "end.png",
+    prompt: "a harbor at dusk",
+    seed: 17,
+    frames: ltx25Mod.ltx25FrameCount(4, false),
+    width: 960,
+    height: 512,
+    fps: ltx25Mod.LTX25_FPS,
+    generatedAudio: true,
+  });
+  const ltx25FlfDecode = Object.values(ltx25AudioFlf).find((node) => node.class_type === "LTXVAudioVAEDecode");
+  assert(
+    Array.isArray(ltx25FlfDecode?.inputs?.samples) && ltx25FlfDecode.inputs.samples[0] === "18" && ltx25FlfDecode.inputs.samples[1] === 1,
+    "ltx25 first-last decodes the single sample's audio latent"
+  );
+  assert(!ltx25AudioFlf["29"], "first-last still drops the second stage when audio is on");
+  const ltxModForAudio = await import("../src/lib/ltx");
+  const ltxSilent = comfy.patchLtxWorkflow(comfy.loadLtxWorkflow(), {
+    imageName: "start.png",
+    prompt: "a harbor at dusk",
+    seed: 3,
+    frames: ltxModForAudio.ltxFrameCount(4, false),
+    width: 960,
+    height: 544,
+    fps: ltxModForAudio.LTX_FPS,
+    generatedAudio: false,
+  });
+  assert(!Object.values(ltxSilent).some((node) => node.class_type === "LTXVAudioVAEDecode"), "ltx off stays silent");
+  const ltxHeard = comfy.patchLtxWorkflow(comfy.loadLtxWorkflow(), {
+    imageName: "start.png",
+    prompt: "a harbor at dusk",
+    seed: 3,
+    frames: ltxModForAudio.ltxFrameCount(4, true),
+    width: ltxModForAudio.ltxFrameSize(960, 544, true).width,
+    height: ltxModForAudio.ltxFrameSize(960, 544, true).height,
+    fps: ltxModForAudio.LTX_FPS,
+    generatedAudio: true,
+  });
+  const ltxHeardNodes = Object.values(ltxHeard);
+  const ltxHeardDecode = ltxHeardNodes.find((node) => node.class_type === "LTXVAudioVAEDecode");
+  const ltxHeardVideo = ltxHeardNodes.find((node) => node.class_type === "CreateVideo");
+  const ltxHeardLatent = ltxHeardNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+  assert(
+    Array.isArray(ltxHeardDecode?.inputs?.samples) && ltxHeardDecode.inputs.samples[0] === "19" && ltxHeardDecode.inputs.samples[1] === 1,
+    "ltx audio decode uses the separate node's audio output"
+  );
+  assert(
+    Array.isArray(ltxHeardDecode?.inputs?.audio_vae) && ltxHeardDecode.inputs.audio_vae[0] === "3",
+    "ltx audio decode uses the checkpoint audio VAE"
+  );
+  assert(Array.isArray(ltxHeardVideo?.inputs?.audio), "ltx CreateVideo receives the decoded audio");
+  assert(
+    ltxHeardLatent?.inputs?.width === ltxModForAudio.LTX_LOW_WIDTH && ltxHeardLatent?.inputs?.length === ltxModForAudio.LTX_LOW_MAX_FRAMES,
+    "ltx low-memory size stays in place when audio is on"
+  );
   assert(!ltx25PlainNodes.some((node) => node.class_type === "TextGenerateLTX2Prompt"), "ltx25 leaves the prompt enhancer out");
 
   const ltx25Flf = comfy.patchLtx25Workflow(comfy.loadLtx25Workflow(), {
@@ -754,6 +854,46 @@ async function checkComfyObjectInfo() {
     "a missing LTX-2.5 upscaler blocks the graph"
   );
   assert(/latent_upscale_models/.test(ltx25MissingFile.missingModels.find((item) => item.filename === info.LTX25_UPSCALER)?.nextStep || ""), "the upscaler note names its folder");
+
+  const audioNodeMissingInfo = JSON.parse(JSON.stringify(fixture)) as Record<string, unknown>;
+  delete audioNodeMissingInfo.LTXVAudioVAEDecode;
+  for (const id of ["ltx", "ltx25"] as const) {
+    const quiet = readiness.checkComfyReadiness(run.loadShippedWorkflow(id), audioNodeMissingInfo, readiness.modelSlotsFor(id));
+    assert(quiet.ok && !quiet.blocksQueue, `${id} still runs when only the audio decode node is missing`);
+    assert(quiet.audioNotes.some((item) => item.classType === "LTXVAudioVAEDecode"), `${id} reports the missing audio decode node`);
+    assert(/Generated audio will be off/.test(quiet.audioNotes[0]?.nextStep || ""), `${id} says generated audio will be off`);
+    assert(!/does not block/.test(quiet.audioNotes[0]?.nextStep || "") || /does not block the queue/.test(quiet.audioNotes[0]?.nextStep || ""), `${id} note`);
+  }
+  const audioTable = readiness.formatComfyCheckTable(
+    run.serverCheck({
+      reachable: true,
+      url: "http://127.0.0.1:8188",
+      source: "cli",
+      workflows: run.assessShippedWorkflows(["ltx", "ltx25"], audioNodeMissingInfo),
+      timedOut: false,
+      httpStatus: 200,
+      detail: "",
+    })
+  );
+  assert(/Generated audio will be off/.test(audioTable), "comfy:check says generated audio will be off");
+  assert(/Result: pass/.test(audioTable), "a missing audio decode node does not fail comfy:check");
+  const audioVaeMissingInfo = JSON.parse(JSON.stringify(fixture)) as {
+    VAELoader?: { input?: { required?: { vae_name?: unknown } } };
+  };
+  if (audioVaeMissingInfo.VAELoader?.input?.required) {
+    audioVaeMissingInfo.VAELoader.input.required.vae_name = [[info.LTX25_VIDEO_VAE], {}];
+  }
+  const audioVaeMissing = readiness.checkComfyReadiness(
+    run.loadShippedWorkflow("ltx25"),
+    audioVaeMissingInfo,
+    readiness.modelSlotsFor("ltx25")
+  );
+  const audioVaeIssue = audioVaeMissing.missingModels.find((item) => item.filename === info.LTX25_AUDIO_VAE);
+  assert(audioVaeMissing.blocksQueue && Boolean(audioVaeIssue), "a missing LTX-2.5 audio VAE still blocks the render");
+  assert(/does not start/.test(audioVaeIssue?.nextStep || ""), "the audio VAE note says the render does not start");
+  assert(/Generated audio is off|Turning Generated audio off/.test(audioVaeIssue?.nextStep || ""), "the audio VAE note says the option does not skip the file");
+  const wanAudio = readiness.checkComfyReadiness(run.loadShippedWorkflow("wan"), audioNodeMissingInfo, readiness.modelSlotsFor("wan"));
+  assert(wanAudio.audioNotes.length === 0, "Wan does not report an LTX audio note");
 
   const shipped = run.assessShippedWorkflows(["svd", "wan", "wan-flf", "ltx", "ltx25", "minimax-h3"], fixture);
   assert(shipped.every((item) => item.ok), `fixture should pass: ${JSON.stringify(shipped.filter((item) => !item.ok))}`);
@@ -1415,6 +1555,111 @@ async function checkComfyObjectInfo() {
       "the queued prompt keeps the uploaded image name"
     );
     assert(!postedPrompt.includes(secret), "the queued prompt does not include the auth header");
+
+    postedPrompt = "";
+    const heardJob = storage.createJob({
+      projectId: SAMPLE_PROJECT_ID,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: shot.presetId,
+      provider: "comfyui",
+      imagePath: shot.startImagePath!,
+      modelName: info.comfyModelName("ltx", true, true),
+      durationSec: 10,
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(heardJob.id);
+    const heardDone = storage.getJob(heardJob.id);
+    assert(heardDone?.status === "completed", `generated audio job: ${heardDone?.status} ${heardDone?.error}`);
+    const heardPosted = JSON.parse(postedPrompt) as {
+      prompt?: Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
+    };
+    const heardNodes = Object.values(heardPosted.prompt || {});
+    const heardDecode = heardNodes.find((node) => node.class_type === "LTXVAudioVAEDecode");
+    const heardVideo = heardNodes.find((node) => node.class_type === "CreateVideo");
+    const heardLatent = heardNodes.find((node) => node.class_type === "EmptyLTXVLatentVideo");
+    assert(heardDecode && Array.isArray(heardDecode.inputs?.samples) && heardDecode.inputs.samples[1] === 1, "the queued LTX graph decodes audio");
+    assert(Array.isArray(heardVideo?.inputs?.audio), "the queued LTX graph passes audio to CreateVideo");
+    assert(heardLatent?.inputs?.length === ltxMod.ltxFrameCount(10, true), "low memory still caps frames when audio is on");
+    assert(heardVideo?.inputs?.chroma_subsampling === "auto", "generated audio still fills the required video input");
+
+    const noDecodeInfo = JSON.parse(JSON.stringify(newer)) as Record<string, unknown>;
+    delete noDecodeInfo.LTXVAudioVAEDecode;
+    let quietPosted = "";
+    const quietServer = await serve((req, res) => {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/system_stats") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/object_info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(noDecodeInfo));
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/upload/image") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ name: "quiet-start.png", subfolder: "", type: "input" }));
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        let body = "";
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          quietPosted = body;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ prompt_id: "quiet-1", node_errors: {} }));
+        });
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/history/quiet-1") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            "quiet-1": {
+              status: { status_str: "success", completed: true },
+              outputs: { "22": { images: [{ filename: "quiet.mp4", subfolder: "", type: "output" }] } },
+            },
+          })
+        );
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/view") {
+        res.writeHead(200, { "Content-Type": "video/mp4" });
+        res.end(mp4);
+        return;
+      }
+      res.writeHead(404);
+      res.end("missing");
+    });
+    servers.push(quietServer);
+    storage.saveSettings({ provider: "comfyui", comfyuiBaseUrl: quietServer.url, comfyuiWorkflow: "ltx" });
+    const quietJob = storage.createJob({
+      projectId: SAMPLE_PROJECT_ID,
+      shotId: shot.id,
+      prompt: shot.prompt,
+      presetId: shot.presetId,
+      provider: "comfyui",
+      imagePath: shot.startImagePath!,
+      modelName: info.comfyModelName("ltx", false, true),
+      durationSec: 2,
+      status: "queued",
+    });
+    await comfy.runComfyuiGenerate(quietJob.id);
+    const quietDone = storage.getJob(quietJob.id);
+    assert(quietDone?.status === "completed", `missing decode node still finishes: ${quietDone?.status} ${quietDone?.error}`);
+    const quietNodes = Object.values(
+      (JSON.parse(quietPosted) as { prompt?: Record<string, { class_type?: string; inputs?: Record<string, unknown> }> }).prompt || {}
+    );
+    assert(!quietNodes.some((node) => node.class_type === "LTXVAudioVAEDecode"), "a missing decode node leaves the graph silent");
+    const quietVideo = quietNodes.find((node) => node.class_type === "CreateVideo");
+    assert(!Object.prototype.hasOwnProperty.call(quietVideo?.inputs || {}, "audio"), "the silent fallback does not set CreateVideo.audio");
   } finally {
     if (prevTimeout === undefined) delete process.env.STAR_DUST_COMFY_OBJECT_INFO_MS;
     else process.env.STAR_DUST_COMFY_OBJECT_INFO_MS = prevTimeout;
@@ -3564,6 +3809,37 @@ async function main() {
     shot: storage.getShot(shot.id),
   });
   assert(inherited.workflow === "ltx" && inherited.lowMemory === true, "shot low-memory inherits project LTX");
+  assert(inherited.generatedAudio === true, "LTX generated audio defaults on");
+  storage.updateProject(SAMPLE_PROJECT_ID, { generatedAudio: false });
+  const audioOff = choiceMod.resolveComfyChoice({
+    settings: storage.getSettings(),
+    project: storage.getProject(SAMPLE_PROJECT_ID),
+    shot: storage.getShot(shot.id),
+  });
+  assert(audioOff.generatedAudio === false, "a project can turn LTX generated audio off");
+  storage.updateShot(shot.id, { generatedAudio: true });
+  const audioOn = choiceMod.resolveComfyChoice({
+    settings: storage.getSettings(),
+    project: storage.getProject(SAMPLE_PROJECT_ID),
+    shot: storage.getShot(shot.id),
+  });
+  assert(audioOn.generatedAudio === true, "a shot can turn LTX generated audio back on");
+  const wanIgnored = choiceMod.resolveGeneratedAudio({
+    workflow: "wan",
+    project: { generatedAudio: true },
+    shot: { generatedAudio: true },
+  });
+  assert(wanIgnored === false, "Wan ignores generated audio");
+  assert(
+    choiceMod.resolveGeneratedAudio({ workflow: "custom:harbor", shot: { generatedAudio: true } }) === false,
+    "a custom graph ignores generated audio"
+  );
+  const onKey = (await import("../src/lib/input-key")).desiredClipKey(storage.getShot(shot.id)!);
+  storage.updateShot(shot.id, { generatedAudio: false });
+  const offKey = (await import("../src/lib/input-key")).desiredClipKey(storage.getShot(shot.id)!);
+  assert(onKey !== offKey, "generated audio changes the LTX clip key");
+  storage.updateProject(SAMPLE_PROJECT_ID, { generatedAudio: null });
+  storage.updateShot(shot.id, { generatedAudio: null });
   storage.updateShot(shot.id, { comfyuiWorkflow: "wan", comfyLowMemory: false });
   const overridden = choiceMod.resolveComfyChoice({
     settings: storage.getSettings(),
@@ -7957,6 +8233,70 @@ async function main() {
   const bedDur = mediaDuration(bedAbs);
   assert(bedDur > 3.6 && bedDur < 4.5, `music-bed stitch duration ${bedDur} stays near 4s`);
   assert(hasAudioStream(bedAbs), "the stitched mp4 has an audio stream");
+
+  const ltxAudioProject = storage.createProject("LTX clip audio", "");
+  const ltxAudioStill = conformStill(ltxAudioProject.id);
+  const ltxAudioShots = [0, 1].map((index) =>
+    storage.createShot({
+      projectId: ltxAudioProject.id,
+      prompt: `ltx audio ${index}`,
+      presetId: "slow-zoom-in",
+      durationSec: 1,
+      startImagePath: ltxAudioStill,
+      comfyuiWorkflow: index === 0 ? "ltx" : "ltx25",
+    })
+  );
+  const ltxAudioRels = ltxAudioShots.map((shot, index) =>
+    attachClip(ltxAudioProject.id, shot.id, ltxAudioStill, `ltx-audio-${index}.mp4`, [
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=${index === 0 ? "navy" : "teal"}:s=320x180:r=24:d=1`,
+      ...(index === 0
+        ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1", "-c:a", "aac", "-shortest"]
+        : ["-an"]),
+    ])
+  );
+  const ltxAudioJobs = storage.listJobs(ltxAudioProject.id);
+  for (const [index, shot] of ltxAudioShots.entries()) {
+    const job = ltxAudioJobs.find((item) => item.shotId === shot.id && item.outputPath === ltxAudioRels[index]);
+    assert(job, "the LTX fixture clip has a job");
+    storage.updateJob(job.id, {
+      provider: "comfyui",
+      modelName: info.comfyModelName(index === 0 ? "ltx" : "ltx25", index === 1, true),
+      prompt: shot.prompt,
+    });
+  }
+  assert(hasAudioStream(storage.resolveDataPath(ltxAudioRels[0])), "the LTX-2.3 fixture has an audio stream");
+  assert(!hasAudioStream(storage.resolveDataPath(ltxAudioRels[1])), "the LTX-2.5 fixture was saved silent");
+  const ltxTone = storage.saveUpload(
+    ltxAudioProject.id,
+    "ltx-bed.wav",
+    (() => {
+      const toneAbs = path.join(dataDir, `uploads/${ltxAudioProject.id}/ltx-bed-src.wav`);
+      fs.mkdirSync(path.dirname(toneAbs), { recursive: true });
+      runFfmpegSync(["-y", "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=0.4", toneAbs]);
+      return fs.readFileSync(toneAbs);
+    })()
+  );
+  storage.updateProject(ltxAudioProject.id, { musicBedPath: ltxTone, musicLevelDb: -18, loudnessNormalize: false });
+  const ltxAudioStitch = await stitch.stitchProject(ltxAudioProject.id);
+  const ltxAudioAbs = storage.resolveDataPath(ltxAudioStitch.outputPath);
+  assert(hasAudioStream(ltxAudioAbs), "the stitch keeps LTX clip audio");
+  assert(ltxAudioStitch.finish?.line?.includes("ducked"), `music ducks under LTX audio: ${ltxAudioStitch.finish?.line}`);
+  const ltxManifest = JSON.parse(fs.readFileSync(storage.resolveDataPath(ltxAudioStitch.manifestPath), "utf8")) as {
+    shots: { shotId: string; generatedAudio?: boolean; hasAudio?: boolean }[];
+  };
+  const voicedManifest = ltxManifest.shots.find((item) => item.shotId === ltxAudioShots[0].id);
+  const silentManifest = ltxManifest.shots.find((item) => item.shotId === ltxAudioShots[1].id);
+  assert(voicedManifest?.generatedAudio === true && voicedManifest.hasAudio === true, "the stitch manifest records generated audio and the stream");
+  assert(silentManifest?.generatedAudio === true && silentManifest.hasAudio === false, "the stitch manifest records a silent file separately from the option");
+  const ltxEdit = await edit.buildEditExport(ltxAudioProject.id);
+  const voicedTake = ltxEdit.manifests.find((item) => item.prompt === "ltx audio 0");
+  const silentTake = ltxEdit.manifests.find((item) => item.prompt === "ltx audio 1");
+  assert(voicedTake?.generatedAudio === true && voicedTake.hasAudio === true, "the clip manifest records the LTX audio stream");
+  assert(silentTake?.generatedAudio === true && silentTake.hasAudio === false, "the clip manifest records a silent LTX file");
+  assert(silentTake?.comfyuiWorkflowName?.includes("LTX-2.5"), "the clip manifest still names LTX-2.5");
   assert(
     bedStitch.finish?.line === "music bed, ducked; 2 captions burned in",
     `finish line: ${bedStitch.finish?.line}`
@@ -8558,6 +8898,43 @@ async function main() {
     JSON.stringify(beforeSettings) === JSON.stringify(afterSettings),
     `round trip settings differ\n${JSON.stringify(beforeSettings)}\n${JSON.stringify(afterSettings)}`
   );
+  assert(afterSettings.generatedAudio === null, "an unset project exports generated audio as null");
+  storage.updateProject(imported.project.id, { generatedAudio: false, comfyuiWorkflow: "ltx" });
+  const audioListShot = storage.listShots(imported.project.id)[1];
+  storage.updateShot(audioListShot.id, { generatedAudio: true, comfyuiWorkflow: "ltx25" });
+  const audioBuilt = shotlist.buildShotList(imported.project.id);
+  const audioSettings = shotlist.renderSettingsOf(imported.project.id);
+  assert(audioSettings.generatedAudio === false, "export writes generated audio off");
+  assert(audioSettings.comfyuiWorkflow === "LTX-2.3 distilled FP8", "the project workflow name stays a title");
+  assert(audioSettings.shots[1]?.generatedAudio === true, "export writes the shot's generated audio");
+  assert(audioSettings.shots[1]?.comfyuiWorkflow === "LTX-2.5", "the shot workflow name stays a title");
+  const audioAgain = shotlist.importShotList({
+    json: shotlist.shotListJson(audioBuilt.document),
+    files: audioBuilt.files,
+    source: "json",
+  });
+  assert(audioAgain.ok, `generated audio import failed: ${audioAgain.ok ? "" : audioAgain.errors.join(" | ")}`);
+  if (!audioAgain.ok) throw new Error("unreachable");
+  const audioBack = shotlist.renderSettingsOf(audioAgain.project.id);
+  assert(
+    JSON.stringify(audioSettings) === JSON.stringify(audioBack),
+    `generated audio round trip differs\n${JSON.stringify(audioSettings)}\n${JSON.stringify(audioBack)}`
+  );
+  const omittedAudio = JSON.parse(shotlist.shotListJson(audioBuilt.document)) as {
+    generatedAudio?: boolean;
+    shots: { generatedAudio?: boolean }[];
+  };
+  delete omittedAudio.generatedAudio;
+  for (const entry of omittedAudio.shots) delete entry.generatedAudio;
+  const omittedImport = shotlist.importShotList({
+    json: JSON.stringify(omittedAudio),
+    files: audioBuilt.files,
+    source: "json",
+  });
+  assert(omittedImport.ok, `an older shot list failed: ${omittedImport.ok ? "" : omittedImport.errors.join(" | ")}`);
+  if (!omittedImport.ok) throw new Error("unreachable");
+  assert(omittedImport.project.generatedAudio == null, "an omitted project flag stays unset");
+  assert(storage.listShots(omittedImport.project.id).every((item) => item.generatedAudio == null), "an omitted shot flag stays unset");
 
   const bad = {
     schema: "stardust.shotlist/9",

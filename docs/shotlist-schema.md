@@ -31,6 +31,7 @@ After each clip is written, the command prints a note when the file is all black
 | `provider` | `mock`, `fal`, `replicate`, or `comfyui`. The name of the backend. Render all in the studio still uses Settings. |
 | `comfyuiWorkflow` | A workflow name, `custom:<slug>`, or `null` to inherit the app default. Names: Stable Video Diffusion, Wan 2.2 TI2V-5B, Wan 2.2 14B FLF2V, LTX-2.3 distilled FP8, LTX-2.5, MiniMax H3. The internal shipped ids (`svd`, `wan`, `wan-flf`, `ltx`, `ltx25`, `minimax-h3`) are not accepted. A custom graph is the id, such as `custom:wan22-ti2v-5b`, for a pair of files in `data/workflows`. The display name is not accepted. A missing or invalid custom graph is an error, and the file is not imported as another graph. |
 | `comfyLowMemory` | `true`, `false`, or `null` to inherit. |
+| `generatedAudio` | `true`, `false`, or `null`. LTX-2.3 and LTX-2.5 only. `null` means on. `false` saves a silent mp4. Other graphs ignore it. Omitted means `null`, so an older file keeps the default. |
 | `output` | `{ "fps", "width", "height" }`. Each is a number or `null`. `null` leaves that stitch choice to the clips. fps is a whole number from 1 to 60. Width and height are both set, or both `null`, and each is an even number from 16 to 4096. |
 | `transition` | The project join. See below. |
 | `chainTrimStartFrames` | Whole number from 0 to 4. Default in a new project is 1. |
@@ -66,6 +67,7 @@ On a shot, `transition` is that object, or `null` to inherit the project join. T
 | `evenColour` | `true`, `false`, or `null` to inherit the project. The boundary that leads into this shot. `true` matches this shot to the first included shot. `false` leaves this shot's colour as rendered. Omitted means `null`. |
 | `comfyuiWorkflow` | A workflow name, `custom:<slug>`, or `null` to inherit the project, then the app default. |
 | `comfyLowMemory` | `true`, `false`, or `null` to inherit. |
+| `generatedAudio` | `true`, `false`, or `null` to inherit the project. On LTX-2.3 and LTX-2.5, a null project means on. `false` saves a silent mp4. Other graphs ignore it. Omitted means `null`. |
 | `loras` | A list of `{ "name", "strength" }`, or `null` to inherit the project list. The same limits as the project list. An empty list means this shot loads no LoRA. Omitted means `null`. |
 
-Unknown fields are an error. A missing field is an error, except `evenColour`, `smoothFps`, and `loras`. An older file that omits `evenColour` stays off on the project and inherits on each shot. An older file that omits `smoothFps` stays off. An older file that omits `loras` has none on the project, and each shot inherits. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.
+Unknown fields are an error. A missing field is an error, except `evenColour`, `smoothFps`, `loras`, and `generatedAudio`. An older file that omits `evenColour` stays off on the project and inherits on each shot. An older file that omits `smoothFps` stays off. An older file that omits `loras` has none on the project, and each shot inherits. An older file that omits `generatedAudio` leaves it unset, so LTX-2.3 and LTX-2.5 use generated audio. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.

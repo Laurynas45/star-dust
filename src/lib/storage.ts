@@ -89,6 +89,7 @@ function openDatabase(): DB {
       updated_at TEXT NOT NULL,
       comfyui_workflow TEXT,
       comfy_low_memory INTEGER,
+      generated_audio INTEGER,
       seam_mode TEXT NOT NULL DEFAULT 'cut',
       seam_fade_sec REAL NOT NULL DEFAULT 0.5,
       seam_fade_unit TEXT NOT NULL DEFAULT 'seconds',
@@ -124,6 +125,7 @@ function openDatabase(): DB {
       updated_at TEXT NOT NULL,
       comfyui_workflow TEXT,
       comfy_low_memory INTEGER,
+      generated_audio INTEGER,
       chain_from_previous INTEGER NOT NULL DEFAULT 0,
       chained_start_image_path TEXT,
       chained_from_job_id TEXT,
@@ -259,6 +261,12 @@ function migrate(db: DB) {
   }
   if (!hasColumn(db, "shots", "comfy_low_memory")) {
     db.exec("ALTER TABLE shots ADD COLUMN comfy_low_memory INTEGER");
+  }
+  if (!hasColumn(db, "projects", "generated_audio")) {
+    db.exec("ALTER TABLE projects ADD COLUMN generated_audio INTEGER");
+  }
+  if (!hasColumn(db, "shots", "generated_audio")) {
+    db.exec("ALTER TABLE shots ADD COLUMN generated_audio INTEGER");
   }
   if (!hasColumn(db, "projects", "seam_mode")) {
     db.exec("ALTER TABLE projects ADD COLUMN seam_mode TEXT NOT NULL DEFAULT 'cut'");
@@ -490,6 +498,7 @@ function mapProject(row: Record<string, unknown>): Project {
     coverPath: str(row.cover_path),
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
+    generatedAudio: parseOptionalFlag(row.generated_audio),
     seamMode: parseSeamMode(row.seam_mode) ?? "cut",
     seamFadeSec:
       row.seam_fade_sec == null ? DEFAULT_SEAM_FADE_SEC : clampSeamFade(Number(row.seam_fade_sec)),
@@ -636,6 +645,7 @@ function mapShot(row: Record<string, unknown>): Shot {
     lockedJobId: str(row.locked_job_id),
     comfyuiWorkflow: parseOptionalWorkflow(row.comfyui_workflow),
     comfyLowMemory: parseOptionalFlag(row.comfy_low_memory),
+    generatedAudio: parseOptionalFlag(row.generated_audio),
     chainFromPrevious: Number(row.chain_from_previous) === 1,
     chainFrameBack: clampChainFrameBack(row.chain_frame_back == null ? 0 : Number(row.chain_frame_back)),
     chainedStartImagePath: str(row.chained_start_image_path),
@@ -780,6 +790,7 @@ export function createProject(name: string, description = "", loras: LoraRef[] =
     evenColour: false,
     smoothFps: false,
     loras,
+    generatedAudio: null,
   };
   getDb()
     .prepare(
@@ -802,6 +813,7 @@ export function updateProject(
       | "description"
       | "comfyuiWorkflow"
       | "comfyLowMemory"
+      | "generatedAudio"
       | "seamMode"
       | "seamFadeSec"
       | "seamFadeUnit"
@@ -842,6 +854,8 @@ export function updateProject(
       patch.comfyuiWorkflow === undefined ? current.comfyuiWorkflow ?? null : patch.comfyuiWorkflow,
     comfyLowMemory:
       patch.comfyLowMemory === undefined ? current.comfyLowMemory ?? null : patch.comfyLowMemory,
+    generatedAudio:
+      patch.generatedAudio === undefined ? current.generatedAudio ?? null : patch.generatedAudio,
     seamMode: patch.seamMode === undefined ? current.seamMode : patch.seamMode,
     seamFadeSec:
       patch.seamFadeSec === undefined ? current.seamFadeSec : clampSeamFade(patch.seamFadeSec),
@@ -889,7 +903,7 @@ export function updateProject(
            output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
            music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
            captions_path = ?, caption_mode = ?, shotlist_provider = ?, even_colour = ?,
-           smooth_fps = ?, loras_json = ?
+           smooth_fps = ?, loras_json = ?, generated_audio = ?
        WHERE id = ?`
     )
     .run(
@@ -920,6 +934,7 @@ export function updateProject(
       next.evenColour ? 1 : 0,
       next.smoothFps ? 1 : 0,
       encodeProjectLoras(next.loras),
+      next.generatedAudio == null ? null : next.generatedAudio ? 1 : 0,
       id
     );
   return getProject(id);
@@ -973,6 +988,7 @@ export function createShot(input: {
   endImagePath?: string;
   comfyuiWorkflow?: ComfyGraphId | null;
   comfyLowMemory?: boolean | null;
+  generatedAudio?: boolean | null;
   chainFromPrevious?: boolean;
   chainFrameBack?: number;
   loras?: LoraRef[] | null;
@@ -993,6 +1009,7 @@ export function createShot(input: {
     endImagePath: input.endImagePath,
     comfyuiWorkflow: input.comfyuiWorkflow ?? null,
     comfyLowMemory: input.comfyLowMemory ?? null,
+    generatedAudio: input.generatedAudio ?? null,
     chainFromPrevious: Boolean(input.chainFromPrevious),
     chainFrameBack: clampChainFrameBack(input.chainFrameBack ?? 0),
     evenColour: null,
@@ -1007,8 +1024,8 @@ export function createShot(input: {
         id, project_id, position, prompt, preset_id, duration_sec,
         start_image_path, end_image_path, created_at, updated_at,
         comfyui_workflow, comfy_low_memory, chain_from_previous, chain_frame_back,
-        loras_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        loras_json, generated_audio
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       shot.id,
@@ -1025,7 +1042,8 @@ export function createShot(input: {
       shot.comfyLowMemory == null ? null : shot.comfyLowMemory ? 1 : 0,
       shot.chainFromPrevious ? 1 : 0,
       shot.chainFrameBack,
-      encodeShotLoras(shot.loras)
+      encodeShotLoras(shot.loras),
+      shot.generatedAudio == null ? null : shot.generatedAudio ? 1 : 0
     );
   touchProject(shot.projectId);
   return shot;
@@ -1044,6 +1062,7 @@ export function updateShot(
         | "endImagePath"
         | "comfyuiWorkflow"
         | "comfyLowMemory"
+        | "generatedAudio"
         | "chainFromPrevious"
         | "chainFrameBack"
         | "chainedStartImagePath"
@@ -1083,6 +1102,8 @@ export function updateShot(
       patch.comfyuiWorkflow === undefined ? current.comfyuiWorkflow ?? null : patch.comfyuiWorkflow,
     comfyLowMemory:
       patch.comfyLowMemory === undefined ? current.comfyLowMemory ?? null : patch.comfyLowMemory,
+    generatedAudio:
+      patch.generatedAudio === undefined ? current.generatedAudio ?? null : patch.generatedAudio,
     chainFromPrevious:
       patch.chainFromPrevious === undefined ? current.chainFromPrevious : patch.chainFromPrevious,
     chainFrameBack:
@@ -1148,7 +1169,8 @@ export function updateShot(
            seam_mode = ?, seam_fade_sec = ?, seam_fade_unit = ?, seam_fade_frames = ?,
            even_colour = ?, enabled = ?, loras_json = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
-           chain_trim_start_frames = ?, seed = ?, seed_pinned = ?, locked_job_id = ?, updated_at = ?
+           chain_trim_start_frames = ?, seed = ?, seed_pinned = ?, locked_job_id = ?, updated_at = ?,
+           generated_audio = ?
        WHERE id = ?`
     )
     .run(
@@ -1178,6 +1200,7 @@ export function updateShot(
       next.seedPinned ? 1 : 0,
       next.lockedJobId,
       next.updatedAt,
+      next.generatedAudio == null ? null : next.generatedAudio ? 1 : 0,
       id
     );
   touchProject(current.projectId);

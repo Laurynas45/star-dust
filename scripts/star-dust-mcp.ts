@@ -679,6 +679,7 @@ type AddShotArgs = {
   provider?: string | null;
   comfyWorkflow?: string | null;
   comfyLowMemory?: boolean | null;
+  generatedAudio?: boolean | null;
   chainFromPrevious?: boolean | null;
   loras?: LoraRef[] | null;
 };
@@ -726,6 +727,7 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
   if (presetId) form.append("presetId", presetId);
   if (workflow) form.append("comfyuiWorkflow", workflow);
   if (typeof args.comfyLowMemory === "boolean") form.append("comfyLowMemory", args.comfyLowMemory ? "true" : "false");
+  if (typeof args.generatedAudio === "boolean") form.append("generatedAudio", args.generatedAudio ? "true" : "false");
   if (args.chainFromPrevious === true) form.append("chainFromPrevious", "1");
   if (loras) form.append("loras", JSON.stringify(loras));
 
@@ -753,6 +755,7 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
     provider: provider || null,
     comfyWorkflow: text(shot?.comfyuiWorkflow) || workflow || null,
     comfyLowMemory: typeof shot?.comfyLowMemory === "boolean" ? shot.comfyLowMemory : args.comfyLowMemory ?? null,
+    generatedAudio: typeof shot?.generatedAudio === "boolean" ? shot.generatedAudio : args.generatedAudio ?? null,
     startImagePath: text(shot?.startImagePath) || null,
     endImagePath: text(shot?.endImagePath) || null,
     loras: Array.isArray(shot?.loras) ? shot.loras : loras ?? null,
@@ -999,7 +1002,7 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
     "add_shot",
     {
       title: "Add shot",
-      description: `Add one shot. The still is uploaded to POST /api/projects/{id}/shots, so the server stores it and runs its safety check. Pass imagePath (a local file) or imageUrl (http or https). durationSec is ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. presetId is ${PRESET_LIST}. provider sets the studio provider the same way the Providers page does, and the next render uses it. comfyWorkflow (${GRAPH_LIST}) and comfyLowMemory are stored on the shot. loras is an optional list that replaces the project LoRA list. The first shot cannot chain from a previous shot. Keys, credits, the licence gate, and ComfyUI readiness are still enforced when you render.`,
+      description: `Add one shot. The still is uploaded to POST /api/projects/{id}/shots, so the server stores it and runs its safety check. Pass imagePath (a local file) or imageUrl (http or https). durationSec is ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. presetId is ${PRESET_LIST}. provider sets the studio provider the same way the Providers page does, and the next render uses it. comfyWorkflow (${GRAPH_LIST}), comfyLowMemory, and generatedAudio are stored on the shot. generatedAudio applies to LTX-2.3 and LTX-2.5. Omit it to inherit the project, which defaults to on for those graphs. Off saves a silent mp4. SVD, Wan, and custom:<slug> ignore it. loras is an optional list that replaces the project LoRA list. The first shot cannot chain from a previous shot. Keys, credits, the licence gate, and ComfyUI readiness are still enforced when you render.`,
       inputSchema: {
         projectId: z.string().describe("Project id from create_project."),
         prompt: z.string().describe("Shot prompt. The server refuses sexual content involving a minor."),
@@ -1012,6 +1015,10 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
         provider: providerEnum.optional().describe("Sets the studio provider: mock, fal, replicate, or comfyui. Omit to keep the current one."),
         comfyWorkflow: z.string().optional().describe(`ComfyUI graph on this shot: ${GRAPH_LIST}.`),
         comfyLowMemory: z.boolean().optional().describe("Use the graph's low-memory preset on this shot."),
+        generatedAudio: z
+          .boolean()
+          .optional()
+          .describe("LTX-2.3 and LTX-2.5 only. True decodes generated audio into the mp4. False saves a silent mp4. Omit to inherit the project. Other graphs ignore it."),
         chainFromPrevious: z.boolean().optional().describe("When true, and this is not the first shot, the next take starts from the previous shot's last frame."),
         loras: z
           .array(z.object({ name: z.string(), strength: z.number().optional() }).strict())
