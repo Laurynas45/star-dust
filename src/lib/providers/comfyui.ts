@@ -54,6 +54,7 @@ import {
 } from "../comfy-readiness";
 import { injectModelLoras } from "../lora-graph";
 import { effectiveLoras, shouldInjectLoras } from "../loras";
+import { applyCustomSampler, applyShippedSampler, effectiveSampler } from "../sampler";
 import { assessWorkflows, prepareGraphChecks, serverCheck } from "../comfy-readiness-run";
 import {
   customEndMissingMessage,
@@ -62,7 +63,7 @@ import {
   type CustomGraph,
 } from "../custom-workflow";
 import { loadCustomGraphById } from "../custom-workflow-files";
-import { ComfyGraphId, LoraRef, isComfyWorkflowId, isCustomGraphId } from "../types";
+import { ComfyGraphId, ComfyWorkflowId, LoraRef, isComfyWorkflowId, isCustomGraphId } from "../types";
 import {
   WAN_FPS,
   WAN_LOW_MAX_FRAMES,
@@ -226,6 +227,15 @@ export function loadLtx25Workflow(): Workflow {
 export function loadMinimaxH3Workflow(): Workflow {
   const file = path.join(process.cwd(), "workflows", "comfyui-minimax-h3-i2v.api.json");
   return JSON.parse(fs.readFileSync(file, "utf8")) as Workflow;
+}
+
+export function loadShippedWorkflow(id: ComfyWorkflowId): Workflow {
+  if (id === "wan") return loadWanWorkflow();
+  if (id === "wan-flf") return loadWanFlfWorkflow();
+  if (id === "ltx") return loadLtxWorkflow();
+  if (id === "ltx25") return loadLtx25Workflow();
+  if (id === "minimax-h3") return loadMinimaxH3Workflow();
+  return loadWorkflow();
 }
 
 export function comfyPlanForJob(
@@ -911,6 +921,7 @@ export async function runComfyuiGenerate(jobId: string): Promise<void> {
   }
 
   if (requestedLoras.length > 0) workflow = injectModelLoras(workflow, requestedLoras);
+  workflow = applySampler(workflow, plan.workflow, samplerForJob(job), customGraph);
 
   // Stand-in servers used in tests do not expose /object_info. Leave the graph alone then.
   // A real ComfyUI lists required inputs. Omitted ones fail validation, and the server does not fill defaults.
@@ -1157,6 +1168,28 @@ export async function fetchComfyObjectInfo(base: string): Promise<ComfyObjectInf
       timeoutMs,
     };
   }
+}
+
+function applySampler(
+  workflow: Workflow,
+  workflowId: ComfyGraphId,
+  override: { steps: number | null; cfg: number | null },
+  customGraph: CustomGraph | null
+): Workflow {
+  if (override.steps == null && override.cfg == null) return workflow;
+  if (customGraph && isCustomGraphId(workflowId)) {
+    return applyCustomSampler(workflow, customGraph.map, override).workflow;
+  }
+  if (isComfyWorkflowId(workflowId)) return applyShippedSampler(workflow, override).workflow;
+  return workflow;
+}
+
+function samplerForJob(job: { projectId: string; shotId?: string }): { steps: number | null; cfg: number | null } {
+  if (!job.shotId) return { steps: null, cfg: null };
+  const shot = getShot(job.shotId);
+  const project = getProject(job.projectId);
+  if (!shot || !project) return { steps: null, cfg: null };
+  return effectiveSampler(project, shot);
 }
 
 function lorasForJob(job: { projectId: string; shotId?: string }): LoraRef[] {

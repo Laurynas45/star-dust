@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseLoraList } from "@/lib/loras";
+import { parseCfgValue, parseStepsValue } from "@/lib/sampler";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { createShot, getProject, listShots } from "@/lib/storage";
 import { ComfyGraphId, LoraRef, clampChainFrameBack, clampDuration, effectivePrompt, isComfyGraphId, presetById } from "@/lib/types";
@@ -7,6 +8,27 @@ import { ComfyGraphId, LoraRef, clampChainFrameBack, clampDuration, effectivePro
 function formWorkflow(value: FormDataEntryValue | null): ComfyGraphId | null {
   if (isComfyGraphId(value)) return value;
   return null;
+}
+
+function readFormSampler(
+  value: FormDataEntryValue | null,
+  kind: "steps" | "cfg"
+): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (value == null || value === "") return { ok: true, value: null };
+  if (typeof value !== "string") {
+    return {
+      ok: false,
+      error: kind === "steps" ? "steps must be a whole number from 1 to 100." : "cfg must be a number from 0 to 30.",
+    };
+  }
+  if (kind === "steps") {
+    const parsed = parseStepsValue(value, "steps", { allowString: true });
+    if (!parsed.ok) return parsed;
+    return { ok: true, value: parsed.steps };
+  }
+  const parsed = parseCfgValue(value, "cfg", { allowString: true });
+  if (!parsed.ok) return parsed;
+  return { ok: true, value: parsed.cfg };
 }
 
 function formFlag(value: FormDataEntryValue | null): boolean | null {
@@ -52,6 +74,10 @@ export async function POST(
     if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
     loras = parsed.loras;
   }
+  const stepsField = readFormSampler(form.get("steps"), "steps");
+  if (!stepsField.ok) return NextResponse.json({ error: stepsField.error }, { status: 400 });
+  const cfgField = readFormSampler(form.get("cfg"), "cfg");
+  if (!cfgField.ok) return NextResponse.json({ error: cfgField.error }, { status: 400 });
   const preset = presetById(String(form.get("presetId") || ""));
   const durationSec = clampDuration(Number(form.get("durationSec")), preset.durationSec);
   const start = await fileBuffer(form.get("startImage"));
@@ -106,6 +132,8 @@ export async function POST(
     chainFromPrevious: hasPrevious && form.get("chainFromPrevious") === "1",
     chainFrameBack: clampChainFrameBack(Number(form.get("chainFrameBack") || 0)),
     loras,
+    steps: stepsField.value,
+    cfg: cfgField.value,
   });
   return NextResponse.json(shot, { status: 201 });
 }

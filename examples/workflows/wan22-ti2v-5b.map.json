@@ -4,6 +4,8 @@
   "prompt": { "node": "5", "input": "text" },
   "negativePrompt": { "node": "6", "input": "text" },
   "seed": { "node": "9", "input": "seed" },
+  "steps": { "node": "9", "input": "steps" },
+  "cfg": { "node": "9", "input": "cfg" },
   "frames": {
     "node": "8",
     "input": "length",

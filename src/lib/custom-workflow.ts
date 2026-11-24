@@ -56,6 +56,10 @@ export type CustomGraphMap = {
   prompt: InputBinding | null;
   negativePrompt: InputBinding | null;
   seed: InputBinding | null;
+  /** Where a step override is written. Null when the mapping does not name one. */
+  steps: InputBinding | null;
+  /** Where a CFG override is written. Null when the mapping does not name one. */
+  cfg: InputBinding | null;
   frames: CustomFrameMap | null;
   size: CustomSizeMap | null;
   endImage: InputBinding | null;
@@ -95,6 +99,8 @@ const MAP_KEYS = [
   "prompt",
   "negativePrompt",
   "seed",
+  "steps",
+  "cfg",
   "frames",
   "size",
   "endImage",
@@ -241,6 +247,8 @@ export type CustomGraphNote = {
   readsPrompt: boolean;
   needsEndImage: boolean;
   sendsSeed: boolean;
+  sendsSteps: boolean;
+  sendsCfg: boolean;
   sendsFrames: boolean;
   sendsSize: boolean;
   frameSummary: string;
@@ -261,6 +269,8 @@ export function noteFromGraph(graph: CustomGraph): CustomGraphNote {
     readsPrompt: graph.map.prompt !== null,
     needsEndImage: graph.map.endImage !== null,
     sendsSeed: graph.map.seed !== null,
+    sendsSteps: graph.map.steps !== null,
+    sendsCfg: graph.map.cfg !== null,
     sendsFrames: graph.map.frames !== null,
     sendsSize: graph.map.size !== null,
     frameSummary: graph.map.frames
@@ -286,6 +296,8 @@ export function noteFromFailure(id: `custom:${string}`, errors: string[]): Custo
     readsPrompt: false,
     needsEndImage: false,
     sendsSeed: false,
+    sendsSteps: false,
+    sendsCfg: false,
     sendsFrames: false,
     sendsSize: false,
     frameSummary: "",
@@ -320,6 +332,8 @@ export function formatCustomProviderNote(
   if (note.sendsFrames) sends.push("a frame count from the shot duration");
   if (note.sendsSize) sends.push("the output size");
   if (note.sendsSeed) sends.push("the seed");
+  if (note.sendsSteps) sends.push("the step count when the shot or project sets one");
+  if (note.sendsCfg) sends.push("CFG when the shot or project sets one");
   const parts = [
     `${opts.modelName} posts ${note.file}, polls history, and downloads the video from node ${note.outputNode}. ${note.title}. Star Dust sends ${sends.join(", ")}. ${note.frameSummary} Star Dust does not install custom nodes. Star Dust does not download weights. The licence for the weights is yours. ${opts.serverNote}`,
   ];
@@ -526,6 +540,8 @@ function readMap(mapping: unknown, errors: string[]): { map: CustomGraphMap | nu
   const prompt = readOptionalBinding(mapping.prompt, "prompt", errors);
   const negativePrompt = readOptionalBinding(mapping.negativePrompt, "negativePrompt", errors);
   const seed = readOptionalBinding(mapping.seed, "seed", errors);
+  const steps = readOptionalBinding(mapping.steps, "steps", errors);
+  const cfg = readOptionalBinding(mapping.cfg, "cfg", errors);
   const endImage = readOptionalBinding(mapping.endImage, "endImage", errors);
   const frames = readFrames(mapping.frames, errors);
   const size = readSize(mapping.size, errors);
@@ -535,6 +551,8 @@ function readMap(mapping: unknown, errors: string[]): { map: CustomGraphMap | nu
   pushBinding(bindings, "prompt", prompt);
   pushBinding(bindings, "negativePrompt", negativePrompt);
   pushBinding(bindings, "seed", seed);
+  pushBinding(bindings, "steps", steps);
+  pushBinding(bindings, "cfg", cfg);
   pushBinding(bindings, "endImage", endImage);
   if (frames.binding) bindings.push(frames.binding);
   if (size.width) bindings.push({ label: "size.width", node: size.width.node, input: size.width.input });
@@ -546,6 +564,8 @@ function readMap(mapping: unknown, errors: string[]): { map: CustomGraphMap | nu
     prompt === undefined ||
     negativePrompt === undefined ||
     seed === undefined ||
+    steps === undefined ||
+    cfg === undefined ||
     endImage === undefined ||
     !frames.ok ||
     !size.ok ||
@@ -559,6 +579,8 @@ function readMap(mapping: unknown, errors: string[]): { map: CustomGraphMap | nu
       prompt,
       negativePrompt,
       seed,
+      steps,
+      cfg,
       frames: frames.value,
       size: size.value,
       endImage,

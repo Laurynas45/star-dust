@@ -8,7 +8,9 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
 import { ComfyReadinessPanel, ShotComfyNote } from "@/components/ComfyReadinessPanel";
 import { LoraEditor } from "@/components/LoraEditor";
+import { SamplerFields } from "@/components/SamplerFields";
 import { shouldInjectLoras } from "@/lib/loras";
+import { effectiveSampler, formatSamplerBesideSeed } from "@/lib/sampler";
 import type { ComfyServerCheck } from "@/lib/comfy-readiness";
 import type { PreflightReport } from "@/lib/preflight";
 import { chainStaleShotIds } from "@/lib/chain-stale";
@@ -902,6 +904,8 @@ export default function ProjectStudioPage() {
     evenColour?: boolean;
     smoothFps?: boolean;
     loras?: LoraRef[];
+    steps?: number | null;
+    cfg?: number | null;
   }) {
     const res = await fetch(`/api/projects/${projectId}`, {
       method: "PATCH",
@@ -936,6 +940,8 @@ export default function ProjectStudioPage() {
       seedPinned?: boolean;
       lockedJobId?: string | null;
       loras?: LoraRef[] | null;
+      steps?: number | null;
+      cfg?: number | null;
     }
   ) {
     const res = await fetch(`/api/projects/${projectId}/shots/${shotId}`, {
@@ -1674,7 +1680,7 @@ export default function ProjectStudioPage() {
             loras={project.loras}
             missingNames={missingLoraNames(comfyCheck)}
             inactiveNote={loraInactiveNote(projectChoice.workflow)}
-            hint="Files go in ComfyUI/models/loras. The name is the file name ComfyUI lists. A shot list replaces this one. A speed LoRA usually needs fewer steps and CFG 1. Star Dust does not change steps or CFG."
+            hint="Files go in ComfyUI/models/loras. The name is the file name ComfyUI lists. A shot list replaces this one. A speed LoRA is typically used with fewer steps and CFG 1, per its model card. Set Steps and CFG on the project."
             onChange={(next) => {
               if (next) void saveProjectPatch({ loras: next });
             }}
@@ -1687,6 +1693,17 @@ export default function ProjectStudioPage() {
           no GPU. A pinned character sheet is not applied to the pixels.
         </div>
       )}
+      <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3">
+        <p className="text-sm font-medium text-white">Steps and CFG</p>
+        <SamplerFields
+          steps={project.steps}
+          cfg={project.cfg}
+          stepsPlaceholder="graph default"
+          cfgPlaceholder="graph default"
+          hint="Empty keeps the graph default. A shot value replaces this one. Steps are a whole number from 1 to 100. CFG is a number from 0 to 30. Mock, fal, and Replicate store these and do not sample with them."
+          onChange={(patch) => void saveProjectPatch(patch)}
+        />
+      </div>
 
       {error && (
         <div className="whitespace-pre-wrap rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
@@ -2164,7 +2181,23 @@ export default function ProjectStudioPage() {
                       {shot.seedPinned && (
                         <span className="pb-2 text-[11px] font-semibold text-violet-200">Pinned</span>
                       )}
+                      {formatSamplerBesideSeed(effectiveSampler(project, shot).steps, effectiveSampler(project, shot).cfg) && (
+                        <span className="pb-2 font-mono text-[11px] text-[var(--muted)]">
+                          {formatSamplerBesideSeed(
+                            effectiveSampler(project, shot).steps,
+                            effectiveSampler(project, shot).cfg
+                          )}
+                        </span>
+                      )}
                     </div>
+                    <SamplerFields
+                      steps={shot.steps}
+                      cfg={shot.cfg}
+                      stepsPlaceholder={project.steps != null ? `project ${project.steps}` : "graph default"}
+                      cfgPlaceholder={project.cfg != null ? `project ${project.cfg}` : "graph default"}
+                      hint="Empty uses the project value. A number replaces it. Steps are 1–100. CFG is 0–30."
+                      onChange={(patch) => void saveShotPatch(shot.id, patch)}
+                    />
                     <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
                       {SEED_PIN_NOTE} {seedBackendNote(provider)}
                     </p>

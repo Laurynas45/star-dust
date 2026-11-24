@@ -12,6 +12,7 @@ import { probeHasAudio, probeVideoStream, type VideoStreamInfo } from "./ffmpeg"
 import { joinOmissionWarning, type JoinOmission } from "./join";
 import { describeCustomGraph } from "./custom-workflow-files";
 import { effectiveLoras } from "./loras";
+import { effectiveSampler, manifestSampler } from "./sampler";
 import { COMFY_WORKFLOWS, comfyWorkflowFromModelName, generatedAudioFromModelName } from "./provider-info";
 import { isComfyWorkflowId, isCustomGraphId } from "./types";
 import { getProject, listJobs, listShots, resolveDataPath } from "./storage";
@@ -55,6 +56,10 @@ export interface TakeManifest {
   seedPinned: boolean;
   /** LoRAs the shot would send on a shipped ComfyUI graph. Empty means none. */
   loras: LoraRef[];
+  /** Present when the shot or project sets a step count. */
+  steps?: number;
+  /** Present when the shot or project sets CFG. */
+  cfg?: number;
   /** True when this take was queued with LTX generated audio on. */
   generatedAudio: boolean;
   /** True when the mp4 has an audio stream. */
@@ -314,6 +319,7 @@ function manifestFor(
     seed: job.seed == null ? null : job.seed,
     seedPinned: Boolean(shot.seedPinned),
     loras: effectiveLoras(getProject(shot.projectId) ?? { loras: [] }, shot),
+    ...manifestSampler(effectiveSampler(getProject(shot.projectId) ?? { steps: null, cfg: null }, shot)),
     generatedAudio: generatedAudioFromModelName(job.modelName),
     hasAudio: job.outputPath ? probeHasAudio(resolveDataPath(job.outputPath)) : false,
     frames: info.frames,
@@ -457,6 +463,7 @@ export async function buildEditExport(projectId: string): Promise<EditExport> {
         preview: false,
         provider: part.job.provider,
         seed: part.job.seed ?? null,
+        ...manifestSampler(effectiveSampler(project, part.shot)),
         durationSec: part.info.durationSec,
       })),
       sheetAbs

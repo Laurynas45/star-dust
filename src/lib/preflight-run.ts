@@ -2,6 +2,8 @@ import { resolveComfyChoice } from "./comfy-choice";
 import { measureStill } from "./cost";
 import { customGraphPreflightBox } from "./custom-workflow-files";
 import { buildPreflight, PreflightReport } from "./preflight";
+import { effectiveSampler } from "./sampler";
+import { planSampler } from "./sampler-run";
 import { AppSettings, Project, Shot, isCustomGraphId } from "./types";
 
 /**
@@ -24,6 +26,11 @@ export function preflightStoredProject(
     shots: shots.map((shot) => {
       const size = sizeForPreflight(shot);
       const choice = resolveComfyChoice({ settings, project, shot });
+      const samplerNote = planSampler(
+        settings.provider,
+        choice.workflow,
+        effectiveSampler(project, shot)
+      ).notes.join(" ");
       return {
         id: shot.id,
         position: shot.position,
@@ -37,6 +44,7 @@ export function preflightStoredProject(
           : null,
         width: size?.width ?? null,
         height: size?.height ?? null,
+        ...(samplerNote ? { samplerNote } : {}),
       };
     }),
   });

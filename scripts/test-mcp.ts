@@ -770,6 +770,58 @@ async function testLoras() {
   assert(posts === 2, `invalid LoRAs must not call the API, posts=${posts}`);
 }
 
+async function testSampler() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "star-dust-mcp-sampler-"));
+  const still = path.join(dir, "still.png");
+  fs.writeFileSync(still, "png");
+  let posts = 0;
+  const mocked = mockFetch(async (call) => {
+    if (call.method === "POST" && call.path === "/api/projects") {
+      posts += 1;
+      const body = asRecord(call.json);
+      assert(body?.steps === 8 && body.cfg === 1, "project sampler");
+      return jsonResponse({ id: "proj-sampler", name: "Sampler", description: "", steps: 8, cfg: 1 }, 201);
+    }
+    if (call.method === "POST" && call.path === "/api/projects/proj-sampler/shots") {
+      posts += 1;
+      assert(call.form?.get("steps") === "4", "shot steps");
+      assert(call.form?.get("cfg") === "1.5", "shot cfg");
+      return jsonResponse({ id: "shot-sampler", projectId: "proj-sampler", steps: 4, cfg: 1.5 }, 201);
+    }
+    return jsonResponse({ error: `unexpected ${call.method} ${call.path}` }, 500);
+  });
+  try {
+    await withTools(mocked.fetch, async (call) => {
+      const badSteps = await call("create_project", { name: "Bad", steps: 0 });
+      assert(badSteps.isError && /1 to 100/.test(badSteps.text), badSteps.text);
+      const badCfg = await call("create_project", { name: "Bad", cfg: 31 });
+      assert(badCfg.isError && /0 to 30/.test(badCfg.text), badCfg.text);
+      const created = await call("create_project", { name: "Sampler", steps: 8, cfg: 1 });
+      assert(!created.isError, created.text);
+      assert(created.json?.steps === 8 && created.json?.cfg === 1, created.text);
+      const fraction = await call("add_shot", {
+        projectId: "proj-sampler",
+        prompt: "A lantern",
+        imagePath: still,
+        steps: 1.5,
+      });
+      assert(fraction.isError && /whole number/.test(fraction.text), fraction.text);
+      const added = await call("add_shot", {
+        projectId: "proj-sampler",
+        prompt: "A lantern",
+        imagePath: still,
+        steps: 4,
+        cfg: 1.5,
+      });
+      assert(!added.isError, added.text);
+      assert(added.json?.steps === 4 && added.json?.cfg === 1.5, added.text);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert(posts === 2, `invalid sampler values must not call the API, posts=${posts}`);
+}
+
 async function main() {
   await testBaseUrl();
   await testPaymentRoutesAreNotCalled();
@@ -779,6 +831,7 @@ async function main() {
   await testServerDown();
   await testCreateProject();
   await testLoras();
+  await testSampler();
   await testAddShot();
   await testAddShotRefusal();
   await testStartRender();

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseLoraList } from "@/lib/loras";
+import { readSamplerFields } from "@/lib/sampler";
 import { createProject, listProjects } from "@/lib/storage";
 import { LoraRef } from "@/lib/types";
 
@@ -20,6 +21,8 @@ export async function POST(req: NextRequest) {
     if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
     loras = parsed.loras;
   }
-  const project = createProject(name, description, loras);
+  const sampler = readSamplerFields(body as Record<string, unknown>);
+  if (!sampler.ok) return NextResponse.json({ error: sampler.error }, { status: 400 });
+  const project = createProject(name, description, loras, sampler);
   return NextResponse.json(project, { status: 201 });
 }
