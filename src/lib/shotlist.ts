@@ -15,6 +15,7 @@ import { OUTPUT_DIM_MAX, OUTPUT_DIM_MIN, OUTPUT_FPS_MAX, OUTPUT_FPS_MIN } from "
 import { assertExportHasNoSecrets } from "./edit-export";
 import { effectiveSeed } from "./input-key";
 import { parseLoraList } from "./loras";
+import { parseCfgValue, parseStepsValue } from "./sampler";
 import { loadCustomGraphById } from "./custom-workflow-files";
 import {
   COMFY_WORKFLOW_TITLES,
@@ -84,6 +85,8 @@ const ROOT_KEYS = [
   "evenColour",
   "smoothFps",
   "loras",
+  "steps",
+  "cfg",
   "shots",
 ] as const;
 
@@ -104,6 +107,8 @@ const SHOT_KEYS = [
   "comfyLowMemory",
   "generatedAudio",
   "loras",
+  "steps",
+  "cfg",
 ] as const;
 
 const IMAGE_KEYS = ["file", "role"] as const;
@@ -148,6 +153,10 @@ export interface ShotListShot {
   generatedAudio: boolean | null;
   /** Null inherits the project list. An array replaces it. Omitted in an older file means null. */
   loras: LoraRef[] | null;
+  /** Null inherits the project. A number replaces it. Omitted in an older file means null. 1–100. */
+  steps: number | null;
+  /** Null inherits the project. A number replaces it. Omitted in an older file means null. 0–30. */
+  cfg: number | null;
 }
 
 export interface ShotListOutput {
@@ -182,6 +191,10 @@ export interface ShotListDocument {
    * A shot can replace this list.
    */
   loras: LoraRef[];
+  /** Null keeps the graph default. Omitted in an older file means null. 1–100. */
+  steps: number | null;
+  /** Null keeps the graph default. Omitted in an older file means null. 0–30. */
+  cfg: number | null;
   shots: ShotListShot[];
 }
 
@@ -217,6 +230,8 @@ export interface ShotRenderSettings {
   evenColour: boolean;
   smoothFps: boolean;
   loras: LoraRef[];
+  steps: number | null;
+  cfg: number | null;
   shots: Array<{
     prompt: string;
     durationSec: number;
@@ -235,6 +250,8 @@ export interface ShotRenderSettings {
     comfyLowMemory: boolean | null;
     generatedAudio: boolean | null;
     loras: LoraRef[] | null;
+    steps: number | null;
+    cfg: number | null;
   }>;
 }
 
@@ -383,6 +400,30 @@ function readFlag(value: unknown, where: string, errors: string[]): boolean | nu
 }
 
 /** Omitted means null, so an older shot list keeps the LTX default (on). */
+/** Omitted or null means unset. A number must be inside the sampler range. */
+function readSamplerField(
+  record: Record<string, unknown>,
+  key: "steps" | "cfg",
+  where: string,
+  errors: string[]
+): number | null | undefined {
+  if (!(key in record) || record[key] == null) return null;
+  if (key === "steps") {
+    const parsed = parseStepsValue(record[key], where);
+    if (!parsed.ok) {
+      errors.push(parsed.error);
+      return undefined;
+    }
+    return parsed.steps;
+  }
+  const parsed = parseCfgValue(record[key], where);
+  if (!parsed.ok) {
+    errors.push(parsed.error);
+    return undefined;
+  }
+  return parsed.cfg;
+}
+
 function readOptionalFlag(value: unknown, where: string, errors: string[]): boolean | null | undefined {
   if (value === undefined || value === null) return null;
   if (typeof value !== "boolean") {
@@ -545,6 +586,8 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
   const transition = readTransition(parsed.transition, "Project transition", errors, false);
   const evenColour = readEvenColour(parsed.evenColour, "evenColour", errors, false);
   const smoothFps = readEvenColour(parsed.smoothFps, "smoothFps", errors, false);
+  const projectSteps = readSamplerField(parsed, "steps", "steps", errors);
+  const projectCfg = readSamplerField(parsed, "cfg", "cfg", errors);
   let projectLoras: LoraRef[] | undefined;
   if (!("loras" in parsed) || parsed.loras === undefined) projectLoras = [];
   else {
@@ -712,6 +755,8 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       const shotWorkflow = readWorkflow(entry.comfyuiWorkflow, `${label} workflow`, errors);
       const shotLow = readFlag(entry.comfyLowMemory, `${label} low-memory preset`, errors);
       const shotAudio = readOptionalFlag(entry.generatedAudio, `${label} generated audio`, errors);
+      const shotSteps = readSamplerField(entry, "steps", `${label} steps`, errors);
+      const shotCfg = readSamplerField(entry, "cfg", `${label} cfg`, errors);
       let shotLoras: LoraRef[] | null | undefined;
       if (!("loras" in entry) || entry.loras == null) shotLoras = null;
       else {
@@ -737,6 +782,8 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         shotLow === undefined ||
         shotAudio === undefined ||
         shotLoras === undefined ||
+        shotSteps === undefined ||
+        shotCfg === undefined ||
         starts !== 1 ||
         ends > 1
       ) {
@@ -759,6 +806,8 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
         comfyLowMemory: shotLow,
         generatedAudio: shotAudio,
         loras: shotLoras,
+        steps: shotSteps,
+        cfg: shotCfg,
       });
     });
   }
@@ -775,6 +824,8 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
     typeof evenColour !== "boolean" ||
     typeof smoothFps !== "boolean" ||
     !projectLoras ||
+    projectSteps === undefined ||
+    projectCfg === undefined ||
     typeof parsed.name !== "string" ||
     typeof parsed.description !== "string" ||
     typeof parsed.styleBase !== "string" ||
@@ -801,6 +852,8 @@ export function validateShotList(bundle: ShotListBundle): ShotListCheck {
       evenColour,
       smoothFps,
       loras: projectLoras,
+      steps: projectSteps,
+      cfg: projectCfg,
       shots,
     },
     errors: [],
@@ -886,6 +939,8 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
     evenColour: project.evenColour === true,
     smoothFps: project.smoothFps === true,
     loras: project.loras.map((lora) => ({ ...lora })),
+    steps: project.steps,
+    cfg: project.cfg,
     shots: shots.map((shot) => {
       const images: ShotListImage[] = [
         { file: place(shot.startImagePath, shot.position, "start"), role: "start" },
@@ -910,6 +965,8 @@ export function buildShotList(projectId: string): { document: ShotListDocument; 
         comfyLowMemory: shot.comfyLowMemory ?? null,
         generatedAudio: shot.generatedAudio ?? null,
         loras: shot.loras == null ? null : shot.loras.map((lora) => ({ ...lora })),
+        steps: shot.steps,
+        cfg: shot.cfg,
       };
     }),
   };
@@ -936,9 +993,14 @@ function assertDocumentClean(json: string) {
 }
 
 export function shotListJson(document: ShotListDocument): string {
-  const json = `${JSON.stringify(document, null, 2)}\n`;
+  const json = `${JSON.stringify(document, omitUnsetSampler, 2)}\n`;
   assertDocumentClean(json);
   return json;
+}
+
+function omitUnsetSampler(key: string, value: unknown): unknown {
+  if ((key === "steps" || key === "cfg") && value == null) return undefined;
+  return value;
 }
 
 function zipName(name: string): string {
@@ -984,6 +1046,8 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
     evenColour: document.evenColour,
     smoothFps: document.smoothFps,
     loras: document.loras.map((lora) => ({ ...lora })),
+    steps: document.steps,
+    cfg: document.cfg,
     shots: document.shots.map((shot) => {
       const start = shot.images.find((image) => image.role === "start");
       const end = shot.images.find((image) => image.role === "end");
@@ -1005,6 +1069,8 @@ export function renderSettingsOf(projectId: string): ShotRenderSettings {
         comfyLowMemory: shot.comfyLowMemory,
         generatedAudio: shot.generatedAudio,
         loras: shot.loras == null ? null : shot.loras.map((lora) => ({ ...lora })),
+        steps: shot.steps,
+        cfg: shot.cfg,
       };
     }),
   };
@@ -1046,6 +1112,8 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
       evenColour: doc.evenColour,
       smoothFps: doc.smoothFps,
       loras: doc.loras,
+      steps: doc.steps,
+      cfg: doc.cfg,
       outputFps: doc.output.fps,
       outputWidth: doc.output.width,
       outputHeight: doc.output.height,
@@ -1077,6 +1145,8 @@ export function importShotList(bundle: ShotListBundle): ShotListImport {
         chainFromPrevious: shot.chainFromPrevious,
         chainFrameBack: shot.chainFrameBack,
         loras: shot.loras,
+        steps: shot.steps,
+        cfg: shot.cfg,
       });
       updateShot(created.id, {
         enabled: shot.enabled,

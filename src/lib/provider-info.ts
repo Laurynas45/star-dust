@@ -429,6 +429,8 @@ export function describeProviderUse(opts: {
         readsPrompt: false,
         needsEndImage: false,
         sendsSeed: false,
+        sendsSteps: false,
+        sendsCfg: false,
         sendsFrames: false,
         sendsSize: false,
         frameSummary: "",

@@ -10,6 +10,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { parseLoraList } from "../src/lib/loras";
+import { parseCfgValue, parseStepsValue } from "../src/lib/sampler";
 import { COMFY_WORKFLOWS } from "../src/lib/provider-info";
 import {
   COMFY_WORKFLOW_IDS,
@@ -573,7 +574,13 @@ async function listBackends(client: StarDustClient): Promise<CallToolResult> {
 
 async function createProject(
   client: StarDustClient,
-  args: { name: string; description?: string | null; loras?: LoraRef[] | null }
+  args: {
+    name: string;
+    description?: string | null;
+    loras?: LoraRef[] | null;
+    steps?: number | null;
+    cfg?: number | null;
+  }
 ): Promise<CallToolResult> {
   const name = args.name.trim();
   if (!name) return failResult("Project name is required.");
@@ -583,10 +590,13 @@ async function createProject(
     if (!parsed.ok) return failResult(parsed.error);
     loras = parsed.loras;
   }
+  const sampler = readSamplerArgs(args.steps, args.cfg);
+  if (!sampler.ok) return failResult(sampler.error);
   const result = await client.postJson("/api/projects", {
     name,
     description: args.description?.trim() ?? "",
     ...(loras ? { loras } : {}),
+    ...sampler.body,
   });
   if (!result.ok || asRecord(result.json)?.ok === false) return client.fail(result);
   const project = asRecord(result.json);
@@ -597,7 +607,27 @@ async function createProject(
     name: text(project?.name) || name,
     description: typeof project?.description === "string" ? project.description : "",
     loras: Array.isArray(project?.loras) ? project.loras : loras ?? [],
+    steps: typeof project?.steps === "number" ? project.steps : sampler.body.steps ?? null,
+    cfg: typeof project?.cfg === "number" ? project.cfg : sampler.body.cfg ?? null,
   });
+}
+
+function readSamplerArgs(
+  steps: number | null | undefined,
+  cfg: number | null | undefined
+): { ok: true; body: { steps?: number; cfg?: number } } | { ok: false; error: string } {
+  const body: { steps?: number; cfg?: number } = {};
+  if (steps != null) {
+    const parsed = parseStepsValue(steps, "steps");
+    if (!parsed.ok) return parsed;
+    body.steps = parsed.steps;
+  }
+  if (cfg != null) {
+    const parsed = parseCfgValue(cfg, "cfg");
+    if (!parsed.ok) return parsed;
+    body.cfg = parsed.cfg;
+  }
+  return { ok: true, body };
 }
 
 type Still = { filename: string; bytes: Buffer; type: string };
@@ -682,6 +712,8 @@ type AddShotArgs = {
   generatedAudio?: boolean | null;
   chainFromPrevious?: boolean | null;
   loras?: LoraRef[] | null;
+  steps?: number | null;
+  cfg?: number | null;
 };
 
 async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallToolResult> {
@@ -710,6 +742,8 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
     if (!parsed.ok) return failResult(parsed.error);
     loras = parsed.loras;
   }
+  const sampler = readSamplerArgs(args.steps, args.cfg);
+  if (!sampler.ok) return failResult(sampler.error);
   const start = await loadStill(client, args.imagePath, args.imageUrl, "a start image");
   if (!start) return failResult("Pass imagePath (a local file) or imageUrl (http or https).");
   const end = await loadStill(client, args.endImagePath, args.endImageUrl, "an end image");
@@ -730,6 +764,8 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
   if (typeof args.generatedAudio === "boolean") form.append("generatedAudio", args.generatedAudio ? "true" : "false");
   if (args.chainFromPrevious === true) form.append("chainFromPrevious", "1");
   if (loras) form.append("loras", JSON.stringify(loras));
+  if (sampler.body.steps != null) form.append("steps", String(sampler.body.steps));
+  if (sampler.body.cfg != null) form.append("cfg", String(sampler.body.cfg));
 
   const result = await client.postForm(`/api/projects/${encodeURIComponent(projectId)}/shots`, form);
   if (!result.ok || asRecord(result.json)?.ok === false) {
@@ -759,6 +795,8 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
     startImagePath: text(shot?.startImagePath) || null,
     endImagePath: text(shot?.endImagePath) || null,
     loras: Array.isArray(shot?.loras) ? shot.loras : loras ?? null,
+    steps: typeof shot?.steps === "number" ? shot.steps : sampler.body.steps ?? null,
+    cfg: typeof shot?.cfg === "number" ? shot.cfg : sampler.body.cfg ?? null,
   });
 }
 
@@ -984,7 +1022,7 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
     {
       title: "Create project",
       description:
-        "Create a Star Dust project with POST /api/projects. Returns the project id for add_shot and start_render. loras is an optional list of { name, strength } for ComfyUI. At most 4. strength defaults to 1 and must be from -2 to 2. name is the file name ComfyUI lists.",
+        "Create a Star Dust project with POST /api/projects. Returns the project id for add_shot and start_render. loras is an optional list of { name, strength } for ComfyUI. At most 4. strength defaults to 1 and must be from -2 to 2. name is the file name ComfyUI lists. steps is an optional whole number from 1 to 100. cfg is an optional number from 0 to 30. Omit either one to keep the graph default.",
       inputSchema: {
         name: z.string().describe("Project name."),
         description: z.string().optional().describe("Short description. Optional."),
@@ -992,6 +1030,14 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
           .array(z.object({ name: z.string(), strength: z.number().optional() }).strict())
           .optional()
           .describe("Optional ComfyUI LoRAs. name is the file name ComfyUI lists. strength defaults to 1, from -2 to 2. At most 4."),
+        steps: z
+          .number()
+          .optional()
+          .describe("Optional sampler steps. A whole number from 1 to 100. Omit to keep the graph default."),
+        cfg: z
+          .number()
+          .optional()
+          .describe("Optional CFG. A number from 0 to 30. Omit to keep the graph default."),
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
@@ -1002,7 +1048,7 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
     "add_shot",
     {
       title: "Add shot",
-      description: `Add one shot. The still is uploaded to POST /api/projects/{id}/shots, so the server stores it and runs its safety check. Pass imagePath (a local file) or imageUrl (http or https). durationSec is ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. presetId is ${PRESET_LIST}. provider sets the studio provider the same way the Providers page does, and the next render uses it. comfyWorkflow (${GRAPH_LIST}), comfyLowMemory, and generatedAudio are stored on the shot. generatedAudio applies to LTX-2.3 and LTX-2.5. Omit it to inherit the project, which defaults to on for those graphs. Off saves a silent mp4. SVD, Wan, and custom:<slug> ignore it. loras is an optional list that replaces the project LoRA list. The first shot cannot chain from a previous shot. Keys, credits, the licence gate, and ComfyUI readiness are still enforced when you render.`,
+      description: `Add one shot. The still is uploaded to POST /api/projects/{id}/shots, so the server stores it and runs its safety check. Pass imagePath (a local file) or imageUrl (http or https). durationSec is ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. presetId is ${PRESET_LIST}. provider sets the studio provider the same way the Providers page does, and the next render uses it. comfyWorkflow (${GRAPH_LIST}), comfyLowMemory, and generatedAudio are stored on the shot. generatedAudio applies to LTX-2.3 and LTX-2.5. Omit it to inherit the project, which defaults to on for those graphs. Off saves a silent mp4. SVD, Wan, and custom:<slug> ignore it. loras is an optional list that replaces the project LoRA list. steps (1 to 100) and cfg (0 to 30) are optional and replace the project values. Omit one to inherit it. The first shot cannot chain from a previous shot. Keys, credits, the licence gate, and ComfyUI readiness are still enforced when you render.`,
       inputSchema: {
         projectId: z.string().describe("Project id from create_project."),
         prompt: z.string().describe("Shot prompt. The server refuses sexual content involving a minor."),
@@ -1024,6 +1070,14 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
           .array(z.object({ name: z.string(), strength: z.number().optional() }).strict())
           .optional()
           .describe("Optional ComfyUI LoRAs for this shot. Replaces the project list. name is the file name ComfyUI lists. strength defaults to 1, from -2 to 2. At most 4."),
+        steps: z
+          .number()
+          .optional()
+          .describe("Optional sampler steps for this shot. A whole number from 1 to 100. Replaces the project value. Omit to inherit."),
+        cfg: z
+          .number()
+          .optional()
+          .describe("Optional CFG for this shot. A number from 0 to 30. Replaces the project value. Omit to inherit."),
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },

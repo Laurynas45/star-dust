@@ -21,6 +21,7 @@ import {
   updateProject,
 } from "@/lib/storage";
 import { parseLoraList } from "@/lib/loras";
+import { readSamplerFields } from "@/lib/sampler";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import {
   CaptionMode,
@@ -154,6 +155,8 @@ export async function PATCH(
     if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
     loras = parsed.loras;
   }
+  const sampler = readSamplerFields(body as Record<string, unknown>);
+  if (!sampler.ok) return NextResponse.json({ error: sampler.error }, { status: 400 });
   const styleBase = typeof body.styleBase === "string" ? body.styleBase : undefined;
   if (styleBase !== undefined) {
     const project = getProject(params.id);
@@ -195,6 +198,8 @@ export async function PATCH(
     evenColour: typeof body.evenColour === "boolean" ? body.evenColour : undefined,
     smoothFps: typeof body.smoothFps === "boolean" ? body.smoothFps : undefined,
     loras,
+    steps: sampler.steps,
+    cfg: sampler.cfg,
   });
   if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json(updated);

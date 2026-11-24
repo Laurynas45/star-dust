@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { effectiveSeed, normalizeSeed } from "@/lib/input-key";
 import { parseLoraList } from "@/lib/loras";
+import { readSamplerFields } from "@/lib/sampler";
 import { generationIsRefused, MINOR_SEXUAL_REFUSAL } from "@/lib/safety";
 import { deleteShot, getJob, getProject, getShot, updateShot } from "@/lib/storage";
 import { ComfyGraphId, LoraRef, SeamFadeUnit, SeamMode, clampChainFrameBack, clampChainTrimStartFrames, clampDuration, clampSeamFade, clampSeamFadeFrames, effectivePrompt, isComfyGraphId, isSeamFadeUnit, presetById } from "@/lib/types";
@@ -94,6 +95,8 @@ export async function PATCH(
       if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
       loras = parsed.loras;
     }
+    const sampler = readSamplerFields(body as Record<string, unknown>);
+    if (!sampler.ok) return NextResponse.json({ error: sampler.error }, { status: 400 });
     let lockedJobId: string | null | undefined;
     if (body.lockedJobId === null) lockedJobId = null;
     else if (typeof body.lockedJobId === "string" && body.lockedJobId) {
@@ -129,6 +132,8 @@ export async function PATCH(
       evenColour: optionalBool(body.evenColour),
       enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
       loras,
+      steps: sampler.steps,
+      cfg: sampler.cfg,
     });
     return NextResponse.json(updated);
   }

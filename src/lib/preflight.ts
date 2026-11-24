@@ -57,7 +57,8 @@ export type PreflightCode =
   | "moving-text"
   | "several-actions"
   | "chain-camera"
-  | "chain-shot-size";
+  | "chain-shot-size"
+  | "sampler";
 
 export type PreflightNote = {
   id: string;
@@ -85,6 +86,8 @@ export type PreflightShotInput = {
   /** Pixel size of the still that will be sent. Null when it is not known yet. */
   width: number | null;
   height: number | null;
+  /** Set when a stored step count or CFG is not written as entered. */
+  samplerNote?: string;
 };
 
 export type PreflightInput = {
@@ -138,6 +141,7 @@ const CODE_ORDER: PreflightCode[] = [
   "several-actions",
   "chain-camera",
   "chain-shot-size",
+  "sampler",
 ];
 
 const PRESET_CAMERA: Record<string, string> = {
@@ -232,6 +236,15 @@ export function buildPreflight(input: PreflightInput): PreflightReport {
       if (divisible) draft.push(divisible);
     }
     draft.push(...promptNotes(shot, effectivePrompt(input.styleBase, shot.prompt)));
+    if (shot.samplerNote) {
+      draft.push(
+        shotNote(shot, "sampler", {
+          note: shot.samplerNote,
+          reason: `Star Dust reports this so a step count or CFG is not dropped quietly. ${HINT}`,
+          fix: "Use a value this graph can write, or clear the field to keep the graph default.",
+        })
+      );
+    }
   }
 
   for (let index = 1; index < ordered.length; index += 1) {

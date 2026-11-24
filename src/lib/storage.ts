@@ -44,6 +44,7 @@ import {
 } from "./types";
 import { canonicalFps, evenDim, OUTPUT_DIM_MIN } from "./conform";
 import { decodeProjectLoras, decodeShotLoras, encodeProjectLoras, encodeShotLoras } from "./loras";
+import { CFG_MAX, CFG_MIN, STEPS_MAX, STEPS_MIN } from "./sampler";
 
 type DB = Database.Database;
 
@@ -109,7 +110,9 @@ function openDatabase(): DB {
       caption_mode TEXT,
       even_colour INTEGER NOT NULL DEFAULT 0,
       smooth_fps INTEGER NOT NULL DEFAULT 0,
-      loras_json TEXT
+      loras_json TEXT,
+      steps INTEGER,
+      cfg REAL
     );
     CREATE TABLE IF NOT EXISTS shots (
       id TEXT PRIMARY KEY,
@@ -144,7 +147,9 @@ function openDatabase(): DB {
       approved_job_id TEXT,
       approved_start_stamp TEXT,
       approved_end_stamp TEXT,
-      loras_json TEXT
+      loras_json TEXT,
+      steps INTEGER,
+      cfg REAL
     );
     CREATE TABLE IF NOT EXISTS jobs (
       id TEXT PRIMARY KEY,
@@ -416,6 +421,18 @@ function migrate(db: DB) {
   if (!hasColumn(db, "shots", "loras_json")) {
     db.exec("ALTER TABLE shots ADD COLUMN loras_json TEXT");
   }
+  if (!hasColumn(db, "projects", "steps")) {
+    db.exec("ALTER TABLE projects ADD COLUMN steps INTEGER");
+  }
+  if (!hasColumn(db, "projects", "cfg")) {
+    db.exec("ALTER TABLE projects ADD COLUMN cfg REAL");
+  }
+  if (!hasColumn(db, "shots", "steps")) {
+    db.exec("ALTER TABLE shots ADD COLUMN steps INTEGER");
+  }
+  if (!hasColumn(db, "shots", "cfg")) {
+    db.exec("ALTER TABLE shots ADD COLUMN cfg REAL");
+  }
 }
 
 function seedSample(db: DB) {
@@ -530,6 +547,8 @@ function mapProject(row: Record<string, unknown>): Project {
     evenColour: Number(row.even_colour) === 1,
     smoothFps: Number(row.smooth_fps) === 1,
     loras: decodeProjectLoras(row.loras_json),
+    steps: decodeSteps(row.steps),
+    cfg: decodeCfg(row.cfg),
     ...trimFields(
       projectChainTrimFromStored(row.chain_trim_start_frames, row.drop_duplicate_frame)
     ),
@@ -664,6 +683,8 @@ function mapShot(row: Record<string, unknown>): Shot {
     evenColour:
       row.even_colour == null || row.even_colour === "" ? null : Number(row.even_colour) === 1,
     loras: decodeShotLoras(row.loras_json),
+    steps: decodeSteps(row.steps),
+    cfg: decodeCfg(row.cfg),
     enabled: row.enabled == null ? true : Number(row.enabled) !== 0,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -761,7 +782,26 @@ export function getProject(id: string): Project | undefined {
   return row ? mapProject(row) : undefined;
 }
 
-export function createProject(name: string, description = "", loras: LoraRef[] = []): Project {
+function decodeSteps(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const steps = Number(value);
+  if (!Number.isInteger(steps) || steps < STEPS_MIN || steps > STEPS_MAX) return null;
+  return steps;
+}
+
+function decodeCfg(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const cfg = Number(value);
+  if (!Number.isFinite(cfg) || cfg < CFG_MIN || cfg > CFG_MAX) return null;
+  return cfg;
+}
+
+export function createProject(
+  name: string,
+  description = "",
+  loras: LoraRef[] = [],
+  sampler: { steps?: number | null; cfg?: number | null } = {}
+): Project {
   const now = new Date().toISOString();
   const project: Project = {
     id: uuidv4(),
@@ -790,15 +830,26 @@ export function createProject(name: string, description = "", loras: LoraRef[] =
     evenColour: false,
     smoothFps: false,
     loras,
+    steps: sampler.steps ?? null,
+    cfg: sampler.cfg ?? null,
     generatedAudio: null,
   };
   getDb()
     .prepare(
       `INSERT INTO projects (
-        id, name, description, character_sheet_path, created_at, updated_at, loras_json
-      ) VALUES (?, ?, ?, NULL, ?, ?, ?)`
+        id, name, description, character_sheet_path, created_at, updated_at, loras_json, steps, cfg
+      ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`
     )
-    .run(project.id, project.name, project.description, now, now, encodeProjectLoras(loras));
+    .run(
+      project.id,
+      project.name,
+      project.description,
+      now,
+      now,
+      encodeProjectLoras(loras),
+      project.steps,
+      project.cfg
+    );
   fs.mkdirSync(path.join(uploadsDir(), project.id), { recursive: true });
   fs.mkdirSync(path.join(outputsDir(), project.id), { recursive: true });
   return project;
@@ -833,6 +884,8 @@ export function updateProject(
       | "evenColour"
       | "smoothFps"
       | "loras"
+      | "steps"
+      | "cfg"
     >
   > & {
     characterSheetPath?: string | null;
@@ -891,6 +944,8 @@ export function updateProject(
     evenColour: patch.evenColour === undefined ? current.evenColour : patch.evenColour,
     smoothFps: patch.smoothFps === undefined ? current.smoothFps : patch.smoothFps,
     loras: patch.loras === undefined ? current.loras : patch.loras,
+    steps: patch.steps === undefined ? current.steps : patch.steps,
+    cfg: patch.cfg === undefined ? current.cfg : patch.cfg,
     updatedAt: new Date().toISOString(),
   };
   getDb()
@@ -903,7 +958,7 @@ export function updateProject(
            output_fps = ?, output_width = ?, output_height = ?, loudness_normalize = ?,
            music_bed_path = ?, music_level_db = ?, music_fade_in_sec = ?, music_fade_out_sec = ?,
            captions_path = ?, caption_mode = ?, shotlist_provider = ?, even_colour = ?,
-           smooth_fps = ?, loras_json = ?, generated_audio = ?
+           smooth_fps = ?, loras_json = ?, generated_audio = ?, steps = ?, cfg = ?
        WHERE id = ?`
     )
     .run(
@@ -935,6 +990,8 @@ export function updateProject(
       next.smoothFps ? 1 : 0,
       encodeProjectLoras(next.loras),
       next.generatedAudio == null ? null : next.generatedAudio ? 1 : 0,
+      next.steps,
+      next.cfg,
       id
     );
   return getProject(id);
@@ -992,6 +1049,8 @@ export function createShot(input: {
   chainFromPrevious?: boolean;
   chainFrameBack?: number;
   loras?: LoraRef[] | null;
+  steps?: number | null;
+  cfg?: number | null;
   id?: string;
 }): Shot {
   const now = new Date().toISOString();
@@ -1014,6 +1073,8 @@ export function createShot(input: {
     chainFrameBack: clampChainFrameBack(input.chainFrameBack ?? 0),
     evenColour: null,
     loras: input.loras === undefined ? null : input.loras,
+    steps: input.steps ?? null,
+    cfg: input.cfg ?? null,
     enabled: true,
     createdAt: now,
     updatedAt: now,
@@ -1024,8 +1085,8 @@ export function createShot(input: {
         id, project_id, position, prompt, preset_id, duration_sec,
         start_image_path, end_image_path, created_at, updated_at,
         comfyui_workflow, comfy_low_memory, chain_from_previous, chain_frame_back,
-        loras_json, generated_audio
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        loras_json, generated_audio, steps, cfg
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       shot.id,
@@ -1043,7 +1104,9 @@ export function createShot(input: {
       shot.chainFromPrevious ? 1 : 0,
       shot.chainFrameBack,
       encodeShotLoras(shot.loras),
-      shot.generatedAudio == null ? null : shot.generatedAudio ? 1 : 0
+      shot.generatedAudio == null ? null : shot.generatedAudio ? 1 : 0,
+      shot.steps,
+      shot.cfg
     );
   touchProject(shot.projectId);
   return shot;
@@ -1081,10 +1144,18 @@ export function updateShot(
         | "seedPinned"
         | "lockedJobId"
         | "loras"
+        | "steps"
+        | "cfg"
       >,
       "seed" | "lockedJobId"
     >
-  > & { seed?: number | null; lockedJobId?: string | null; loras?: LoraRef[] | null }
+  > & {
+    seed?: number | null;
+    lockedJobId?: string | null;
+    loras?: LoraRef[] | null;
+    steps?: number | null;
+    cfg?: number | null;
+  }
 ): Shot | undefined {
   const current = getShot(id);
   if (!current) return undefined;
@@ -1157,6 +1228,8 @@ export function updateShot(
           : clampSeamFadeFrames(patch.seamFadeFrames),
     evenColour: patch.evenColour === undefined ? current.evenColour ?? null : patch.evenColour,
     loras: patch.loras === undefined ? current.loras : patch.loras,
+    steps: patch.steps === undefined ? current.steps : patch.steps,
+    cfg: patch.cfg === undefined ? current.cfg : patch.cfg,
     enabled: patch.enabled === undefined ? current.enabled !== false : patch.enabled,
     updatedAt: new Date().toISOString(),
   };
@@ -1167,7 +1240,7 @@ export function updateShot(
            end_image_path = ?, comfyui_workflow = ?, comfy_low_memory = ?,
            chain_from_previous = ?, chained_start_image_path = ?, chained_from_job_id = ?,
            seam_mode = ?, seam_fade_sec = ?, seam_fade_unit = ?, seam_fade_frames = ?,
-           even_colour = ?, enabled = ?, loras_json = ?, chain_frame_back = ?,
+           even_colour = ?, enabled = ?, loras_json = ?, steps = ?, cfg = ?, chain_frame_back = ?,
            chained_frame_back = ?, chained_frame_request = ?, drop_duplicate_frame = ?,
            chain_trim_start_frames = ?, seed = ?, seed_pinned = ?, locked_job_id = ?, updated_at = ?,
            generated_audio = ?
@@ -1191,6 +1264,8 @@ export function updateShot(
       next.evenColour == null ? null : next.evenColour ? 1 : 0,
       next.enabled ? 1 : 0,
       encodeShotLoras(next.loras),
+      next.steps,
+      next.cfg,
       next.chainFrameBack,
       next.chainedFrameBack,
       next.chainedFrameRequest,

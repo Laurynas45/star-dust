@@ -3281,6 +3281,297 @@ async function checkLoras() {
   assert(storage.listShots(older.project.id).every((shot) => shot.loras === null), "an omitted shot list inherits");
 }
 
+async function checkSampler() {
+  const sampler = await import("../src/lib/sampler");
+  const storage = await import("../src/lib/storage");
+  const keys = await import("../src/lib/input-key");
+  const shotlist = await import("../src/lib/shotlist");
+  const preflight = await import("../src/lib/preflight-run");
+  const { NextRequest } = await import("next/server");
+  const projectsRoute = await import("../src/app/api/projects/route");
+
+  const low = sampler.parseStepsValue(0, "steps");
+  assert(!low.ok && /1 to 100/.test(low.ok ? "" : low.error), "steps 0 is rejected");
+  const high = sampler.parseStepsValue(101, "steps");
+  assert(!high.ok && /is 101/.test(high.ok ? "" : high.error), "steps 101 names the value");
+  const fraction = sampler.parseStepsValue(1.5, "steps");
+  assert(!fraction.ok && /whole number/.test(fraction.ok ? "" : fraction.error), "steps must be a whole number");
+  assert(!sampler.parseStepsValue("8", "steps").ok, "a JSON string is not a step count");
+  assert(sampler.parseStepsValue("8", "steps", { allowString: true }).ok, "a form string can be a step count");
+  assert(sampler.parseStepsValue(1, "steps").ok && sampler.parseStepsValue(100, "steps").ok, "steps 1 and 100 are allowed");
+  const cfgLow = sampler.parseCfgValue(-0.1, "cfg");
+  assert(!cfgLow.ok && /0 to 30/.test(cfgLow.ok ? "" : cfgLow.error), "CFG below 0 is rejected");
+  const cfgHigh = sampler.parseCfgValue(30.1, "cfg");
+  assert(!cfgHigh.ok && /30.1/.test(cfgHigh.ok ? "" : cfgHigh.error), "CFG above 30 names the value");
+  assert(!sampler.parseCfgValue(Number.POSITIVE_INFINITY, "cfg").ok, "infinite CFG is rejected");
+  const cfgOk = sampler.parseCfgValue(1.5, "cfg");
+  assert(cfgOk.ok && cfgOk.cfg === 1.5, "CFG 1.5 is allowed");
+  assert(sampler.parseCfgValue(0, "cfg").ok && sampler.parseCfgValue(30, "cfg").ok, "CFG 0 and 30 are allowed");
+
+  assert(
+    sampler.effectiveSampler({ steps: 20, cfg: 5 }, { steps: null, cfg: null }).steps === 20 &&
+      sampler.effectiveSampler({ steps: 20, cfg: 5 }, { steps: null, cfg: null }).cfg === 5,
+    "an unset shot uses the project sampler"
+  );
+  assert(
+    sampler.effectiveSampler({ steps: 20, cfg: 5 }, { steps: 4, cfg: null }).steps === 4 &&
+      sampler.effectiveSampler({ steps: 20, cfg: 5 }, { steps: 4, cfg: null }).cfg === 5,
+    "a shot step count replaces the project and CFG still inherits"
+  );
+  assert(
+    sampler.effectiveSampler({ steps: null, cfg: null }, { steps: null, cfg: null }).steps == null,
+    "unset on both sides keeps the graph default"
+  );
+
+  const badProject = await projectsRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ name: "Bad steps", steps: 0 }),
+    })
+  );
+  const badBody = (await badProject.json()) as { error?: string };
+  assert(badProject.status === 400 && /1 to 100/.test(badBody.error || ""), badBody.error || "steps API");
+  const made = await projectsRoute.POST(
+    new NextRequest("http://127.0.0.1:3000/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ name: "Sampler", steps: 8, cfg: 1 }),
+    })
+  );
+  const madeBody = (await made.json()) as { id?: string; steps?: number; cfg?: number };
+  assert(made.status === 201 && madeBody.steps === 8 && madeBody.cfg === 1, "create project stores steps and CFG");
+  const shotRoute = await import("../src/app/api/projects/[id]/shots/[shotId]/route");
+  const apiShot = storage.createShot({
+    projectId: madeBody.id || "",
+    prompt: "A card.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: "uploads/missing.png",
+  });
+  const badShot = await shotRoute.PATCH(
+    new NextRequest(`http://127.0.0.1:3000/api/projects/${madeBody.id}/shots/${apiShot.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cfg: 40 }),
+    }),
+    { params: { id: madeBody.id || "", shotId: apiShot.id } }
+  );
+  const badShotBody = (await badShot.json()) as { error?: string };
+  assert(badShot.status === 400 && /0 to 30/.test(badShotBody.error || ""), badShotBody.error || "cfg API");
+  assert(storage.getShot(apiShot.id)?.cfg == null, "a rejected CFG is not stored");
+
+  function loadGraph(name: string) {
+    return JSON.parse(fs.readFileSync(path.join(process.cwd(), "workflows", name), "utf8")) as Record<
+      string,
+      { class_type?: string; inputs?: Record<string, unknown> }
+    >;
+  }
+  const same = loadGraph("comfyui-svd-i2v.api.json");
+  assert(sampler.applyShippedSampler(same, { steps: null, cfg: null }).workflow === same, "an empty override is the same object");
+
+  const svd = sampler.applyShippedSampler(loadGraph("comfyui-svd-i2v.api.json"), { steps: 8, cfg: 1 });
+  assert(svd.workflow["5"]?.inputs?.steps === 8 && svd.workflow["5"]?.inputs?.cfg === 1, "SVD KSampler takes steps and CFG");
+  assert(svd.workflow["4"]?.inputs?.min_cfg === 1, "SVD linear guidance min_cfg stays");
+  assert(svd.notes.length === 0, "SVD applies both overrides");
+
+  const wan = sampler.applyShippedSampler(loadGraph("comfyui-wan22-ti2v-5b.api.json"), { steps: 6, cfg: 1 });
+  assert(wan.workflow["9"]?.inputs?.steps === 6 && wan.workflow["9"]?.inputs?.cfg === 1, "Wan 5B KSampler takes steps and CFG");
+  assert(wan.notes.length === 0, "Wan 5B applies both overrides");
+
+  const flf = sampler.applyShippedSampler(loadGraph("comfyui-wan22-14b-flf2v.api.json"), { steps: 4, cfg: 1 });
+  assert(flf.workflow["12"]?.inputs?.steps === 4 && flf.workflow["13"]?.inputs?.steps === 4, "both Wan 14B stages use the new total");
+  assert(flf.workflow["12"]?.inputs?.end_at_step === 2 && flf.workflow["13"]?.inputs?.start_at_step === 2, "a 4-step schedule keeps the halfway split");
+  assert(flf.workflow["13"]?.inputs?.end_at_step === 10000, "the low-noise stage still runs to the end");
+  assert(flf.workflow["12"]?.inputs?.cfg === 1 && flf.workflow["13"]?.inputs?.cfg === 1, "CFG is written on both stages");
+  assert(flf.workflow["12"]?.inputs?.start_at_step === 0, "the high-noise stage still starts at 0");
+  const flfFive = sampler.applyShippedSampler(loadGraph("comfyui-wan22-14b-flf2v.api.json"), { steps: 5, cfg: null });
+  assert(flfFive.workflow["12"]?.inputs?.end_at_step === 3 && flfFive.workflow["13"]?.inputs?.start_at_step === 3, "5 steps round the halfway split to 3");
+  assert(flfFive.workflow["12"]?.inputs?.cfg === 4, "CFG stays when only steps are set");
+  const flfOne = sampler.applyShippedSampler(loadGraph("comfyui-wan22-14b-flf2v.api.json"), { steps: 1, cfg: null });
+  assert(flfOne.applied.steps === 2 && flfOne.workflow["12"]?.inputs?.end_at_step === 1, "one requested step becomes one step in each stage");
+  assert(flfOne.notes.some((note) => /at least 1 step/.test(note)), "the raised step count is reported");
+  const uneven = sampler.applyShippedSampler(
+    {
+      a: {
+        class_type: "KSamplerAdvanced",
+        inputs: { steps: 20, cfg: 4, start_at_step: 0, end_at_step: 6, noise_seed: 1 },
+      },
+      b: {
+        class_type: "KSamplerAdvanced",
+        inputs: { steps: 20, cfg: 4, start_at_step: 6, end_at_step: 10000, noise_seed: 1 },
+      },
+    },
+    { steps: 10, cfg: null }
+  );
+  assert(uneven.workflow.a?.inputs?.end_at_step === 3 && uneven.workflow.b?.inputs?.start_at_step === 3, "a 6/20 split stays at that fraction");
+
+  const ltx = sampler.applyShippedSampler(loadGraph("comfyui-ltx23-i2v.api.json"), { steps: 4, cfg: 2 });
+  const scheduler = Object.values(ltx.workflow).find((node) => node.class_type === "LTXVScheduler");
+  const guider = Object.values(ltx.workflow).find((node) => node.class_type === "CFGGuider");
+  assert(scheduler?.inputs?.steps === 4 && guider?.inputs?.cfg === 2, "LTX-2.3 writes scheduler steps and CFGGuider cfg");
+  assert(ltx.notes.length === 0, "LTX-2.3 applies both overrides");
+
+  const ltx25 = sampler.applyShippedSampler(loadGraph("comfyui-ltx25-i2v.api.json"), { steps: 4, cfg: 2 });
+  const sigmas = Object.values(ltx25.workflow).filter((node) => node.class_type === "ManualSigmas");
+  assert(sigmas.length >= 2 && sigmas.every((node) => typeof node.inputs?.sigmas === "string"), "LTX-2.5 keeps its sigma list");
+  assert(ltx25.applied.steps == null && ltx25.notes.some((note) => /ManualSigmas/.test(note) && /Steps 4/.test(note)), "LTX-2.5 reports the unused step count");
+  const dual = Object.values(ltx25.workflow).filter((node) => node.class_type === "LTXVDualCFGGuider");
+  assert(
+    dual.length >= 2 && dual.every((node) => node.inputs?.video_cfg === 2 && node.inputs?.audio_cfg === 2),
+    "LTX-2.5 writes CFG onto video_cfg and audio_cfg"
+  );
+
+  const h3 = sampler.applyShippedSampler(loadGraph("comfyui-minimax-h3-i2v.api.json"), { steps: 6, cfg: 1 });
+  const basic = Object.values(h3.workflow).find((node) => node.class_type === "BasicScheduler");
+  assert(basic?.inputs?.steps === 6, "MiniMax H3 writes BasicScheduler steps");
+  assert(h3.applied.cfg == null && h3.notes.some((note) => /BasicGuider/.test(note) && /CFG 1/.test(note)), "MiniMax H3 reports the unused CFG");
+
+  const customGraph = {
+    "9": { class_type: "KSampler", inputs: { seed: 0, steps: 20, cfg: 5 } },
+  };
+  const mapped = sampler.applyCustomSampler(customGraph, { steps: { node: "9", input: "steps" }, cfg: { node: "9", input: "cfg" } }, { steps: 8, cfg: 1 });
+  assert(mapped.workflow["9"]?.inputs?.steps === 8 && mapped.workflow["9"]?.inputs?.cfg === 1 && mapped.notes.length === 0, "a mapped custom graph writes both");
+  const unmapped = sampler.applyCustomSampler(customGraph, { steps: null, cfg: null }, { steps: 8, cfg: 1 });
+  assert(unmapped.workflow === customGraph, "an unmapped custom graph is not rewritten");
+  assert(unmapped.notes.some((note) => /steps input/.test(note)) && unmapped.notes.some((note) => /cfg input/.test(note)), "an unmapped custom graph names both");
+
+  const previous = storage.getSettings();
+  storage.saveSettings({ provider: "comfyui", comfyuiWorkflow: "wan" });
+  const keyProject = storage.createProject("Sampler keys", "");
+  const keyShot = storage.createShot({
+    projectId: keyProject.id,
+    prompt: "A lantern.",
+    presetId: "slow-zoom-in",
+    durationSec: 2,
+    startImagePath: "uploads/missing.png",
+  });
+  const beforeKey = keys.desiredClipKey(keyShot);
+  storage.updateProject(keyProject.id, { steps: 8 });
+  const withSteps = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  assert(beforeKey !== withSteps, "Wan steps change the content key");
+  storage.saveSettings({ provider: "comfyui", comfyuiWorkflow: "minimax-h3" });
+  storage.updateProject(keyProject.id, { steps: null, cfg: 1 });
+  const h3Cfg = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  storage.updateProject(keyProject.id, { cfg: 2 });
+  const h3Cfg2 = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  assert(h3Cfg === h3Cfg2, "MiniMax CFG is not part of the content key");
+  storage.saveSettings({ provider: "mock", comfyuiWorkflow: "svd" });
+  storage.updateProject(keyProject.id, { steps: null, cfg: null });
+  const mockBefore = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  storage.updateProject(keyProject.id, { steps: 4, cfg: 1 });
+  const mockAfter = keys.desiredClipKey(storage.getShot(keyShot.id)!);
+  assert(mockBefore === mockAfter, "Mock does not put steps or CFG in the content key");
+  const noted = preflight.preflightStoredProject(
+    storage.getProject(keyProject.id)!,
+    storage.listShots(keyProject.id),
+    storage.getSettings()
+  );
+  assert(noted.notes.some((note) => /does not use/.test(note.note) && /Steps 4/.test(note.note)), "Mock preflight says the values are stored");
+  storage.saveSettings({ provider: "comfyui", comfyuiWorkflow: "ltx25" });
+  const ltxNote = preflight.preflightStoredProject(
+    storage.getProject(keyProject.id)!,
+    storage.listShots(keyProject.id),
+    storage.getSettings()
+  );
+  assert(ltxNote.notes.some((note) => /ManualSigmas/.test(note.note)), "LTX-2.5 preflight names the unused step count");
+  assert(!ltxNote.notes.some((note) => /CFG 1 was not applied/.test(note.note)), "LTX-2.5 preflight does not drop CFG");
+  storage.saveSettings({
+    provider: previous.provider,
+    comfyuiWorkflow: previous.comfyuiWorkflow,
+    comfyLowMemory: previous.comfyLowMemory,
+  });
+
+  const falSrc = fs.readFileSync(path.join(process.cwd(), "src/lib/providers/fal.ts"), "utf8");
+  const replicateSrc = fs.readFileSync(path.join(process.cwd(), "src/lib/providers/replicate.ts"), "utf8");
+  assert(!/num_inference_steps|guidance/.test(falSrc), "the fal request is left untouched");
+  assert(!/num_inference_steps|guidance/.test(replicateSrc), "the Replicate request is left untouched");
+  assert(/not sent/.test(sampler.hostSamplerSentence("fal", { steps: 8, cfg: 1 })), "fal says the values are not sent");
+  assert(/not sent/.test(sampler.hostSamplerSentence("replicate", { steps: null, cfg: 1 })), "Replicate says CFG is not sent");
+
+  const still = solidPng(dataDir, "sampler-still.png", "teal");
+  const baseShot = {
+    prompt: "A teal card.",
+    durationSec: 2,
+    preset: "slow-zoom-in",
+    enabled: true,
+    seed: 3,
+    seedPinned: false,
+    images: [{ file: "stills/sampler.png", role: "start" }],
+    chainFromPrevious: false,
+    chainFrameBack: 0,
+    chainTrimStartFrames: null,
+    transition: null,
+    evenColour: null,
+    comfyuiWorkflow: null,
+    comfyLowMemory: null,
+  };
+  const doc = {
+    schema: "stardust.shotlist/1",
+    name: "Sampler list",
+    description: "",
+    styleBase: "",
+    provider: "mock",
+    comfyuiWorkflow: null,
+    comfyLowMemory: null,
+    output: { fps: null, width: null, height: null },
+    transition: { mode: "cut", fadeSec: 0.5, fadeUnit: "seconds", fadeFrames: 4 },
+    chainTrimStartFrames: 1,
+    evenColour: false,
+    smoothFps: false,
+    steps: 8,
+    cfg: 1,
+    shots: [
+      { ...baseShot, steps: 4, cfg: 2 },
+      { ...baseShot, prompt: "A second card." },
+    ],
+  };
+  const files = new Map([["stills/sampler.png", still]]);
+  const imported = shotlist.importShotList({ json: JSON.stringify(doc), files, source: "json" });
+  assert(imported.ok, `sampler shot list import failed: ${imported.ok ? "" : imported.errors.join(" | ")}`);
+  if (!imported.ok) throw new Error("unreachable");
+  assert(imported.project.steps === 8 && imported.project.cfg === 1, "import stores the project sampler");
+  const importedShots = storage.listShots(imported.project.id);
+  assert(importedShots[0]?.steps === 4 && importedShots[0]?.cfg === 2, "import stores the shot sampler");
+  assert(importedShots[1]?.steps == null && importedShots[1]?.cfg == null, "an omitted shot sampler inherits");
+  const packed = shotlist.shotListJson(shotlist.buildShotList(imported.project.id).document);
+  assert(packed.includes('"steps": 4') && !/"steps": null/.test(packed), "export writes steps only when set");
+  const again = shotlist.importShotList({
+    json: packed,
+    files: shotlist.buildShotList(imported.project.id).files,
+    source: "json",
+  });
+  assert(again.ok, `sampler round trip failed: ${again.ok ? "" : again.errors.join(" | ")}`);
+  if (!again.ok) throw new Error("unreachable");
+  assert(
+    JSON.stringify(shotlist.renderSettingsOf(again.project.id)) ===
+      JSON.stringify(shotlist.renderSettingsOf(imported.project.id)),
+    "export and import keep steps and CFG"
+  );
+  const idsBefore = storage.listProjects().map((project) => project.id);
+  const badList = shotlist.importShotList({
+    json: JSON.stringify({ ...doc, steps: 0, shots: [{ ...doc.shots[0], cfg: 40 }, doc.shots[1]] }),
+    files,
+    source: "json",
+  });
+  assert(!badList.ok, "invalid sampler values are not imported");
+  if (badList.ok) throw new Error("unreachable");
+  assert(badList.errors.some((error) => /1 to 100/.test(error)) && badList.errors.some((error) => /0 to 30/.test(error)), badList.errors.join(" | "));
+  assert(
+    JSON.stringify(storage.listProjects().map((project) => project.id)) === JSON.stringify(idsBefore),
+    "a bad sampler list creates no project"
+  );
+  const oldDoc = JSON.parse(JSON.stringify(doc)) as { steps?: unknown; cfg?: unknown; shots: { steps?: unknown; cfg?: unknown }[] };
+  delete oldDoc.steps;
+  delete oldDoc.cfg;
+  for (const shot of oldDoc.shots) {
+    delete shot.steps;
+    delete shot.cfg;
+  }
+  const legacy = shotlist.importShotList({ json: JSON.stringify(oldDoc), files, source: "json" });
+  assert(legacy.ok, `an older shot list failed: ${legacy.ok ? "" : legacy.errors.join(" | ")}`);
+  if (!legacy.ok) throw new Error("unreachable");
+  assert(legacy.project.steps == null && legacy.project.cfg == null, "an omitted sampler stays unset");
+}
+
 async function main() {
   await checkPreflight();
   await checkComfyObjectInfo();
@@ -8717,16 +9008,25 @@ async function main() {
 
   storage.updateProject(seedProject.id, {
     loras: [{ name: "project-style.safetensors", strength: 0.8 }],
+    steps: 12,
+    cfg: 1,
   });
-  storage.updateShot(pinShot.id, { loras: [{ name: "shot-motion.safetensors", strength: 0.5 }] });
+  storage.updateShot(pinShot.id, { loras: [{ name: "shot-motion.safetensors", strength: 0.5 }], steps: 4 });
   storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
   const seedStitch = await stitch.stitchProject(seedProject.id);
   assert(fs.existsSync(storage.resolveDataPath(seedStitch.contactSheetPath)), "the stitch still writes a contact sheet");
   const seedManifest = JSON.parse(fs.readFileSync(storage.resolveDataPath(seedStitch.manifestPath), "utf8")) as {
-    shots: { shotId: string; seed: number | null; loras?: { name: string; strength: number }[] }[];
+    shots: {
+      shotId: string;
+      seed: number | null;
+      steps?: number;
+      cfg?: number;
+      loras?: { name: string; strength: number }[];
+    }[];
   };
   const pinEntry = seedManifest.shots.find((item) => item.shotId === pinShot.id);
   assert(pinEntry?.seed === 4242, "the stitch manifest records the pinned seed");
+  assert(pinEntry?.steps === 4 && pinEntry.cfg === 1, "the stitch manifest records the shot steps and the project CFG");
   assert(
     pinEntry?.loras?.[0]?.name === "shot-motion.safetensors" && pinEntry.loras[0].strength === 0.5,
     "the stitch manifest records the shot LoRA next to the seed"
@@ -8748,12 +9048,28 @@ async function main() {
     }).includes("seed 4242"),
     "the contact sheet line shows that seed"
   );
+  assert(
+    sheetLib
+      .contactLabelLines({
+        shotId: pinShot.id,
+        version: 2,
+        preview: false,
+        provider: "mock",
+        seed: 4242,
+        steps: 4,
+        cfg: 1,
+        durationSec: 2,
+      })
+      .some((line) => line.includes("seed 4242") && line.includes("4 steps") && line.includes("cfg 1")),
+    "the contact sheet line shows steps and CFG beside the seed"
+  );
   const seedExport = await edit.buildEditExport(seedProject.id);
   const pinManifest = seedExport.manifests.find((item) => item.shot === "SH010");
   assert(
     pinManifest?.seed === 4242 && pinManifest.seedPinned === true,
     "the edit manifest records the pinned seed"
   );
+  assert(pinManifest?.steps === 4 && pinManifest.cfg === 1, "the edit manifest records steps and CFG when set");
   assert(
     pinManifest?.loras?.[0]?.name === "shot-motion.safetensors",
     "the edit manifest records the shot LoRA next to the seed"
@@ -9234,6 +9550,7 @@ async function main() {
 
   storage.saveSettings({ provider: "mock", budgetCap: null, rates: { fal: {}, replicate: {} } });
   await checkLoras();
+  await checkSampler();
   await checkComfyProgress();
 
   console.log("provider checks ok");

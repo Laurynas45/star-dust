@@ -135,6 +135,16 @@ export interface Project {
    */
   loras: LoraRef[];
   /**
+   * Sampler steps for shots that do not set their own.
+   * Null keeps the graph default. A whole number from 1 to 100.
+   */
+  steps: number | null;
+  /**
+   * Sampler CFG for shots that do not set their own.
+   * Null keeps the graph default. A number from 0 to 30.
+   */
+  cfg: number | null;
+  /**
    * EBU R128 on the final file. Null means on only when a clip has audio.
    * Off when every clip is silent, even if this is true.
    * A music bed masters to −14 LUFS instead when this is on or left at the default.
@@ -221,6 +231,16 @@ export interface Shot {
    * An empty array means this shot loads no LoRA.
    */
   loras: LoraRef[] | null;
+  /**
+   * Null uses the project step count. A number replaces it.
+   * When both are null, the graph default is used. 1–100.
+   */
+  steps: number | null;
+  /**
+   * Null uses the project CFG. A number replaces it.
+   * When both are null, the graph default is used. 0–30.
+   */
+  cfg: number | null;
   /** When true, the next take starts from a frame near the end of the previous shot. */
   chainFromPrevious: boolean;
   /**

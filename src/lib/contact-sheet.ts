@@ -4,6 +4,7 @@ import path from "path";
 import { findBurnFont } from "./captions";
 import { ffmpegFilters, runFfmpeg } from "./ffmpeg";
 import { providerContactName } from "./mixed-pass";
+import { formatSamplerBesideSeed } from "./sampler";
 import type { ProviderId } from "./types";
 
 /** Cells per row. A longer list wraps instead of becoming one wide strip. */
@@ -47,6 +48,9 @@ export interface ContactSheetCell {
   preview: boolean;
   provider: ProviderId;
   seed: number | null;
+  /** Shown beside the seed when the shot or project sets them. */
+  steps?: number | null;
+  cfg?: number | null;
   durationSec: number;
 }
 
@@ -71,9 +75,10 @@ function versionTag(version: number): string {
 export function contactLabelLines(cell: Omit<ContactSheetCell, "abs">): string[] {
   const versionText = cell.preview ? `preview ${versionTag(cell.version)}` : `take ${versionTag(cell.version)}`;
   const seedText = cell.seed == null || !Number.isFinite(cell.seed) ? "seed unset" : `seed ${Math.floor(cell.seed)}`;
+  const samplerText = formatSamplerBesideSeed(cell.steps, cell.cfg);
   const seconds =
     Number.isFinite(cell.durationSec) && cell.durationSec >= 0 ? `${cell.durationSec.toFixed(2)}s` : "duration unset";
-  return [cell.shotId, versionText, providerContactName(cell.provider), seedText, seconds];
+  return [cell.shotId, versionText, providerContactName(cell.provider), samplerText ? `${seedText} · ${samplerText}` : seedText, seconds];
 }
 
 export function contactSheetProblem(

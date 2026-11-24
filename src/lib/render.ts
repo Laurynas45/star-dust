@@ -6,6 +6,8 @@ import { creditEstimate, deductCredits } from "./credits";
 import { buildEstimate, estimateRenderAll, quoteRun, shotBill, withCredits } from "./cost";
 import { clipKeyForSeed, effectiveSeed, freshSeed, upstreamCutKey } from "./input-key";
 import { effectiveLoras, shouldInjectLoras } from "./loras";
+import { effectiveSampler } from "./sampler";
+import { planSampler } from "./sampler-run";
 import {
   CLOUD_RISK_NOTE,
   LOW_MEMORY_MARK,
@@ -369,6 +371,18 @@ export function comfyWorkflowsBeforeRetry(job: Job): ComfyGraphId[] {
   return comfyGateBeforeRetry(job).workflows;
 }
 
+function samplerNoteFor(provider: ProviderId, shot: Shot | undefined, workflow: ComfyGraphId | null): string {
+  if (!shot) return "";
+  const project = getProject(shot.projectId);
+  if (!project) return "";
+  return planSampler(provider, provider === "comfyui" ? workflow : null, effectiveSampler(project, shot)).notes.join(" ");
+}
+
+function withSamplerNote(providerNote: string, samplerNote: string, chainNote: string): string {
+  const base = samplerNote ? `${providerNote} ${samplerNote}` : providerNote;
+  return chainNote ? `${base} ${chainNote}` : base;
+}
+
 function modelForShot(shot: Shot, provider: ProviderId, settings: AppSettings): string {
   return modelNameFor(
     provider,
@@ -394,9 +408,11 @@ function queueJob(
     hasEndImage: Boolean(shot.endImagePath),
     comfy: provider === "comfyui" ? notedComfy(comfyForShot(shot, settings)) : undefined,
   });
+  const samplerNote = samplerNoteFor(provider, shot, provider === "comfyui" ? comfyForShot(shot, settings).workflow : null);
+  const baseNote = samplerNote ? `${described.providerNote} ${samplerNote}` : described.providerNote;
   const providerNote = chain
-    ? `${described.providerNote} ${chainProviderNote(chain.awaitPreviousFrame, shot.chainFrameBack)}`
-    : described.providerNote;
+    ? `${baseNote} ${chainProviderNote(chain.awaitPreviousFrame, shot.chainFrameBack)}`
+    : baseNote;
   return createJob({
     projectId: shot.projectId,
     shotId: shot.id,
@@ -969,10 +985,11 @@ export function retryFromJob(
     characterSheetPath:
       source.characterSheetPath ?? getProject(source.projectId)?.characterSheetPath,
     characterNote: described.characterNote,
-    providerNote:
-      chainPlan && chainPlan.ok
-        ? `${described.providerNote} ${chainProviderNote(chainPlan.awaitPreviousFrame, shotForChain?.chainFrameBack ?? 0)}`
-        : described.providerNote,
+    providerNote: withSamplerNote(
+      described.providerNote,
+      samplerNoteFor(provider, shot, provider === "comfyui" ? comfy.workflow : null),
+      chainPlan && chainPlan.ok ? chainProviderNote(chainPlan.awaitPreviousFrame, shotForChain?.chainFrameBack ?? 0) : ""
+    ),
     modelName: described.modelName,
     durationSec: source.durationSec,
     awaitPreviousFrame: chainPlan && chainPlan.ok ? chainPlan.awaitPreviousFrame : false,

@@ -38,6 +38,8 @@ After each clip is written, the command prints a note when the file is all black
 | `evenColour` | `true` or `false`. Off evens nothing. On, at stitch time, matches each later included shot's overall colour and brightness to the first included shot. One measurement for the whole clip, so the grade does not flicker. It does not fix a character or an outfit. Omitted means `false`, so an older file stays off. |
 | `smoothFps` | `true` or `false`. Off raises a lower frame rate by duplicating frames. On, at stitch time, raises a clip below the target rate with ffmpeg motion interpolation (minterpolate). The clip stays the same length. Fast motion and thin edges can warp. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. Omitted means `false`, so an older file stays off. |
 | `loras` | A list of `{ "name", "strength" }`, at most 4. `name` is the file name ComfyUI lists under `models/loras`. `strength` is a number from -2 to 2. Omitted strength is 1. Omitted list means none. A shot can replace this list. |
+| `steps` | A whole number from 1 to 100, or omit it. This replaces the graph's step count where that graph has a step input. Omitted means the graph default. |
+| `cfg` | A number from 0 to 30, or omit it. This replaces the graph's CFG where that graph has a CFG input. Omitted means the graph default. |
 | `shots` | One object per shot, in order. At least one. At most 200. |
 
 ## Transition
@@ -69,5 +71,7 @@ On a shot, `transition` is that object, or `null` to inherit the project join. T
 | `comfyLowMemory` | `true`, `false`, or `null` to inherit. |
 | `generatedAudio` | `true`, `false`, or `null` to inherit the project. On LTX-2.3 and LTX-2.5, a null project means on. `false` saves a silent mp4. Other graphs ignore it. Omitted means `null`. |
 | `loras` | A list of `{ "name", "strength" }`, or `null` to inherit the project list. The same limits as the project list. An empty list means this shot loads no LoRA. Omitted means `null`. |
+| `steps` | A whole number from 1 to 100, or omit it to inherit the project. A number replaces the project value. |
+| `cfg` | A number from 0 to 30, or omit it to inherit the project. A number replaces the project value. |
 
-Unknown fields are an error. A missing field is an error, except `evenColour`, `smoothFps`, `loras`, and `generatedAudio`. An older file that omits `evenColour` stays off on the project and inherits on each shot. An older file that omits `smoothFps` stays off. An older file that omits `loras` has none on the project, and each shot inherits. An older file that omits `generatedAudio` leaves it unset, so LTX-2.3 and LTX-2.5 use generated audio. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.
+Unknown fields are an error. A missing field is an error, except `evenColour`, `smoothFps`, `loras`, `generatedAudio`, `steps`, and `cfg`. An older file that omits `evenColour` stays off on the project and inherits on each shot. An older file that omits `smoothFps` stays off. An older file that omits `loras` has none on the project, and each shot inherits. An older file that omits `generatedAudio` leaves it unset, so LTX-2.3 and LTX-2.5 use generated audio. An older file that omits `steps` or `cfg` leaves that override unset. Export writes `steps` and `cfg` only when they are set. A bad duration, an unknown workflow, a missing still, and an unknown schema are all listed together. The file is not partly imported.
