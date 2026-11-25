@@ -467,6 +467,149 @@ async function testAddShotRefusal() {
   }
 }
 
+async function testAddShots() {
+  const png = Buffer.from("png-bytes");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "star-dust-mcp-batch-"));
+  const shot10 = path.join(dir, "shot10.png");
+  const shot2 = path.join(dir, "shot2.png");
+  const notes = path.join(dir, "notes.txt");
+  fs.writeFileSync(shot10, png);
+  fs.writeFileSync(shot2, png);
+  fs.writeFileSync(notes, "hello");
+  const mocked = mockFetch(async (call) => {
+    if (call.url === "https://images.example/lantern.png") return bytesResponse(png, "image/png");
+    if (call.method === "PUT" && call.path === "/api/settings") {
+      assert(asRecord(call.json)?.provider === "mock", "provider update");
+      return jsonResponse({ provider: "mock", ok: true });
+    }
+    if (call.method === "POST" && call.path === "/api/projects/proj-1/shots/batch") {
+      const images = call.form?.getAll("images") ?? [];
+      const prompt = call.form?.get("prompt");
+      if (prompt === "from a url") {
+        assert(images.length === 1, "one url still");
+        assert((await blobBytes(images[0])).equals(png), "url bytes");
+        return jsonResponse({ added: 1, shots: [{ id: "url-shot", prompt: "lantern" }], rejected: [] }, 201);
+      }
+      assert(images.length === 2, "two stills");
+      assert(images[0] instanceof File && images[0].name === "shot2.png", "shot2 is first");
+      assert(images[1] instanceof File && images[1].name === "shot10.png", "shot10 is second");
+      assert(prompt === "a lantern", "shared prompt");
+      assert(call.form?.get("durationSec") === "4", "duration");
+      assert(call.form?.get("presetId") === "slow-zoom-out", "preset");
+      assert(call.form?.get("comfyuiWorkflow") === "ltx", "workflow");
+      return jsonResponse(
+        {
+          added: 2,
+          shots: [
+            { id: "shot-2", prompt: "a lantern" },
+            { id: "shot-10", prompt: "a lantern" },
+          ],
+          rejected: [],
+        },
+        201
+      );
+    }
+    if (call.method === "POST" && call.path === "/api/projects/proj-reject/shots/batch") {
+      return jsonResponse(
+        {
+          added: 1,
+          shots: [{ id: "shot-ok" }],
+          rejected: [{ name: "notes.txt", error: "Start and end images must be PNG, JPEG, WebP, or GIF" }],
+        },
+        201
+      );
+    }
+    if (call.method === "POST" && call.path === "/api/projects/proj-none/shots/batch") {
+      return jsonResponse(
+        {
+          error: "No shots were added. notes.txt: Start and end images must be PNG, JPEG, WebP, or GIF",
+          added: 0,
+          rejected: [{ name: "notes.txt", error: "Start and end images must be PNG, JPEG, WebP, or GIF" }],
+        },
+        400
+      );
+    }
+    throw new Error(`unexpected ${call.method} ${call.url}`);
+  });
+  try {
+    await withTools(mocked.fetch, async (call) => {
+      const callsBefore = mocked.calls.length;
+      const empty = await call("add_shots", { projectId: "proj-1", images: [] });
+      assert(empty.isError && empty.text.includes("imagePath"), empty.text);
+      const tooMany = await call("add_shots", {
+        projectId: "proj-1",
+        images: Array.from({ length: 41 }, () => ({ imagePath: shot2 })),
+      });
+      assert(tooMany.isError && tooMany.text.includes("At most 40"), tooMany.text);
+      const badDuration = await call("add_shots", {
+        projectId: "proj-1",
+        images: [{ imagePath: shot2 }],
+        durationSec: 30,
+      });
+      assert(badDuration.isError && badDuration.text.includes("durationSec must be from 1 to 10"), badDuration.text);
+      const blankStill = await call("add_shots", { projectId: "proj-1", images: [{}] });
+      assert(blankStill.isError && blankStill.text.includes("imagePath"), blankStill.text);
+      const both = await call("add_shots", {
+        projectId: "proj-1",
+        images: [{ imagePath: shot2, imageUrl: "https://images.example/lantern.png" }],
+      });
+      assert(both.isError && both.text.includes("not both"), both.text);
+      const missingFile = await call("add_shots", {
+        projectId: "proj-1",
+        images: [{ imagePath: path.join(dir, "missing.png") }],
+      });
+      assert(missingFile.isError && missingFile.text.includes("No a start image"), missingFile.text);
+      assert(mocked.calls.length === callsBefore, "a bad list must not call the API");
+
+      const added = await call("add_shots", {
+        projectId: "proj-1",
+        prompt: "a lantern",
+        images: [{ imagePath: shot10 }, { imagePath: shot2 }],
+        durationSec: 4,
+        presetId: "slow-zoom-out",
+        provider: "mock",
+        comfyWorkflow: "ltx",
+      });
+      assert(!added.isError, added.text);
+      assert(added.json?.added === 2, added.text);
+      assert(Array.isArray(added.json?.shotIds) && (added.json?.shotIds as unknown[])[0] === "shot-2", added.text);
+      assert(added.text.includes("Added 2 shots."), added.text);
+      assert(added.text.includes("Studio provider is mock."), added.text);
+      assert(added.text.includes("Nothing was rendered."), added.text);
+
+      const fromUrl = await call("add_shots", {
+        projectId: "proj-1",
+        prompt: "from a url",
+        images: [{ imageUrl: "https://images.example/lantern.png" }],
+      });
+      assert(!fromUrl.isError, fromUrl.text);
+      assert(fromUrl.json?.added === 1, fromUrl.text);
+
+      const partial = await call("add_shots", {
+        projectId: "proj-reject",
+        images: [{ imagePath: shot2 }, { imagePath: notes }],
+      });
+      assert(!partial.isError, partial.text);
+      assert(partial.text.includes("Added 1 shot."), partial.text);
+      assert(partial.text.includes("notes.txt"), partial.text);
+
+      const rejected = await call("add_shots", {
+        projectId: "proj-none",
+        images: [{ imagePath: notes }],
+      });
+      assert(rejected.isError && rejected.text.includes("notes.txt"), rejected.text);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  assert(!mocked.calls.some((item) => item.path.includes("/render")), "add_shots does not render");
+  assert(!mocked.calls.some((item) => item.path.includes("credits")), "add_shots does not call credits");
+  const puts = mocked.calls.filter((item) => item.method === "PUT");
+  assert(puts.length === 1, "provider is set once");
+  const firstPost = mocked.calls.findIndex((item) => item.path.endsWith("/shots/batch"));
+  assert(mocked.calls.findIndex((item) => item.method === "PUT") < firstPost, "settings before the batch");
+}
+
 async function testStartRender() {
   const mocked = mockFetch((call) => {
     if (call.path === "/api/projects/proj-1/render") {
@@ -834,6 +977,7 @@ async function main() {
   await testSampler();
   await testAddShot();
   await testAddShotRefusal();
+  await testAddShots();
   await testStartRender();
   await testStartRenderErrors();
   await testGetJob();

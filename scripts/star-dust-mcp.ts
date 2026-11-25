@@ -12,6 +12,7 @@ import { z } from "zod";
 import { parseLoraList } from "../src/lib/loras";
 import { parseCfgValue, parseStepsValue } from "../src/lib/sampler";
 import { COMFY_WORKFLOWS } from "../src/lib/provider-info";
+import { MAX_BATCH_SHOTS, batchAddedText, sortByFileName, type RejectedStill } from "../src/lib/shot-batch";
 import {
   COMFY_WORKFLOW_IDS,
   MAX_SHOT_SECONDS,
@@ -36,6 +37,7 @@ export const STAR_DUST_TOOLS = [
   "list_backends",
   "create_project",
   "add_shot",
+  "add_shots",
   "start_render",
   "get_job",
   "fetch_clip",
@@ -800,6 +802,128 @@ async function addShot(client: StarDustClient, args: AddShotArgs): Promise<CallT
   });
 }
 
+type StillRef = {
+  imagePath?: string | null;
+  imageUrl?: string | null;
+};
+
+type AddShotsArgs = {
+  projectId: string;
+  prompt?: string | null;
+  images?: StillRef[] | null;
+  durationSec?: number | null;
+  presetId?: string | null;
+  provider?: string | null;
+  comfyWorkflow?: string | null;
+  comfyLowMemory?: boolean | null;
+  generatedAudio?: boolean | null;
+  loras?: LoraRef[] | null;
+  steps?: number | null;
+  cfg?: number | null;
+};
+
+function rejectedStills(value: unknown): RejectedStill[] {
+  if (!Array.isArray(value)) return [];
+  const rejected: RejectedStill[] = [];
+  for (const item of value) {
+    const record = asRecord(item);
+    const name = text(record?.name);
+    const error = text(record?.error);
+    if (name && error) rejected.push({ name, error });
+  }
+  return rejected;
+}
+
+async function addShots(client: StarDustClient, args: AddShotsArgs): Promise<CallToolResult> {
+  const projectId = args.projectId.trim();
+  if (!projectId) return failResult("projectId is required.");
+  const prompt = optionalText(args.prompt);
+  const images = args.images ?? [];
+  if (images.length === 0) {
+    return failResult("Pass images, a list of stills. Each item is imagePath or imageUrl.");
+  }
+  if (images.length > MAX_BATCH_SHOTS) {
+    return failResult(`At most ${MAX_BATCH_SHOTS} stills per request.`);
+  }
+  if (args.durationSec != null && (args.durationSec < MIN_SHOT_SECONDS || args.durationSec > MAX_SHOT_SECONDS)) {
+    return failResult(`durationSec must be from ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}.`);
+  }
+  const presetId = optionalText(args.presetId);
+  if (presetId && !PRESET_IDS.includes(presetId)) {
+    return failResult(`presetId must be one of: ${PRESET_LIST}.`);
+  }
+  const provider = optionalText(args.provider);
+  if (provider && !isProviderId(provider)) {
+    return failResult("provider must be mock, fal, replicate, or comfyui.");
+  }
+  const workflow = optionalText(args.comfyWorkflow);
+  if (workflow && !isComfyGraphId(workflow)) {
+    return failResult(`comfyWorkflow must be ${GRAPH_LIST}.`);
+  }
+  let loras: LoraRef[] | undefined;
+  if (args.loras != null) {
+    const parsed = parseLoraList(args.loras, "loras");
+    if (!parsed.ok) return failResult(parsed.error);
+    loras = parsed.loras;
+  }
+  const sampler = readSamplerArgs(args.steps, args.cfg);
+  if (!sampler.ok) return failResult(sampler.error);
+
+  const loaded: Still[] = [];
+  for (const item of images) {
+    const still = await loadStill(client, item?.imagePath, item?.imageUrl, "a start image");
+    if (!still) return failResult("Each still needs imagePath (a local file) or imageUrl (http or https).");
+    loaded.push(still);
+  }
+  const ordered = sortByFileName(loaded.map((still) => ({ ...still, name: still.filename })));
+
+  if (provider) {
+    const saved = await client.putJson("/api/settings", { provider });
+    if (!saved.ok || asRecord(saved.json)?.ok === false) return client.fail(saved);
+  }
+
+  const form = new FormData();
+  if (prompt) form.append("prompt", prompt);
+  for (const still of ordered) appendStill(form, "images", still);
+  if (args.durationSec != null) form.append("durationSec", String(args.durationSec));
+  if (presetId) form.append("presetId", presetId);
+  if (workflow) form.append("comfyuiWorkflow", workflow);
+  if (typeof args.comfyLowMemory === "boolean") form.append("comfyLowMemory", args.comfyLowMemory ? "true" : "false");
+  if (typeof args.generatedAudio === "boolean") form.append("generatedAudio", args.generatedAudio ? "true" : "false");
+  if (loras) form.append("loras", JSON.stringify(loras));
+  if (sampler.body.steps != null) form.append("steps", String(sampler.body.steps));
+  if (sampler.body.cfg != null) form.append("cfg", String(sampler.body.cfg));
+
+  const result = await client.postForm(`/api/projects/${encodeURIComponent(projectId)}/shots/batch`, form);
+  if (!result.ok || asRecord(result.json)?.ok === false) {
+    const failed = client.fail(result);
+    if (!provider) return failed;
+    const extra = `The studio provider was set to ${provider} before the shots failed.`;
+    const block = failed.content[0];
+    if (block?.type === "text") block.text = `${extra}\n\n${block.text}`;
+    return failed;
+  }
+  const payload = asRecord(result.json) ?? {};
+  const added = typeof payload.added === "number" ? payload.added : 0;
+  const rejected = rejectedStills(payload.rejected);
+  const shots = Array.isArray(payload.shots) ? payload.shots : [];
+  const shotIds = shots
+    .map((shot) => text(asRecord(shot)?.id))
+    .filter((id): id is string => Boolean(id));
+  const summary = batchAddedText(added, rejected, provider);
+  return okResult(summary, {
+    added,
+    projectId,
+    shotIds,
+    rejected,
+    provider: provider || null,
+    prompt: prompt || null,
+    durationSec: args.durationSec ?? null,
+    presetId: presetId || null,
+    comfyWorkflow: workflow || null,
+  });
+}
+
 type StartRenderArgs = {
   projectId: string;
   shotId?: string | null;
@@ -1082,6 +1206,54 @@ export function createStarDustMcpServer(client: StarDustClient): McpServer {
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     async (args) => guard(() => addShot(client, args))
+  );
+
+  server.registerTool(
+    "add_shots",
+    {
+      title: "Add shots from stills",
+      description: `Add one shot per still. The stills are uploaded to POST /api/projects/{id}/shots/batch, so the server stores each start image and runs the same safety check as add_shot. images is a list of { imagePath } or { imageUrl }. At most ${MAX_BATCH_SHOTS}. Shots are appended in file-name order. prompt is optional. Leave it out and each shot uses the still's file name. durationSec is ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. Omit it to use the preset length. presetId is ${PRESET_LIST}. provider sets the studio provider the same way add_shot does, and the next render uses it. comfyWorkflow (${GRAPH_LIST}), comfyLowMemory, and generatedAudio are stored on every new shot. generatedAudio applies to LTX-2.3 and LTX-2.5. Omit it to inherit the project. loras, steps (1 to 100), and cfg (0 to 30) match add_shot. Nothing is rendered. Keys, credits, the licence gate, and ComfyUI readiness are still enforced when you render.`,
+      inputSchema: {
+        projectId: z.string().describe("Project id from create_project."),
+        prompt: z
+          .string()
+          .optional()
+          .describe("Shared prompt for every new shot. Omit it and each shot uses the still's file name. The server refuses sexual content involving a minor."),
+        images: z
+          .array(
+            z
+              .object({
+                imagePath: z.string().optional().describe("Local still. Pass this or imageUrl."),
+                imageUrl: z.string().optional().describe("http(s) still URL. This tool downloads it and uploads the bytes."),
+              })
+              .strict()
+          )
+          .describe(`Stills, one shot each. At most ${MAX_BATCH_SHOTS}. Each item is imagePath or imageUrl.`),
+        durationSec: z.number().finite().optional().describe(`Clip length in seconds, from ${MIN_SHOT_SECONDS} to ${MAX_SHOT_SECONDS}. Omit to use the preset length.`),
+        presetId: z.string().optional().describe(`Motion preset: ${PRESET_LIST}. Mock uses it for the Ken Burns move. Omit for Slow Zoom In.`),
+        provider: providerEnum.optional().describe("Sets the studio provider: mock, fal, replicate, or comfyui. Omit to keep the current one."),
+        comfyWorkflow: z.string().optional().describe(`ComfyUI graph on every new shot: ${GRAPH_LIST}.`),
+        comfyLowMemory: z.boolean().optional().describe("Use the graph's low-memory preset on every new shot."),
+        generatedAudio: z
+          .boolean()
+          .optional()
+          .describe("LTX-2.3 and LTX-2.5 only. True decodes generated audio into the mp4. False saves a silent mp4. Omit to inherit the project. Other graphs ignore it."),
+        loras: z
+          .array(z.object({ name: z.string(), strength: z.number().optional() }).strict())
+          .optional()
+          .describe("Optional ComfyUI LoRAs for every new shot. Replaces the project list. name is the file name ComfyUI lists. strength defaults to 1, from -2 to 2. At most 4."),
+        steps: z
+          .number()
+          .optional()
+          .describe("Optional sampler steps for every new shot. A whole number from 1 to 100. Replaces the project value. Omit to inherit."),
+        cfg: z
+          .number()
+          .optional()
+          .describe("Optional CFG for every new shot. A number from 0 to 30. Replaces the project value. Omit to inherit."),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async (args) => guard(() => addShots(client, args))
   );
 
   server.registerTool(

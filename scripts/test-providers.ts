@@ -3572,6 +3572,205 @@ async function checkSampler() {
   assert(legacy.project.steps == null && legacy.project.cfg == null, "an omitted sampler stays unset");
 }
 
+async function checkShotBatch() {
+  const batch = await import("../src/lib/shot-batch");
+  const storage = await import("../src/lib/storage");
+  const { NextRequest } = await import("next/server");
+  const route = await import("../src/app/api/projects/[id]/shots/batch/route");
+  const { MINOR_SEXUAL_REFUSAL } = await import("../src/lib/safety");
+
+  assert(batch.MAX_BATCH_SHOTS === 40, "the batch limit is 40");
+  assert(batch.naturalCompare("shot2.png", "shot10.png") < 0, "shot2 comes before shot10");
+  assert(batch.naturalCompare("Shot10.png", "shot2.png") > 0, "case does not put Shot10 first");
+  assert(batch.promptFromStillName("shot10.png") === "shot10", "an empty prompt uses the file name");
+  assert(batch.promptFromStillName("my.still.jpeg") === "my.still", "only the last extension is removed");
+  const tied = batch.sortByFileName([
+    { name: "a.png", id: "second" },
+    { name: "a.png", id: "first" },
+  ]);
+  assert(tied[0]?.id === "second" && tied[1]?.id === "first", "equal names keep their order");
+  const named = batch.batchAddedText(2, [{ name: "notes.txt", error: "not an image" }]);
+  assert(
+    named.startsWith("Added 2 shots.") && named.includes("notes.txt (not an image)") && named.endsWith("Nothing was rendered."),
+    named
+  );
+
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64"
+  );
+
+  function uploadNames(projectId: string): string[] {
+    const dir = path.join(dataDir, "uploads", projectId);
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir);
+  }
+
+  async function postBatch(
+    projectId: string,
+    files: { name: string; bytes: Buffer }[],
+    fields: Record<string, string> = {}
+  ) {
+    const form = new FormData();
+    for (const [key, value] of Object.entries(fields)) form.set(key, value);
+    for (const file of files) {
+      form.append("images", new File([new Uint8Array(file.bytes)], file.name), file.name);
+    }
+    const res = await route.POST(
+      new NextRequest(`http://127.0.0.1:3000/api/projects/${projectId}/shots/batch`, {
+        method: "POST",
+        body: form,
+      }),
+      { params: { id: projectId } }
+    );
+    const body = (await res.json()) as {
+      error?: string;
+      refused?: boolean;
+      added?: number;
+      appendedAfter?: number;
+      rejected?: { name: string; error: string }[];
+      shots?: { id: string; prompt: string; position: number }[];
+    };
+    return { status: res.status, body };
+  }
+
+  const providerBefore = storage.getSettings().provider;
+  const order = storage.createProject("Batch order");
+  storage.createShot({
+    projectId: order.id,
+    prompt: "already here",
+    presetId: "slow-zoom-in",
+    durationSec: 3,
+  });
+  const jobsBefore = storage.listJobs(order.id).length;
+  const ordered = await postBatch(
+    order.id,
+    [
+      { name: "shot10.png", bytes: png },
+      { name: "shot2.png", bytes: png },
+      { name: "shot1.png", bytes: png },
+    ],
+    {
+      prompt: "A lantern drifts",
+      durationSec: "5",
+      presetId: "slow-zoom-out",
+      comfyuiWorkflow: "wan",
+    }
+  );
+  assert(ordered.status === 201 && ordered.body.added === 3, `batch add ${ordered.status} ${ordered.body.error || ""}`);
+  assert(ordered.body.appendedAfter === 1, "new shots follow the shot already in the list");
+  assert((ordered.body.rejected || []).length === 0, "a valid still is not rejected");
+  const orderShots = storage.listShots(order.id);
+  assert(orderShots.length === 4, `expected 4 shots, got ${orderShots.length}`);
+  assert(orderShots[0]?.prompt === "already here" && orderShots[0]?.position === 1, "the existing shot stays first");
+  assert(
+    orderShots.slice(1).map((shot) => shot.prompt).join(",") === "A lantern drifts,A lantern drifts,A lantern drifts",
+    "the shared prompt is stored on each new shot"
+  );
+  assert(
+    orderShots.slice(1).every((shot) => shot.durationSec === 5 && shot.presetId === "slow-zoom-out"),
+    "the shared duration and preset are stored"
+  );
+  assert(
+    orderShots.slice(1).every((shot) => shot.comfyuiWorkflow === "wan" && shot.startImagePath && !shot.endImagePath),
+    "each new shot has the start still and the shared workflow"
+  );
+  assert(orderShots.slice(1).every((shot) => shot.chainFromPrevious === false), "batch shots are not chained");
+  const startNames = orderShots.slice(1).map((shot) => shot.startImagePath?.split("/").pop() || "");
+  assert(
+    startNames[0]?.endsWith("shot1.png") && startNames[1]?.endsWith("shot2.png") && startNames[2]?.endsWith("shot10.png"),
+    startNames.join(",")
+  );
+  assert(new Set(orderShots.slice(1).map((shot) => shot.startImagePath)).size === 3, "each still is stored on its own");
+  assert(storage.listJobs(order.id).length === jobsBefore, "adding shots does not queue a render");
+  assert(storage.getSettings().provider === providerBefore, "the batch route does not change the studio provider");
+
+  const namedShots = await postBatch(order.id, [
+    { name: "b.png", bytes: png },
+    { name: "a.png", bytes: png },
+  ]);
+  assert(namedShots.status === 201 && namedShots.body.added === 2, "a batch with no prompt still adds the shots");
+  const afterNames = storage.listShots(order.id).slice(4);
+  assert(afterNames[0]?.prompt === "a" && afterNames[1]?.prompt === "b", "file-name order, and the file name is the prompt");
+  assert(
+    afterNames.every((shot) => shot.durationSec === 4 && shot.presetId === "slow-zoom-in" && shot.comfyuiWorkflow == null),
+    "an omitted duration uses Slow Zoom In, 4 seconds, and the workflow stays on the project default"
+  );
+
+  const clamped = await postBatch(order.id, [{ name: "long.png", bytes: png }], { durationSec: "99" });
+  assert(clamped.status === 201, "a long duration is accepted the same way as one shot");
+  assert(storage.listShots(order.id).at(-1)?.durationSec === 10, "a duration above 10 is clamped to 10");
+
+  const mixed = storage.createProject("Batch mixed");
+  const huge = Buffer.alloc(12 * 1024 * 1024 + 1);
+  const mixedRes = await postBatch(mixed.id, [
+    { name: "notes.txt", bytes: Buffer.from("hello") },
+    { name: "huge.png", bytes: huge },
+    { name: "good.png", bytes: png },
+    { name: "empty.png", bytes: Buffer.alloc(0) },
+  ]);
+  assert(mixedRes.status === 201 && mixedRes.body.added === 1, `mixed batch ${mixedRes.status} added ${mixedRes.body.added}`);
+  const rejected = mixedRes.body.rejected || [];
+  assert(
+    rejected.map((item) => item.name).join(",") === "empty.png,huge.png,notes.txt",
+    `rejected names ${rejected.map((item) => item.name).join(",")}`
+  );
+  assert(rejected.find((item) => item.name === "empty.png")?.error === "Empty image file", "an empty file is named");
+  assert(
+    rejected.find((item) => item.name === "huge.png")?.error === "Image is larger than 12 MB",
+    "a file over 12 MB is named"
+  );
+  assert(
+    rejected.find((item) => item.name === "notes.txt")?.error === "Start and end images must be PNG, JPEG, WebP, or GIF",
+    "a file that is not an image is named"
+  );
+  const mixedShots = storage.listShots(mixed.id);
+  assert(mixedShots.length === 1 && mixedShots[0]?.prompt === "good" && mixedShots[0]?.startImagePath, "the good still is the only shot");
+  assert(uploadNames(mixed.id).length === 1, "a rejected file is not stored");
+  assert(storage.listJobs(mixed.id).length === 0, "a mixed batch does not queue a render");
+
+  const none = storage.createProject("Batch none");
+  const noneRes = await postBatch(none.id, [{ name: "notes.txt", bytes: Buffer.from("hello") }]);
+  assert(noneRes.status === 400 && (noneRes.body.error || "").includes("notes.txt"), noneRes.body.error || "missing name");
+  assert(storage.listShots(none.id).length === 0 && uploadNames(none.id).length === 0, "a rejected file creates no shot");
+
+  const tooMany = storage.createProject("Batch cap");
+  const many = Array.from({ length: batch.MAX_BATCH_SHOTS + 1 }, (_, index) => ({
+    name: `n${index}.png`,
+    bytes: png,
+  }));
+  const cap = await postBatch(tooMany.id, many);
+  assert(cap.status === 400 && (cap.body.error || "").includes("41") && (cap.body.error || "").includes("40"), cap.body.error || "cap");
+  assert(storage.listShots(tooMany.id).length === 0 && uploadNames(tooMany.id).length === 0, "over the limit stores nothing");
+
+  const missing = await route.POST(
+    new NextRequest("http://127.0.0.1:3000/api/projects/missing-batch/shots/batch", { method: "POST" }),
+    { params: { id: "missing-batch" } }
+  );
+  const missingBody = (await missing.json()) as { error?: string };
+  assert(missing.status === 404 && missingBody.error === "Project not found", missingBody.error || "missing project");
+
+  const invalid = storage.createProject("Batch invalid");
+  const badSteps = await postBatch(invalid.id, [{ name: "card.png", bytes: png }], { steps: "0" });
+  assert(badSteps.status === 400 && /1 to 100/.test(badSteps.body.error || ""), badSteps.body.error || "steps");
+  const badLoras = await postBatch(invalid.id, [{ name: "card.png", bytes: png }], { loras: "{" });
+  assert(badLoras.status === 400 && /JSON/.test(badLoras.body.error || ""), badLoras.body.error || "loras");
+  const noFiles = await postBatch(invalid.id, [], { prompt: "A lantern" });
+  assert(noFiles.status === 400 && noFiles.body.error === "Add at least one still.", noFiles.body.error || "empty");
+  assert(storage.listShots(invalid.id).length === 0 && uploadNames(invalid.id).length === 0, "a bad batch stores nothing");
+  assert(storage.listJobs(invalid.id).length === 0, "a bad batch does not queue a render");
+
+  const refused = storage.createProject("Batch refused");
+  const refusedRes = await postBatch(refused.id, [{ name: "card.png", bytes: png }], {
+    prompt: "nude child on a beach",
+  });
+  assert(refusedRes.status === 400 && refusedRes.body.refused === true, "a refused prompt is refused");
+  assert(refusedRes.body.error === MINOR_SEXUAL_REFUSAL, refusedRes.body.error || "refusal text");
+  assert(storage.listShots(refused.id).length === 0 && uploadNames(refused.id).length === 0, "a refused prompt stores no image");
+  assert(storage.listJobs(refused.id).length === 0, "a refused prompt queues nothing");
+  assert(storage.getSettings().provider === providerBefore, "batch checks do not change the studio provider");
+}
+
 async function main() {
   await checkPreflight();
   await checkComfyObjectInfo();
@@ -9552,6 +9751,7 @@ async function main() {
   await checkLoras();
   await checkSampler();
   await checkComfyProgress();
+  await checkShotBatch();
 
   console.log("provider checks ok");
   console.log(dataDir);
