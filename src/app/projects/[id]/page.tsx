@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { AddShotsFromStills } from "@/components/AddShotsFromStills";
 import { ClipFlagNote } from "@/components/ClipFlagNote";
 import { StatusBadge } from "@/components/StatusBadge";
 import { chainDepth, chainDepthLabel, chainDepthNote } from "@/lib/chain-depth";
@@ -1065,9 +1066,10 @@ export default function ProjectStudioPage() {
           <p className="font-mono text-[11px] text-violet-300">01 · Shot list</p>
           <h2 className="mt-1 text-lg font-medium text-white">One clip from a still</h2>
           <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
-            Start image, optional end image, prompt, duration, preset. Shared style
-            text, when set, is prefixed onto the prompt a provider sees. A later
-            shot can start from the previous shot&apos;s last frame.
+            Start image, optional end image, prompt, duration, preset. Add shots from
+            stills puts one shot on the list for each image. Shared style text, when
+            set, is prefixed onto the prompt a provider sees. A later shot can start
+            from the previous shot&apos;s last frame.
           </p>
         </article>
         <article className="panel flex flex-col p-4">
@@ -2004,6 +2006,8 @@ export default function ProjectStudioPage() {
             </button>
           </div>
         </form>
+
+        <AddShotsFromStills projectId={projectId} provider={provider} onChanged={load} />
 
         {shots.length === 0 ? (
           <div className="panel p-8 text-center text-sm text-[var(--muted)]">
