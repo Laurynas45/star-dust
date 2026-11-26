@@ -55,7 +55,7 @@ export interface JoinOmission {
   position: number;
   prompt: string;
   reason: JoinOmissionReason;
-  /** Plain label when reason is broken, such as "all black" or "no motion". */
+  /** Plain label when reason is broken, such as "all black", "black opening", or "no motion". */
   detail?: string;
 }
 

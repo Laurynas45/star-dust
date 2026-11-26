@@ -301,6 +301,18 @@ export interface MotionPreset {
 }
 
 /**
+ * One flat-black run that met the opening bar.
+ * Absent on a clip that is already all black or nearly all black. That flag stands alone.
+ */
+export interface BlackRun {
+  /** Zero-based index of the first flat-black frame in this run. */
+  startFrame: number;
+  frames: number;
+  /** Length in seconds. Null when the frame rate could not be read. */
+  sec: number | null;
+}
+
+/**
  * Measured after a clip file is written.
  * flagged is what the stitch and the UI use. A dark or slow shot can stay unflagged.
  * Mock clips are not flagged when CI is set. See clip-check.ts for the numbers.
@@ -316,6 +328,7 @@ export interface ClipCheck {
   /**
    * Ordered ComfyUI notes for a flagged clip.
    * Reported causes of an all-black Wan clip. Not a promise that one of them is this file.
+   * A black opening does not use this list.
    */
   hints: string[];
   /** The user asked the stitch to include this clip anyway. */
@@ -325,10 +338,16 @@ export interface ClipCheck {
   blackFraction: number;
   /** Mean frame-to-frame luma difference after the first frame. Null when motion was not judged. */
   meanMotion: number | null;
+  /**
+   * Flat-black runs at least as long as the smaller of 0.5 seconds and 12 frames.
+   * Empty when the clip is not flagged for a run, including when it is all black.
+   * Older rows omit this. Readers treat that as none.
+   */
+  blackRuns: BlackRun[];
 }
 
 export const CLIP_CHECK_HONESTY =
-  "This looks at the finished file for a clip that is all black, or nearly all black, and for a clip that does not move. A dark shot or a slow shot can still pass. It does not promise picture quality, a character lock, or lip-sync, and it does not turn the shot list into a long film.";
+  "This looks at the finished file for a clip that is all black, or nearly all black, for a flat-black run of at least half a second or 12 frames, and for a clip that does not move. A dark shot with a highlight, a short fade from black, or a slow shot can still pass. It does not promise picture quality, a character lock, or lip-sync, and it does not turn the shot list into a long film.";
 
 export interface Job {
   id: string;

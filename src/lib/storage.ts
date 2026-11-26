@@ -721,6 +721,26 @@ function mapJob(row: Record<string, unknown>): Job {
   };
 }
 
+function parseBlackRuns(raw: unknown): NonNullable<Job["clipCheck"]>["blackRuns"] {
+  if (!Array.isArray(raw)) return [];
+  const runs: NonNullable<Job["clipCheck"]>["blackRuns"] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { startFrame?: unknown; frames?: unknown; sec?: unknown };
+    const startFrame = Number(row.startFrame);
+    const frames = Number(row.frames);
+    if (!Number.isInteger(startFrame) || startFrame < 0) continue;
+    if (!Number.isInteger(frames) || frames < 1) continue;
+    const sec = Number(row.sec);
+    runs.push({
+      startFrame,
+      frames,
+      sec: row.sec == null || !Number.isFinite(sec) || sec < 0 ? null : sec,
+    });
+  }
+  return runs;
+}
+
 function parseClipCheck(raw: unknown): Job["clipCheck"] {
   if (typeof raw !== "string" || !raw.trim()) return undefined;
   try {
@@ -740,6 +760,7 @@ function parseClipCheck(raw: unknown): Job["clipCheck"] {
       frames: Number.isFinite(Number(value.frames)) ? Number(value.frames) : 0,
       blackFraction: Number.isFinite(Number(value.blackFraction)) ? Number(value.blackFraction) : 0,
       meanMotion: value.meanMotion == null || !Number.isFinite(mean) ? null : mean,
+      blackRuns: parseBlackRuns(value.blackRuns),
     };
   } catch {
     return undefined;

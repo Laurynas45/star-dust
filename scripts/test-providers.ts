@@ -169,7 +169,7 @@ function frameRgbAt(file: string, index: number): { r: number; g: number; b: num
   }
 }
 
-function concatColors(file: string, parts: { color: string; frames: number }[]) {
+function concatColors(file: string, parts: { color: string; frames: number }[], fps = 24) {
   const dir = fs.mkdtempSync(path.join(dataDir, "segs-"));
   const list = path.join(dir, "list.txt");
   const lines = parts.map((part, index) => {
@@ -179,7 +179,7 @@ function concatColors(file: string, parts: { color: string; frames: number }[]) 
       "-f",
       "lavfi",
       "-i",
-      `color=c=${part.color}:s=160x90:r=24`,
+      `color=c=${part.color}:s=160x90:r=${fps}`,
       "-frames:v",
       String(part.frames),
       "-c:v",
@@ -208,7 +208,7 @@ function concatColors(file: string, parts: { color: string; frames: number }[]) 
     "-pix_fmt",
     "yuv420p",
     "-r",
-    "24",
+    String(fps),
     file,
   ]);
 }
@@ -1688,6 +1688,12 @@ async function checkBrokenClips() {
   assert(/lip-sync/.test(CLIP_CHECK_HONESTY) && /long film/.test(CLIP_CHECK_HONESTY), "clip check keeps lip-sync and long film out");
   assert(clip.BLACK_FRAME_FRACTION >= 0.95, "black detection stays at nearly all frames");
   assert(clip.BLACK_YAVG_MAX <= 18 && clip.BLACK_YMAX_MAX <= 20, "black stays at black level, not a dark picture");
+  assert(clip.BLACK_RUN_MIN_SEC === 0.5 && clip.BLACK_RUN_MIN_FRAMES === 12, "a flat-black run uses 0.5s or 12 frames, whichever is shorter");
+  assert(clip.blackRunBarFrames(96, 24) === 12, "at 24 fps the bar is 12 frames");
+  assert(clip.blackRunBarFrames(80, 8) === 4, "at 8 fps 0.5 seconds is the shorter bar");
+  assert(clip.blackRunBarFrames(120, 60) === 12, "at 60 fps 12 frames is the shorter bar");
+  assert(clip.blackRunBarFrames(10, 24) > 10, "a clip shorter than the bar stays on the 95% check");
+  assert(/17618/.test(clip.LTX_BLACK_OPENING_NOTE) && /not a certainty/.test(clip.LTX_BLACK_OPENING_NOTE), "the LTX note names the issue as one possible cause");
   assert(clip.FROZEN_MEAN_YDIF_MAX <= 0.02 && clip.FROZEN_MAX_YDIF_MAX <= 0.04, "motion stays under a slow pan");
   assert(clip.COMFY_BLACK_FRAME_HINTS.length === 4, "ComfyUI hints stay in one order");
   assert(/--use-sage-attention/.test(clip.COMFY_BLACK_FRAME_HINTS[0]) && /fp16_accumulation/.test(clip.COMFY_BLACK_FRAME_HINTS[0]), "hint 1 is the launch flags");
@@ -1773,6 +1779,81 @@ async function checkBrokenClips() {
     { color: "black", frames: 18 },
     { color: "red", frames: 2 },
   ]);
+  const opening = path.join(dir, "opening.mp4");
+  const ending = path.join(dir, "ending.mp4");
+  const middle = path.join(dir, "middle.mp4");
+  const bothEnds = path.join(dir, "both-ends.mp4");
+  const shortOpen = path.join(dir, "short-open.mp4");
+  const barOpen = path.join(dir, "bar-open.mp4");
+  const lowOpen = path.join(dir, "low-open.mp4");
+  const fade = path.join(dir, "fade.mp4");
+  const darkHighlight = path.join(dir, "dark-highlight.mp4");
+  concatColors(opening, [
+    { color: "black", frames: 36 },
+    { color: "red", frames: 48 },
+  ]);
+  concatColors(ending, [
+    { color: "red", frames: 48 },
+    { color: "black", frames: 36 },
+  ]);
+  concatColors(middle, [
+    { color: "red", frames: 24 },
+    { color: "black", frames: 36 },
+    { color: "red", frames: 24 },
+  ]);
+  concatColors(bothEnds, [
+    { color: "black", frames: 36 },
+    { color: "red", frames: 48 },
+    { color: "black", frames: 36 },
+  ]);
+  concatColors(shortOpen, [
+    { color: "black", frames: 7 },
+    { color: "red", frames: 48 },
+  ]);
+  concatColors(barOpen, [
+    { color: "black", frames: 12 },
+    { color: "red", frames: 48 },
+  ]);
+  concatColors(
+    lowOpen,
+    [
+      { color: "black", frames: 4 },
+      { color: "red", frames: 20 },
+    ],
+    8
+  );
+  runFfmpegSync([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=red:s=160x90:r=24:d=2",
+    "-vf",
+    "fade=t=in:st=0:d=0.3,format=yuv420p",
+    "-c:v",
+    "libx264",
+    "-qp",
+    "0",
+    "-pix_fmt",
+    "yuv420p",
+    fade,
+  ]);
+  runFfmpegSync([
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0x181820:s=160x90:r=24:d=2",
+    "-vf",
+    "drawbox=x=12:y=24:w=20:h=20:color=white:t=fill,fade=t=in:st=0:d=1,format=yuv420p",
+    "-c:v",
+    "libx264",
+    "-qp",
+    "0",
+    "-pix_fmt",
+    "yuv420p",
+    darkHighlight,
+  ]);
 
   const prevCi = process.env.CI;
   try {
@@ -1784,8 +1865,9 @@ async function checkBrokenClips() {
     const open = clip.inspectClipFile(black, { provider: "mock" });
     assert(open.flagged && open.black, `Mock outside CI flags a black clip (${open.blackFraction})`);
     const comfyBlack = clip.inspectClipFile(black, { provider: "comfyui" });
-    assert(comfyBlack.flagged && comfyBlack.black, "ComfyUI flags a black clip");
+    assert(comfyBlack.flagged && comfyBlack.black && comfyBlack.blackRuns.length === 0, "ComfyUI flags a black clip");
     assert(comfyBlack.hints.length === 4, "ComfyUI shows the four hints");
+    assert(!/17618/.test(comfyBlack.status), "an all-black clip does not cite the LTX opening issue");
     assert(comfyBlack.hints[0] === clip.COMFY_BLACK_FRAME_HINTS[0], "hints stay in order");
     assert(/not a promise/.test(comfyBlack.status), "the status does not promise the cause");
     assert(!/api[_ ]?key/i.test(comfyBlack.status), "the status names no key");
@@ -1806,10 +1888,58 @@ async function checkBrokenClips() {
   const darkStillCheck = clip.inspectClipFile(darkStill, { provider: "comfyui" });
   assert(darkStillCheck.flagged && darkStillCheck.frozen && !darkStillCheck.black, "a dark gray still is no motion, not black");
   const mostlyCheck = clip.inspectClipFile(mostly, { provider: "replicate" });
-  assert(mostlyCheck.flagged && mostlyCheck.black, `19 of 20 black frames is nearly all black (${mostlyCheck.blackFraction})`);
+  assert(mostlyCheck.flagged && mostlyCheck.black && mostlyCheck.blackRuns.length === 0, `19 of 20 black frames is nearly all black (${mostlyCheck.blackFraction})`);
+  assert(clip.clipFlagLabel(mostlyCheck) === "nearly all black", clip.clipFlagLabel(mostlyCheck));
   const partlyCheck = clip.inspectClipFile(partly, { provider: "replicate" });
-  assert(!partlyCheck.flagged, `18 of 20 black frames is not nearly all (${partlyCheck.blackFraction})`);
+  assert(!partlyCheck.black && partlyCheck.blackFraction < clip.BLACK_FRAME_FRACTION, `18 of 20 is not nearly all black (${partlyCheck.blackFraction})`);
+  assert(partlyCheck.flagged && partlyCheck.blackRuns.length === 1 && partlyCheck.blackRuns[0].frames === 18, "18 flat-black frames at the start is a black opening");
+  assert(clip.clipFlagLabel(partlyCheck) === "black opening 0.75 s (18 frames)", clip.clipFlagLabel(partlyCheck));
   assert(!clip.inspectClipFile(path.join(dir, "missing.mp4"), { provider: "comfyui" }).flagged, "an unreadable file is not flagged");
+
+  const info = await import("../src/lib/provider-info");
+  const openingCheck = clip.inspectClipFile(opening, { provider: "comfyui", modelName: info.LTX_MODEL_NAME });
+  assert(openingCheck.flagged && !openingCheck.black && !openingCheck.frozen, `1.5s of black then colour is an opening (${openingCheck.blackFraction})`);
+  assert(openingCheck.blackRuns.length === 1 && openingCheck.blackRuns[0].frames === 36, "the opening is 36 frames");
+  assert(openingCheck.blackRuns[0].sec === 1.5, `the opening is 1.5 seconds (${openingCheck.blackRuns[0].sec})`);
+  assert(/The first 1\.5 s \(36 frames\) are flat black/.test(openingCheck.status), openingCheck.status);
+  assert(/render the shot again/.test(openingCheck.status), "the note names a new take");
+  assert(/start-frame trim drops at most 4 frames/.test(openingCheck.status) && /does not remove this run/.test(openingCheck.status), openingCheck.status);
+  assert(openingCheck.status.endsWith(clip.LTX_BLACK_OPENING_NOTE), "LTX-2.3 names issue 17618 as one possible cause");
+  assert(openingCheck.hints.length === 0, "a black opening does not use the Wan hint list");
+  assert(!/api[_ ]?key/i.test(openingCheck.status), "the opening note names no key");
+  const ltx25Opening = clip.inspectClipFile(opening, { provider: "comfyui", modelName: info.LTX25_MODEL_NAME });
+  assert(ltx25Opening.status.endsWith(clip.LTX_BLACK_OPENING_NOTE), "LTX-2.5 names the same possible cause");
+  const wanOpening = clip.inspectClipFile(opening, { provider: "comfyui", modelName: info.WAN_MODEL_NAME });
+  assert(wanOpening.flagged && wanOpening.hints.length === 0 && !/17618/.test(wanOpening.status), "a Wan opening does not cite the LTX issue");
+  const falOpening = clip.inspectClipFile(opening, { provider: "fal" });
+  assert(falOpening.flagged && falOpening.hints.length === 0 && !/17618/.test(falOpening.status), "fal flags the run with no ComfyUI note");
+  assert(clip.clipFlagLabel(falOpening) === "black opening 1.5 s (36 frames)", clip.clipFlagLabel(falOpening));
+  const endingCheck = clip.inspectClipFile(ending, { provider: "comfyui", modelName: info.LTX_MODEL_NAME });
+  assert(endingCheck.flagged && !endingCheck.black && endingCheck.blackRuns[0]?.startFrame === 48, "a trailing run is flagged");
+  assert(clip.clipFlagLabel(endingCheck) === "black ending 1.5 s (36 frames)", clip.clipFlagLabel(endingCheck));
+  assert(!/17618|start-frame trim/.test(endingCheck.status), endingCheck.status);
+  const middleCheck = clip.inspectClipFile(middle, { provider: "replicate" });
+  assert(!middleCheck.black && clip.clipFlagLabel(middleCheck) === "black run 1.5 s (36 frames) at frame 25", clip.clipFlagLabel(middleCheck));
+  assert(/starting at frame 25/.test(middleCheck.status) && !/start-frame trim/.test(middleCheck.status), middleCheck.status);
+  const bothCheck = clip.inspectClipFile(bothEnds, { provider: "fal" });
+  assert(clip.clipFlagLabel(bothCheck) === "black opening 1.5 s (36 frames), black ending 1.5 s (36 frames)", clip.clipFlagLabel(bothCheck));
+  assert(/The first 1\.5 s \(36 frames\) are flat black, and the last 1\.5 s \(36 frames\) are flat black/.test(bothCheck.status), bothCheck.status);
+  const shortCheck = clip.inspectClipFile(shortOpen, { provider: "comfyui", modelName: info.LTX_MODEL_NAME });
+  assert(!shortCheck.flagged && shortCheck.blackRuns.length === 0, `7 black frames is under the bar (${shortCheck.frames} frames)`);
+  const barCheck = clip.inspectClipFile(barOpen, { provider: "replicate" });
+  assert(barCheck.flagged && !barCheck.black && clip.clipFlagLabel(barCheck) === "black opening 0.5 s (12 frames)", clip.clipFlagLabel(barCheck));
+  const lowCheck = clip.inspectClipFile(lowOpen, { provider: "fal" });
+  assert(lowCheck.flagged && lowCheck.blackRuns[0]?.frames === 4 && lowCheck.blackRuns[0]?.sec === 0.5, `4 frames at 8 fps is 0.5s (${lowCheck.blackRuns[0]?.sec})`);
+  assert(/can drop those frames/.test(lowCheck.status) && !/does not remove this run/.test(lowCheck.status), lowCheck.status);
+  const fadeCheck = clip.inspectClipFile(fade, { provider: "comfyui", modelName: info.LTX_MODEL_NAME });
+  assert(!fadeCheck.flagged && fadeCheck.blackRuns.length === 0, `a 0.3s fade from black is not flagged (black ${fadeCheck.blackFraction}, frozen ${fadeCheck.frozen})`);
+  assert(!/17618/.test(fadeCheck.status), "a short fade does not cite the LTX issue");
+  const darkHighlightCheck = clip.inspectClipFile(darkHighlight, { provider: "comfyui", modelName: info.LTX25_MODEL_NAME });
+  assert(!darkHighlightCheck.flagged, `a one-second fade on a dark scene with a highlight is not flagged (black ${darkHighlightCheck.blackFraction}, frozen ${darkHighlightCheck.frozen}, mean ${darkHighlightCheck.meanMotion})`);
+  assert(darkHighlightCheck.blackFraction < 0.2, "the highlight leaves flat black quickly");
+  process.env.CI = "true";
+  const mockOpening = clip.inspectClipFile(opening, { provider: "mock" });
+  assert(!mockOpening.flagged && mockOpening.blackRuns.length === 0 && mockOpening.blackFraction > 0.3, "Mock in CI measures a black opening and does not flag it");
 
   const project = storage.createProject("Broken clip");
   const still = storage.saveUpload(project.id, "harbor.png", fs.readFileSync(harbor));
@@ -1869,6 +1999,43 @@ async function checkBrokenClips() {
   const joined = await stitch.stitchProject(project.id);
   assert(joined.includedShotIds.includes(badShot.id) && joined.includedShotIds.includes(goodShot.id), "include anyway puts the clip in the stitch");
   assert(!/flagged clip/.test(joined.warning || ""), "an included clip is not listed as left out");
+
+  const openingShot = storage.createShot({
+    projectId: project.id,
+    prompt: "Black opening then colour.",
+    presetId: "slow-zoom-in",
+    durationSec: 4,
+    startImagePath: still,
+  });
+  const openingJob = storage.createJob({
+    projectId: project.id,
+    shotId: openingShot.id,
+    prompt: openingShot.prompt,
+    presetId: openingShot.presetId,
+    provider: "comfyui",
+    imagePath: still,
+    modelName: info.LTX_MODEL_NAME,
+    durationSec: 4,
+    status: "running",
+  });
+  const openingOut = storage.absoluteOutputPath(project.id, `${openingJob.id}.mp4`);
+  fs.copyFileSync(opening, openingOut.abs);
+  clip.finishRenderedClip(openingJob.id, openingOut.rel);
+  const openingDone = storage.getJob(openingJob.id);
+  assert(openingDone?.status === "completed" && openingDone.clipCheck?.flagged && !openingDone.clipCheck.black, "the LTX hook stores the black opening");
+  assert(openingDone.clipCheck.blackRuns[0]?.frames === 36 && openingDone.clipCheck.blackRuns[0]?.sec === 1.5, "the stored run keeps seconds and frames");
+  assert(openingDone.clipCheck.status.includes(clip.LTX_BLACK_OPENING_NOTE), "the stored note names issue 17618");
+  const heldOpening = await stitch.stitchProject(project.id);
+  assert(!heldOpening.includedShotIds.includes(openingShot.id) && heldOpening.includedShotIds.includes(goodShot.id), "the stitch leaves the black opening out");
+  assert(/flagged clip: black opening 1\.5 s \(36 frames\)/.test(heldOpening.warning || ""), heldOpening.warning || "");
+  const packedOpening = await edit.buildEditExport(project.id);
+  const openingManifest = packedOpening.manifests.find((item) => item.shot === "SH030");
+  assert(openingManifest?.clipFlag === "black opening 1.5 s (36 frames)", openingManifest?.clipFlag || "");
+  const opened = clip.setClipIncludeAnyway(openingJob.id, true);
+  assert(opened?.clipCheck?.includeAnyway && opened.clipCheck.blackRuns[0]?.frames === 36, "include anyway keeps the run");
+  const withOpening = await stitch.stitchProject(project.id);
+  assert(withOpening.includedShotIds.includes(openingShot.id), "include anyway puts the opening in the stitch");
+  assert(!/black opening/.test(withOpening.warning || ""), "an included opening is not listed as left out");
 }
 
 function wsServerText(text: string): Buffer {

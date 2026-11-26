@@ -18,7 +18,7 @@ npm run render:shotlist -- examples/harbor-dusk.shotlist.zip
 
 That imports into a temporary project, prints a Preflight list, renders with Mock, stitches, and prints the mp4 path. No API key and no server. Preflight does not block the render. `--first` renders and stitches only the first enabled shot. `--even-colour` turns on Even out colour between shots for that run. The reference is the first included shot. The grade is overall colour and brightness only. `--smooth-fps` turns on Smooth frame rate for that run. A clip below the stitch rate is raised with ffmpeg minterpolate. The clip stays the same length. Fast motion and thin edges can warp. It is not RIFE or FILM. It does not add detail, fix a character, or regenerate motion. If the file names fal, Replicate, or ComfyUI, the command still uses Mock unless `--provider` is set and the matching environment value is present (`FAL_KEY`, `REPLICATE_API_TOKEN`, or `COMFYUI_BASE_URL`). It says so when it stays on Mock.
 
-After each clip is written, the command prints a note when the file is all black, nearly all black, or does not move, and that clip is left out of the mp4. The command then exits non-zero. `--include-flagged` puts those clips in the stitch. Mock clips are not flagged when `CI` is `true` or `1`. The thresholds are in the README. This does not promise picture quality.
+After each clip is written, the command prints a note when the file is all black, nearly all black, has a long flat-black run, or does not move, and that clip is left out of the mp4. The command then exits non-zero. `--include-flagged` puts those clips in the stitch. Mock clips are not flagged when `CI` is `true` or `1`. The thresholds are in the README. This does not promise picture quality.
 
 ## Top level
 
