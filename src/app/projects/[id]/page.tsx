@@ -1122,7 +1122,7 @@ export default function ProjectStudioPage() {
             you turn it on, raises a lower rate with ffmpeg motion interpolation instead of
             repeated frames. A music bed and an imported SRT
             can ride on that same file.             The stitch also writes a contact sheet of those shots.
-            A clip that is all black, or that does not move, is named and left out until you include it or render it again.
+            A clip that is all black, or that has a long flat-black run, or that does not move, is named and left out until you include it or render it again.
             The stitch is not a new model.
           </p>
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
