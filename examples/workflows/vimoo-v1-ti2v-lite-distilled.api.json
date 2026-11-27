@@ -1,0 +1,269 @@
+{
+  "1": {
+    "inputs": {
+      "model_name": "vimoo_v1_lite_bf16.safetensors",
+      "dtype": "bf16"
+    },
+    "class_type": "VimooModelLoader",
+    "_meta": {
+      "title": "Vimoo Model Loader"
+    }
+  },
+  "2": {
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "attention": "pytorch",
+      "compile": false
+    },
+    "class_type": "VimooPerformanceOptions",
+    "_meta": {
+      "title": "Vimoo Performance Options"
+    }
+  },
+  "3": {
+    "inputs": {
+      "task": "i2v",
+      "image": "star-dust-start.png"
+    },
+    "class_type": "VimooDistilledTI2VInput",
+    "_meta": {
+      "title": "Vimoo Lite Distilled Input"
+    }
+  },
+  "50:1": {
+    "inputs": {
+      "model": [
+        "2",
+        0
+      ],
+      "lora_name": "vimoo_v1_ti2v_distilled_lora_fp32.safetensors"
+    },
+    "class_type": "VimooDistilledLoRALoader",
+    "_meta": {
+      "title": "Vimoo Distilled LoRA Loader"
+    }
+  },
+  "50:2": {
+    "inputs": {
+      "qwen_name": "vimoo_v1_qwen2_5_vl_7b_bf16.safetensors",
+      "byt5_name": "vimoo_v1_glyph_byt5_fp32.safetensors",
+      "attention_backend": "precise",
+      "precision_profile": "lite_ti2v_anchor",
+      "model": [
+        "50:1",
+        0
+      ]
+    },
+    "class_type": "VimooTextEncoderLoader",
+    "_meta": {
+      "title": "Vimoo Text Encoder Loader"
+    }
+  },
+  "50:3": {
+    "inputs": {
+      "model": [
+        "50:1",
+        0
+      ],
+      "task": [
+        "3",
+        0
+      ],
+      "steps": 12,
+      "flow_shift": 12.0,
+      "t2v_cfg": 1.0,
+      "i2v_cfg": 1.0,
+      "t2v_rescale": 0.0,
+      "i2v_rescale": 0.0,
+      "first_frame_replace": false,
+      "recipe": "lite",
+      "full_i2v_flow_shift": 6.0
+    },
+    "class_type": "VimooTI2VSchedule",
+    "_meta": {
+      "title": "Vimoo TI2V Schedule"
+    }
+  },
+  "50:4": {
+    "inputs": {
+      "text": "One continuous five-second food shot: a freshly baked round sourdough loaf on crumpled natural linen atop a dark walnut table. The crust is deep caramel and mahogany, blistered and crackled, with one bold score opening into a crisp raised ear and a fine flour dusting. From the first frame thick ribbons of steam surge from the score, curling and rising high against the dark background, backlit by morning window light from the right. The camera descends in a smooth, low crane move and arcs about thirty degrees around the loaf while pushing in, linen folds sliding past the foreground with strong parallax, so the loaf grows from a full view to a close crust-and-steam composition, always centered. The loaf shape stays solid and unchanged. Rich natural color, crisp texture, editorial food photography realism.",
+      "clip": [
+        "50:2",
+        0
+      ],
+      "glyph_conditioning": true,
+      "max_sequence_length": 1400
+    },
+    "class_type": "VimooTextEncode",
+    "_meta": {
+      "title": "Vimoo Text Encode"
+    }
+  },
+  "50:5": {
+    "inputs": {
+      "vae_name": "vimoo_v1_wan22_ti2v_vae_fp32.safetensors",
+      "model": [
+        "50:1",
+        0
+      ]
+    },
+    "class_type": "VimooReferenceVAELoader",
+    "_meta": {
+      "title": "Vimoo Reference VAE"
+    }
+  },
+  "50:6": {
+    "inputs": {
+      "clip_name": "vimoo_v1_siglip_so400m_fp16.safetensors"
+    },
+    "class_type": "CLIPVisionLoader",
+    "_meta": {
+      "title": "Load CLIP Vision"
+    }
+  },
+  "50:7": {
+    "inputs": {
+      "task": [
+        "3",
+        0
+      ],
+      "positive": [
+        "50:4",
+        0
+      ],
+      "width": [
+        "50:11",
+        0
+      ],
+      "height": [
+        "50:11",
+        1
+      ],
+      "length": 121,
+      "first_frame_replace": [
+        "50:3",
+        3
+      ],
+      "image": [
+        "3",
+        1
+      ],
+      "vae": [
+        "50:5",
+        0
+      ],
+      "clip_vision": [
+        "50:6",
+        0
+      ],
+      "attention_backend": "precise",
+      "model": [
+        "50:1",
+        0
+      ]
+    },
+    "class_type": "VimooTI2VConditioning",
+    "_meta": {
+      "title": "Vimoo TI2V Conditioning"
+    }
+  },
+  "50:8": {
+    "inputs": {
+      "model": [
+        "50:1",
+        0
+      ],
+      "positive": [
+        "50:7",
+        0
+      ],
+      "latent_image": [
+        "50:7",
+        2
+      ],
+      "sigmas": [
+        "50:3",
+        0
+      ],
+      "cfg": 1.0,
+      "guidance_rescale": 0.0,
+      "sampler_name": "vimoo_lite_ti2v_euler",
+      "denoise": 1.0,
+      "fps": 24.0,
+      "reference_guidance_scale": 1.0,
+      "i2v_anchor_tau": 0.001
+    },
+    "class_type": "VimooLiteDistilledSampler",
+    "_meta": {
+      "title": "Vimoo Lite Distilled Sampler"
+    }
+  },
+  "50:9": {
+    "inputs": {
+      "vae_name": "vimoo_v1_wan22_ti2v_vae_fp32.safetensors",
+      "tiled_decode": true,
+      "model": [
+        "50:1",
+        0
+      ]
+    },
+    "class_type": "VimooVAELoader",
+    "_meta": {
+      "title": "Vimoo Output VAE"
+    }
+  },
+  "50:10": {
+    "inputs": {
+      "samples": [
+        "50:8",
+        0
+      ],
+      "vae": [
+        "50:9",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "50:11": {
+    "inputs": {
+      "resolution": "manual",
+      "width": 1280,
+      "height": 720,
+      "task": [
+        "3",
+        0
+      ],
+      "image": [
+        "3",
+        1
+      ]
+    },
+    "class_type": "VimooResolution",
+    "_meta": {
+      "title": "Vimoo Resolution"
+    }
+  },
+  "4": {
+    "inputs": {
+      "images": [
+        "50:10",
+        0
+      ],
+      "filename_prefix": "vimoo_v1_ti2v_lite_distilled",
+      "fps": 24.0,
+      "encoder": "auto",
+      "quality": 19
+    },
+    "class_type": "VimooSaveVideo",
+    "_meta": {
+      "title": "Vimoo Save Video"
+    }
+  }
+}

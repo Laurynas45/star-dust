@@ -1,0 +1,174 @@
+{
+  "VimooModelLoader": {
+    "input": {
+      "required": {
+        "model_name": [["vimoo_v1_lite_bf16.safetensors"], {}],
+        "dtype": [["bf16", "fp16", "fp32", "auto"], {}]
+      }
+    }
+  },
+  "VimooPerformanceOptions": {
+    "input": {
+      "required": {
+        "model": ["MODEL", {}],
+        "attention": [["pytorch", "sage"], {}],
+        "compile": ["BOOLEAN", { "default": false }]
+      }
+    }
+  },
+  "VimooDistilledTI2VInput": {
+    "input": {
+      "required": {
+        "task": [["t2v", "i2v"], {}],
+        "image": [["none", "star-dust-start.png"], { "image_upload": true, "default": "none" }]
+      }
+    }
+  },
+  "VimooDistilledLoRALoader": {
+    "input": {
+      "required": {
+        "model": ["MODEL", {}],
+        "lora_name": [["vimoo_v1_ti2v_distilled_lora_fp32.safetensors"], {}]
+      }
+    }
+  },
+  "VimooTextEncoderLoader": {
+    "input": {
+      "required": {
+        "qwen_name": [["vimoo_v1_qwen2_5_vl_7b_bf16.safetensors"], {}],
+        "byt5_name": [["vimoo_v1_glyph_byt5_fp32.safetensors"], {}]
+      },
+      "optional": {
+        "attention_backend": [["comfy", "precise"], {}],
+        "precision_profile": [["bf16_transposed_ffn", "lite_ti2v_anchor"], {}],
+        "model": ["MODEL", {}]
+      }
+    }
+  },
+  "VimooTI2VSchedule": {
+    "input": {
+      "required": {
+        "model": ["MODEL", {}],
+        "task": ["STRING", { "forceInput": true }],
+        "steps": ["INT", { "default": 12 }],
+        "flow_shift": ["FLOAT", { "default": 12.0 }],
+        "t2v_cfg": ["FLOAT", { "default": 1.0 }],
+        "i2v_cfg": ["FLOAT", { "default": 1.0 }],
+        "t2v_rescale": ["FLOAT", { "default": 0.0 }],
+        "i2v_rescale": ["FLOAT", { "default": 0.0 }],
+        "first_frame_replace": ["BOOLEAN", { "default": false }]
+      },
+      "optional": {
+        "recipe": [["lite", "full"], {}],
+        "full_i2v_flow_shift": ["FLOAT", { "default": 6.0 }]
+      }
+    }
+  },
+  "VimooTextEncode": {
+    "input": {
+      "required": {
+        "text": ["STRING", { "multiline": true }],
+        "clip": ["CLIP", {}],
+        "glyph_conditioning": ["BOOLEAN", { "default": true }]
+      },
+      "optional": {
+        "max_sequence_length": ["INT", { "default": 1000 }]
+      }
+    }
+  },
+  "VimooReferenceVAELoader": {
+    "input": {
+      "required": {
+        "vae_name": [["vimoo_v1_wan22_ti2v_vae_fp32.safetensors"], {}],
+        "model": ["MODEL", {}]
+      }
+    }
+  },
+  "CLIPVisionLoader": {
+    "input": {
+      "required": {
+        "clip_name": [["vimoo_v1_siglip_so400m_fp16.safetensors"], {}]
+      }
+    }
+  },
+  "VimooTI2VConditioning": {
+    "input": {
+      "required": {
+        "task": ["STRING", { "forceInput": true }],
+        "positive": ["CONDITIONING", {}],
+        "width": ["INT", { "default": 1280 }],
+        "height": ["INT", { "default": 720 }],
+        "length": ["INT", { "default": 121 }],
+        "first_frame_replace": ["BOOLEAN", { "default": false }]
+      },
+      "optional": {
+        "image": ["IMAGE", {}],
+        "vae": ["VAE", {}],
+        "clip_vision": ["CLIP_VISION", {}],
+        "attention_backend": [["comfy", "precise"], {}],
+        "model": ["MODEL", {}]
+      }
+    }
+  },
+  "VimooLiteDistilledSampler": {
+    "input": {
+      "required": {
+        "model": ["MODEL", {}],
+        "positive": ["CONDITIONING", {}],
+        "latent_image": ["LATENT", {}],
+        "sigmas": ["SIGMAS", {}],
+        "cfg": ["FLOAT", { "default": 1.0 }],
+        "guidance_rescale": ["FLOAT", { "default": 0.0 }],
+        "sampler_name": [["vimoo_lite_ti2v_euler"], {}],
+        "denoise": ["FLOAT", { "default": 1.0 }]
+      },
+      "optional": {
+        "fps": ["FLOAT", { "default": 24.0 }],
+        "reference_guidance_scale": ["FLOAT", { "default": 1.0 }],
+        "i2v_anchor_tau": ["FLOAT", { "default": 0.001 }]
+      }
+    }
+  },
+  "VimooVAELoader": {
+    "input": {
+      "required": {
+        "vae_name": [["vimoo_v1_wan22_ti2v_vae_fp32.safetensors"], {}],
+        "tiled_decode": ["BOOLEAN", { "default": false }],
+        "model": ["MODEL", {}]
+      }
+    }
+  },
+  "VAEDecode": {
+    "input": {
+      "required": {
+        "samples": ["LATENT", {}],
+        "vae": ["VAE", {}]
+      }
+    }
+  },
+  "VimooResolution": {
+    "input": {
+      "required": {
+        "resolution": [["auto", "manual"], {}],
+        "width": ["INT", { "default": 1280 }],
+        "height": ["INT", { "default": 720 }],
+        "task": ["STRING", { "forceInput": true }]
+      },
+      "optional": {
+        "image": ["IMAGE", { "lazy": true }]
+      }
+    }
+  },
+  "VimooSaveVideo": {
+    "input": {
+      "required": {
+        "images": ["IMAGE", {}],
+        "filename_prefix": ["STRING", { "default": "vimoo_t2v" }],
+        "fps": ["FLOAT", { "default": 24.0, "forceInput": true }],
+        "encoder": [["auto", "h264_nvenc", "libx264"], {}],
+        "quality": ["INT", { "default": 19 }]
+      }
+    },
+    "output_node": true
+  }
+}

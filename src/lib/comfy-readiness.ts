@@ -993,13 +993,30 @@ function missingNodeStep(classType: string, custom: boolean): string {
 
 const MODEL_FILE = /\.(safetensors|ckpt|pt|pth|bin|gguf|sft)$/i;
 
-const MODEL_FOLDERS: Record<string, string> = {
-  ckpt_name: CHECKPOINTS,
-  unet_name: DIFFUSION,
-  clip_name: TEXT_ENCODERS,
-  text_encoder: TEXT_ENCODERS,
-  vae_name: VAE_FOLDER,
-};
+const CLIP_VISION = "models/clip_vision";
+const UPSCALE = "models/upscale_models";
+
+/**
+ * Folder hint for a filename already written in a custom graph.
+ * The pass/fail uses the loader's /object_info list. The folder is only the
+ * next-step text. Shipped graphs do not use this; they use modelSlotsFor.
+ */
+function folderForLiteral(classType: string, input: string): string | null {
+  if (input === "ckpt_name") return CHECKPOINTS;
+  if (input === "unet_name") return DIFFUSION;
+  if (input === "vae_name") return VAE_FOLDER;
+  if (input === "text_encoder" || input === "qwen_name" || input === "byt5_name") return TEXT_ENCODERS;
+  if (input === "clip_name") return classType === "CLIPVisionLoader" ? CLIP_VISION : TEXT_ENCODERS;
+  if (input === "model_name") {
+    if (classType === "LatentUpscaleModelLoader") return LATENT_UPSCALE;
+    if (classType === "UpscaleModelLoader") return UPSCALE;
+    return DIFFUSION;
+  }
+  // --lora still checks only LoraLoaderModelOnly. The Vimoo distilled adapter is
+  // already named in the export, so the check treats that one filename as a model file.
+  if (input === "lora_name" && classType === "VimooDistilledLoRALoader") return LORA_FOLDER;
+  return null;
+}
 
 /**
  * Model filenames already written in a custom graph.
@@ -1011,8 +1028,9 @@ export function literalModelSlots(workflow: unknown): ModelSlot[] {
   for (const { node } of collectNodes(workflow)) {
     const classType = node.class_type;
     if (!classType || !node.inputs) continue;
-    for (const [input, folder] of Object.entries(MODEL_FOLDERS)) {
-      const value = node.inputs[input];
+    for (const [input, value] of Object.entries(node.inputs)) {
+      const folder = folderForLiteral(classType, input);
+      if (!folder) continue;
       if (typeof value !== "string" || !MODEL_FILE.test(value.trim())) continue;
       slots.push({
         classType,

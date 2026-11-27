@@ -3938,10 +3938,239 @@ async function checkShotBatch() {
   assert(storage.getSettings().provider === providerBefore, "batch checks do not change the studio provider");
 }
 
+async function checkVimooExample() {
+  const custom = await import("../src/lib/custom-workflow");
+  const readiness = await import("../src/lib/comfy-readiness");
+  const run = await import("../src/lib/comfy-readiness-run");
+  const sampler = await import("../src/lib/sampler");
+  const exampleDir = path.join(process.cwd(), "examples", "workflows");
+  const graph = JSON.parse(
+    fs.readFileSync(path.join(exampleDir, "vimoo-v1-ti2v-lite-distilled.api.json"), "utf8")
+  ) as Record<string, { class_type?: string; inputs?: Record<string, unknown> }>;
+  const mapping = JSON.parse(
+    fs.readFileSync(path.join(exampleDir, "vimoo-v1-ti2v-lite-distilled.map.json"), "utf8")
+  ) as Record<string, unknown>;
+  assert(!Array.isArray((graph as { nodes?: unknown }).nodes), "the Vimoo example is an API export");
+  const classes = new Set(Object.values(graph).map((node) => node.class_type));
+  for (const name of [
+    "VimooModelLoader",
+    "VimooPerformanceOptions",
+    "VimooDistilledTI2VInput",
+    "VimooDistilledLoRALoader",
+    "VimooTextEncoderLoader",
+    "VimooTI2VSchedule",
+    "VimooTextEncode",
+    "VimooReferenceVAELoader",
+    "CLIPVisionLoader",
+    "VimooTI2VConditioning",
+    "VimooLiteDistilledSampler",
+    "VimooVAELoader",
+    "VAEDecode",
+    "VimooResolution",
+    "VimooSaveVideo",
+  ]) {
+    assert(classes.has(name), `Vimoo example includes ${name}`);
+  }
+  assert(classes.size === 15, `Vimoo example class count ${classes.size}`);
+  const valid = custom.validateCustomGraph(graph, mapping);
+  assert(valid.ok, `Vimoo mapping should validate: ${valid.ok ? "" : valid.errors.join(" | ")}`);
+  if (!valid.ok) throw new Error("unreachable");
+  assert(valid.map.seed === null && valid.map.steps === null && valid.map.cfg === null, "seed, steps, and CFG stay unnamed");
+  assert(valid.map.negativePrompt === null && valid.map.endImage === null && valid.map.lowMemory === null, "no negative, end image, or low-memory cap");
+  assert(valid.map.frames?.fps === 24 && valid.map.frames.rule?.text === "4n+1", "frames use 24 fps and 4n+1");
+  assert(valid.map.frames?.min === 5 && valid.map.frames.max === 121, "frame bounds are the template length");
+  assert(custom.snapFrameCount(1, valid.map.frames!, valid.map.frames!.max) === 25, "one second becomes 25 frames");
+  assert(custom.snapFrameCount(4, valid.map.frames!, valid.map.frames!.max) === 97, "four seconds become 97 frames");
+  assert(custom.snapFrameCount(5, valid.map.frames!, valid.map.frames!.max) === 121, "five seconds become 121 frames");
+  assert(custom.snapFrameCount(10, valid.map.frames!, valid.map.frames!.max) === 121, "a longer shot stays at 121 frames");
+  const low = custom.lowMemorySummary(valid.map);
+  assert(!low.changes && /does nothing/.test(low.text), "low memory does nothing for this mapping");
+  const promptBefore = graph["50:4"]?.inputs?.text;
+  const injected = custom.injectCustomWorkflow(valid.nodes, valid.map, {
+    imageName: "harbor.png",
+    prompt: "a lantern over the water",
+    seed: 4242,
+    durationSec: 4,
+    width: 1920,
+    height: 1080,
+    lowMemory: false,
+  });
+  assert(injected["3"]?.inputs?.image === "harbor.png", "Vimoo injection writes the start image");
+  assert(injected["3"]?.inputs?.task === "i2v", "the task stays i2v");
+  assert(injected["50:4"]?.inputs?.text === "a lantern over the water", "Vimoo injection writes the prompt");
+  assert(injected["50:4"]?.inputs?.text !== promptBefore, "the template prompt is replaced");
+  assert(injected["50:4"]?.inputs?.max_sequence_length === 1400, "the text length stays 1400");
+  assert(!Object.prototype.hasOwnProperty.call(injected["50:8"]?.inputs ?? {}, "seed"), "the distilled sampler has no seed input");
+  assert(injected["50:7"]?.inputs?.length === 97, "four seconds write 97 frames");
+  assert(injected["50:11"]?.inputs?.width === 1280 && injected["50:11"]?.inputs?.height === 720, "1920x1080 fits in 1280x720");
+  assert(injected["50:11"]?.inputs?.resolution === "manual", "size is manual so the written width and height are used");
+  assert(injected["50:8"]?.inputs?.fps === 24 && injected["4"]?.inputs?.fps === 24, "fps widgets stay 24");
+  assert(injected["50:3"]?.inputs?.steps === 12 && injected["50:3"]?.inputs?.i2v_cfg === 1, "schedule steps and CFG stay at the template");
+  assert(injected["50:1"]?.inputs?.lora_name === "vimoo_v1_ti2v_distilled_lora_fp32.safetensors", "the distilled adapter stays in the export");
+  assert(injected["1"]?.inputs?.model_name === "vimoo_v1_lite_bf16.safetensors", "injection does not rewrite the checkpoint");
+  const small = custom.injectCustomWorkflow(valid.nodes, valid.map, {
+    imageName: "harbor.png",
+    prompt: "a lantern",
+    seed: 1,
+    durationSec: 4,
+    width: 640,
+    height: 480,
+    lowMemory: true,
+  });
+  assert(small["50:11"]?.inputs?.width === 640 && small["50:11"]?.inputs?.height === 480, "a still inside the box is not enlarged");
+  assert(small["50:7"]?.inputs?.length === 97, "low memory does not change the frame count");
+  const skipped = sampler.applyCustomSampler(valid.nodes, valid.map, { steps: 8, cfg: 1 });
+  assert(skipped.workflow === valid.nodes, "unnamed steps and CFG are not written");
+  assert(skipped.applied.steps == null && skipped.applied.cfg == null, "the sampler result records that nothing was written");
+  assert(
+    skipped.notes.some((note) => /Steps 8/.test(note) && /steps input/.test(note)) &&
+      skipped.notes.some((note) => /CFG 1/.test(note) && /cfg input/.test(note)),
+    "the job note names the unused step count and CFG"
+  );
+
+  const fixturePath = path.join(process.cwd(), "fixtures", "comfyui", "object-info-vimoo-lite.json");
+  const objectInfo = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Record<string, unknown>;
+  const slots = readiness.literalModelSlots(graph);
+  for (const filename of [
+    "vimoo_v1_lite_bf16.safetensors",
+    "vimoo_v1_qwen2_5_vl_7b_bf16.safetensors",
+    "vimoo_v1_glyph_byt5_fp32.safetensors",
+    "vimoo_v1_siglip_so400m_fp16.safetensors",
+    "vimoo_v1_wan22_ti2v_vae_fp32.safetensors",
+    "vimoo_v1_ti2v_distilled_lora_fp32.safetensors",
+  ]) {
+    assert(slots.some((slot) => slot.filename === filename), `literal slots include ${filename}`);
+  }
+  assert(slots.find((slot) => slot.filename.startsWith("vimoo_v1_siglip"))?.folder === "models/clip_vision", "SigLIP is a clip vision file");
+  assert(slots.find((slot) => slot.filename.startsWith("vimoo_v1_lite_bf16"))?.folder === "models/diffusion_models", "the checkpoint is a diffusion file");
+  assert(slots.find((slot) => slot.input === "lora_name")?.folder === "models/loras", "the distilled adapter is a LoRA file");
+  const ready = readiness.checkComfyReadiness(graph, objectInfo, slots, { source: "custom" });
+  assert(
+    ready.ok,
+    `Vimoo fixture should pass: ${ready.missingNodes[0]?.nextStep ?? ""} ${ready.missingModels[0]?.nextStep ?? ""} ${ready.inputBlocks[0]?.nextStep ?? ""}`
+  );
+
+  const absent = structuredClone(objectInfo);
+  for (const key of Object.keys(absent)) {
+    if (key.startsWith("Vimoo")) delete absent[key];
+  }
+  const missingNodes = readiness.checkComfyReadiness(graph, absent, readiness.literalModelSlots(graph), { source: "custom" });
+  const nodeText = missingNodes.missingNodes.map((issue) => issue.nextStep).join("\n");
+  assert(!missingNodes.ok && missingNodes.blocksQueue, "missing Vimoo nodes block the queue");
+  for (const name of ["VimooModelLoader", "VimooLiteDistilledSampler", "VimooDistilledLoRALoader", "VimooSaveVideo", "VimooTextEncoderLoader"]) {
+    assert(nodeText.includes(name), `missing-node text names ${name}`);
+  }
+  assert(/does not install nodes/.test(nodeText) && /custom graph/.test(nodeText), "the missing-node line names a custom graph and does not offer to install it");
+  assert(!/CLIPVisionLoader/.test(nodeText) && !/VAEDecode/.test(nodeText), "core nodes that the fixture lists are not missing");
+
+  const bareFiles = structuredClone(objectInfo) as Record<string, { input: { required: Record<string, unknown> } }>;
+  const empty = (classType: string, input: string) => {
+    bareFiles[classType].input.required[input] = [[], {}];
+  };
+  empty("VimooModelLoader", "model_name");
+  empty("VimooTextEncoderLoader", "qwen_name");
+  empty("VimooTextEncoderLoader", "byt5_name");
+  empty("VimooReferenceVAELoader", "vae_name");
+  empty("VimooVAELoader", "vae_name");
+  empty("CLIPVisionLoader", "clip_name");
+  empty("VimooDistilledLoRALoader", "lora_name");
+  const missingFiles = readiness.checkComfyReadiness(graph, bareFiles, readiness.literalModelSlots(graph), { source: "custom" });
+  const fileText = missingFiles.missingModels.map((issue) => issue.nextStep).join("\n");
+  assert(!missingFiles.ok && missingFiles.missingNodes.length === 0, "installed nodes with empty file lists are a model failure");
+  for (const filename of [
+    "vimoo_v1_lite_bf16.safetensors",
+    "vimoo_v1_qwen2_5_vl_7b_bf16.safetensors",
+    "vimoo_v1_glyph_byt5_fp32.safetensors",
+    "vimoo_v1_siglip_so400m_fp16.safetensors",
+    "vimoo_v1_wan22_ti2v_vae_fp32.safetensors",
+    "vimoo_v1_ti2v_distilled_lora_fp32.safetensors",
+  ]) {
+    assert(fileText.includes(filename), `missing-file text names ${filename}`);
+  }
+  assert(fileText.includes("models/diffusion_models") && fileText.includes("models/text_encoders"), "the file note names diffusion and text-encoder folders");
+  assert(fileText.includes("models/clip_vision") && fileText.includes("models/vae") && fileText.includes("models/loras"), "the file note names clip vision, VAE, and LoRA folders");
+  assert(/does not download weights/.test(fileText), "the file note does not offer a download");
+  const fileRow = readiness.workflowCheckFromReadiness("custom:vimoo-v1-ti2v-lite-distilled", missingFiles, {
+    title: "Vimoo-1.0-Lite TI2V Distilled (example)",
+    file: "data/workflows/vimoo-v1-ti2v-lite-distilled.api.json",
+  });
+  const fileTable = readiness.formatComfyCheckTable(
+    run.serverCheck({
+      reachable: true,
+      url: "http://127.0.0.1:8188",
+      source: "cli",
+      timedOut: false,
+      httpStatus: null,
+      detail: "",
+      workflows: [fileRow],
+    })
+  );
+  assert(/Result: fail/.test(fileTable) && /MISSING/.test(fileTable), "the check table fails the missing weights");
+  assert(fileTable.includes("vimoo_v1_lite_bf16.safetensors") && fileTable.includes("VimooLiteDistilledSampler") === false, "the weight table names the checkpoint");
+
+  const vimooData = fs.mkdtempSync(path.join(os.tmpdir(), "star-dust-vimoo-"));
+  const workflowDir = path.join(vimooData, "workflows");
+  fs.mkdirSync(workflowDir, { recursive: true });
+  fs.copyFileSync(path.join(exampleDir, "vimoo-v1-ti2v-lite-distilled.api.json"), path.join(workflowDir, "vimoo-v1-ti2v-lite-distilled.api.json"));
+  fs.copyFileSync(path.join(exampleDir, "vimoo-v1-ti2v-lite-distilled.map.json"), path.join(workflowDir, "vimoo-v1-ti2v-lite-distilled.map.json"));
+  let served = JSON.stringify(absent);
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/object_info") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(served);
+      return;
+    }
+    res.writeHead(404);
+    res.end("missing");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("vimoo check server has no port");
+  const url = `http://127.0.0.1:${address.port}`;
+  const tsxBin = path.join(process.cwd(), "node_modules", ".bin", "tsx");
+  const runCli = (args: string[]) =>
+    new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(tsxBin, ["scripts/comfy-check.ts", ...args], {
+        cwd: process.cwd(),
+        env: { ...process.env, STAR_DUST_DATA: vimooData },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("close", (status) => resolve({ status, stdout, stderr }));
+    });
+  try {
+    const nodeCli = await runCli(["--url", url, "--workflow", "custom:vimoo-v1-ti2v-lite-distilled"]);
+    const nodeOut = `${nodeCli.stdout}\n${nodeCli.stderr}`;
+    assert(nodeCli.status !== 0, `comfy:check should fail when Vimoo nodes are missing\n${nodeOut}`);
+    assert(/Result: fail/.test(nodeOut), "comfy:check says fail for missing Vimoo nodes");
+    assert(nodeOut.includes("VimooLiteDistilledSampler") && nodeOut.includes("VimooDistilledLoRALoader"), `comfy:check names the missing nodes\n${nodeOut}`);
+    assert(/does not install nodes/.test(nodeOut), "comfy:check does not offer to install Vimoo nodes");
+    served = JSON.stringify(bareFiles);
+    const fileCli = await runCli(["--url", url, "--workflow", "custom:vimoo-v1-ti2v-lite-distilled"]);
+    const fileOut = `${fileCli.stdout}\n${fileCli.stderr}`;
+    assert(fileCli.status !== 0, `comfy:check should fail when Vimoo weights are missing\n${fileOut}`);
+    assert(/Result: fail/.test(fileOut) && fileOut.includes("vimoo_v1_lite_bf16.safetensors"), `comfy:check names the checkpoint\n${fileOut}`);
+    assert(fileOut.includes("vimoo_v1_glyph_byt5_fp32.safetensors") && fileOut.includes("vimoo_v1_ti2v_distilled_lora_fp32.safetensors"), "comfy:check names the text encoder and the adapter");
+    assert(/does not download weights/.test(fileOut), "comfy:check does not offer to download Vimoo weights");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(vimooData, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   await checkPreflight();
   await checkComfyObjectInfo();
   await checkCustomGraphs();
+  await checkVimooExample();
   await checkBrokenClips();
   const safety = await import("../src/lib/safety");
   const storage = await import("../src/lib/storage");
