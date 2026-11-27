@@ -1,0 +1,21 @@
+{
+  "name": "Vimoo-1.0-Lite TI2V Distilled (example)",
+  "startImage": { "node": "3", "input": "image" },
+  "prompt": { "node": "50:4", "input": "text" },
+  "frames": {
+    "node": "50:7",
+    "input": "length",
+    "fps": 24,
+    "rule": "4n+1",
+    "min": 5,
+    "max": 121
+  },
+  "size": {
+    "width": { "node": "50:11", "input": "width" },
+    "height": { "node": "50:11", "input": "height" },
+    "maxWidth": 1280,
+    "maxHeight": 720,
+    "snap": 16
+  },
+  "output": { "node": "4" }
+}
